@@ -424,8 +424,11 @@ if [[ -f "package.json" ]]; then
   log "✓ Frontend compilado"
 fi
 
-# Configure Nginx
-log "[16/20] Configurando Nginx..."
+# Install and configure Nginx
+log "[16/20] Instalando y configurando Nginx..."
+apt-get install -y nginx
+systemctl enable nginx
+install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 cat > /etc/nginx/sites-available/bascula <<EOF
 server {
     listen 80 default_server;
