@@ -623,21 +623,60 @@ log "✓ Mini-web backend configurado"
 
 # Setup UI kiosk service
 log "[18/20] Configurando servicio UI kiosk..."
-install -d -m 0700 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${TARGET_HOME}/.config/openbox"
-cat > "${TARGET_HOME}/.config/openbox/autostart" <<'EOF'
+
+# Copiar .xinitrc del proyecto al home del usuario
+if [[ -f "${BASCULA_CURRENT_LINK}/.xinitrc" ]]; then
+  cp "${BASCULA_CURRENT_LINK}/.xinitrc" "${TARGET_HOME}/.xinitrc"
+  chmod +x "${TARGET_HOME}/.xinitrc"
+  chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.xinitrc"
+  log "✓ .xinitrc copiado desde el proyecto"
+else
+  warn ".xinitrc no encontrado en el proyecto, creando uno básico"
+  cat > "${TARGET_HOME}/.xinitrc" <<'EOF'
+#!/bin/sh
 xset s off
 xset -dpms
 xset s noblank
-unclutter -idle 0 &
-chromium-browser --kiosk --noerrdialogs --disable-infobars --start-fullscreen http://localhost &
+unclutter -idle 0.5 -root &
+openbox &
+sleep 2
+chromium-browser \
+  --kiosk \
+  --noerrdialogs \
+  --disable-infobars \
+  --no-first-run \
+  --enable-features=OverlayScrollbar \
+  --disable-translate \
+  --disable-features=TranslateUI \
+  --disk-cache-dir=/dev/null \
+  --overscroll-history-navigation=0 \
+  --disable-pinch \
+  --check-for-update-interval=31536000 \
+  http://localhost:80
 EOF
+  chmod +x "${TARGET_HOME}/.xinitrc"
+  chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.xinitrc"
+fi
 
-cat > /etc/systemd/system/bascula-app.service <<EOF
+# Crear servicio systemd usando el archivo del proyecto o uno por defecto
+SERVICE_FILE="${BASCULA_CURRENT_LINK}/systemd/bascula-ui.service"
+if [[ -f "${SERVICE_FILE}" ]]; then
+  # Usar el servicio del proyecto reemplazando las variables
+  sed -e "s|/home/pi|${TARGET_HOME}|g" \
+      -e "s|User=pi|User=${TARGET_USER}|g" \
+      -e "s|Group=pi|Group=${TARGET_GROUP}|g" \
+      -e "s|/home/pi/bascula-ui|${BASCULA_CURRENT_LINK}|g" \
+      "${SERVICE_FILE}" > /etc/systemd/system/bascula-app.service
+  log "✓ bascula-app.service copiado desde el proyecto"
+else
+  cat > /etc/systemd/system/bascula-app.service <<EOF
 [Unit]
-Description=Bascula UI (Xorg kiosk)
+Description=Bascula Digital Pro - UI (Xorg kiosk)
 After=network-online.target bascula-miniweb.service
 Wants=network-online.target
 Conflicts=getty@tty1.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -647,10 +686,15 @@ WorkingDirectory=${BASCULA_CURRENT_LINK}
 Environment=HOME=${TARGET_HOME}
 Environment=USER=${TARGET_USER}
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+PermissionsStartOnly=yes
+ExecStartPre=/usr/bin/install -d -m 0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula
+ExecStartPre=/usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/app.log
 ExecStartPre=/usr/bin/install -d -m 0700 -o ${TARGET_USER} -g ${TARGET_GROUP} ${TARGET_HOME}/.local/share/xorg
 ExecStart=/usr/bin/startx -- :0 vt1
 Restart=on-failure
-RestartSec=5
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
@@ -658,13 +702,8 @@ TTYVHangup=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-
-cat > "${TARGET_HOME}/.xinitrc" <<'EOF'
-#!/bin/sh
-exec openbox-session
-EOF
-chmod +x "${TARGET_HOME}/.xinitrc"
-chown -R "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.config" "${TARGET_HOME}/.xinitrc"
+  log "✓ bascula-app.service creado por defecto"
+fi
 
 systemctl daemon-reload
 systemctl disable getty@tty1.service || true
