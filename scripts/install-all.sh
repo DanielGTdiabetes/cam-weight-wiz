@@ -130,10 +130,14 @@ else
   # El usuario puede habilitar más hardware después del primer arranque exitoso
   cat >> "${CONF}" <<'EOF'
 # --- Bascula-Cam: Hardware Configuration ---
-# HDMI básico
+# HDMI básico + modo seguro 1024x600
 hdmi_force_hotplug=1
 dtoverlay=vc4-kms-v3d
 disable_overscan=1
+# Forzar modo 1024x600@60 (útil para pantallas 7" sin EDID)
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt=1024 600 60 3 0 0 0
 
 # I2C
 dtparam=i2c_arm=on
@@ -145,10 +149,10 @@ dtoverlay=disable-bt
 # Configuración avanzada opcional (comentado por seguridad):
 # Descomentar solo si tienes el hardware conectado y verificado
 
-# HDMI Personalizado 1024x600 (descomentar para pantalla 7")
+# HDMI Personalizado alternativo
 #hdmi_group=2
 #hdmi_mode=87
-#hdmi_cvt=1024 600 60 3 0 0 0
+#hdmi_cvt=800 480 60 6 0 0 0  # ejemplo para 800x480
 
 # Audio I2S - HifiBerry DAC / MAX98357A (descomentar si tienes DAC I2S)
 #dtparam=audio=off
@@ -706,7 +710,7 @@ Group=${TARGET_GROUP}
 WorkingDirectory=${BASCULA_CURRENT_LINK}
 Environment=HOME=${TARGET_HOME}
 Environment=USER=${TARGET_USER}
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u ${TARGET_USER})
 PermissionsStartOnly=yes
 ExecStartPre=/usr/bin/install -d -m 0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula
 ExecStartPre=/usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/app.log

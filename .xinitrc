@@ -16,7 +16,7 @@ openbox &
 sleep 2
 
 # Lanzar Chromium en modo kiosk
-chromium-browser \
+chromium \
   --kiosk \
   --noerrdialogs \
   --disable-infobars \
