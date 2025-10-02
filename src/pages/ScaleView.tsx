@@ -3,43 +3,75 @@ import { Scale, Zap, Droplets } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
+import { api } from "@/services/api";
+import { useToast } from "@/hooks/use-toast";
 
 interface ScaleViewProps {
   onNavigate: (view: string) => void;
 }
 
 export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
-  const [weight, setWeight] = useState(0);
-  const [isStable, setIsStable] = useState(false);
-  const [unit, setUnit] = useState<"g" | "ml">("g");
+  const { weight, isStable, unit, isConnected, error } = useScaleWebSocket();
+  const [displayUnit, setDisplayUnit] = useState<"g" | "ml">("g");
+  const { toast } = useToast();
 
-  // Simulate weight from ESP32
   useEffect(() => {
-    // TODO: Connect to WebSocket or API from Python backend
-    const interval = setInterval(() => {
-      const random = Math.random();
-      setWeight(120 + (random * 10) - 5);
-      setIsStable(random > 0.5);
-    }, 2000);
-    return () => clearInterval(interval);
-  }, []);
+    if (error) {
+      toast({
+        title: "Error de conexión",
+        description: error,
+        variant: "destructive",
+      });
+    }
+  }, [error, toast]);
 
-  const handleTare = () => {
-    // TODO: Send tare command to backend
-    console.log("Tara");
+  const handleTare = async () => {
+    try {
+      await api.scaleTare();
+      toast({ title: "Tara realizada" });
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: "No se pudo realizar la tara",
+        variant: "destructive",
+      });
+    }
   };
 
-  const handleZero = () => {
-    // TODO: Send zero command to backend
-    console.log("Zero");
+  const handleZero = async () => {
+    try {
+      await api.scaleZero();
+      toast({ title: "Zero realizado" });
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: "No se pudo realizar el zero",
+        variant: "destructive",
+      });
+    }
   };
 
   const toggleUnit = () => {
-    setUnit(prev => prev === "g" ? "ml" : "g");
+    setDisplayUnit(prev => prev === "g" ? "ml" : "g");
   };
 
+  // Display weight in selected unit
+  const displayWeight = displayUnit === "ml" && unit === "g" 
+    ? weight // Simple 1:1 conversion for water, can be improved
+    : weight;
+
   return (
-    <div className="flex h-screen flex-col bg-background p-4">
+    <div className="flex h-full flex-col bg-background p-4">
+      {/* Connection Status */}
+      {!isConnected && (
+        <div className="mb-4 rounded-lg border-warning/50 bg-warning/10 p-3 text-center">
+          <p className="text-sm font-medium text-warning">
+            Conectando con la báscula...
+          </p>
+        </div>
+      )}
+
       {/* Weight Display - Pantalla grande y clara */}
       <Card className={cn(
         "relative mb-6 flex-1 overflow-hidden transition-smooth",
@@ -61,7 +93,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
             "mb-4 text-9xl font-bold tracking-tight transition-smooth",
             isStable ? "text-success text-glow-green" : "text-primary text-glow-cyan"
           )}>
-            {weight.toFixed(1)}
+            {displayWeight.toFixed(1)}
           </div>
           
           <Button
@@ -70,7 +102,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
             size="xl"
             className="text-3xl"
           >
-            {unit}
+            {displayUnit}
           </Button>
           
           <div className={cn(
@@ -93,6 +125,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
           size="xl"
           variant="outline"
           className="h-24 text-2xl"
+          disabled={!isConnected}
         >
           <Zap className="mr-2 h-8 w-8" />
           TARA
@@ -103,6 +136,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
           size="xl"
           variant="outline"
           className="h-24 text-2xl"
+          disabled={!isConnected}
         >
           <Scale className="mr-2 h-8 w-8" />
           ZERO

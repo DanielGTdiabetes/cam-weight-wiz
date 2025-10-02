@@ -1,11 +1,17 @@
 import { useState } from "react";
 import { MainMenu } from "@/components/MainMenu";
 import { ScaleView } from "@/pages/ScaleView";
+import { FoodScannerView } from "@/pages/FoodScannerView";
+import { TimerFullView } from "@/pages/TimerFullView";
+import { RecipesView } from "@/pages/RecipesView";
+import { SettingsView } from "@/pages/SettingsView";
 import { TopBar } from "@/components/TopBar";
 import { NotificationBar } from "@/components/NotificationBar";
 import { TimerDialog } from "@/components/TimerDialog";
-import { Clock } from "lucide-react";
+import { Clock, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
+import { api } from "@/services/api";
 
 const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
@@ -13,10 +19,25 @@ const Index = () => {
   const [timerSeconds, setTimerSeconds] = useState<number | undefined>(undefined);
   const [notification, setNotification] = useState<string>("");
   const [isVoiceActive, setIsVoiceActive] = useState(false);
+  const [diabetesMode, setDiabetesMode] = useState(false);
 
-  const handleTimerStart = (seconds: number) => {
+  // Monitor glucose if diabetes mode is enabled
+  const glucoseData = useGlucoseMonitor(diabetesMode);
+
+  const handleTimerStart = async (seconds: number) => {
     setTimerSeconds(seconds);
-    // TODO: Start countdown
+    setShowTimerDialog(false);
+    
+    try {
+      await api.startTimer(seconds);
+    } catch (err) {
+      console.error("Failed to start timer:", err);
+    }
+  };
+
+  const handleBackToMenu = () => {
+    setCurrentView("menu");
+    setTimerSeconds(undefined);
   };
 
   const renderView = () => {
@@ -26,44 +47,30 @@ const Index = () => {
       case "scale":
         return <ScaleView onNavigate={setCurrentView} />;
       case "scanner":
-        return (
-          <div className="flex h-screen items-center justify-center">
-            <div className="text-center">
-              <h1 className="mb-4 text-4xl font-bold">Escáner de Alimentos</h1>
-              <p className="text-muted-foreground">Próximamente...</p>
-            </div>
-          </div>
-        );
+        return <FoodScannerView />;
       case "timer":
+        return <TimerFullView />;
       case "recipes":
+        return <RecipesView />;
       case "settings":
-        return (
-          <div className="flex h-screen items-center justify-center">
-            <div className="text-center">
-              <h1 className="mb-4 text-4xl font-bold">
-                {currentView === "timer" && "Temporizador"}
-                {currentView === "recipes" && "Recetas"}
-                {currentView === "settings" && "Ajustes"}
-              </h1>
-              <p className="text-muted-foreground">Próximamente...</p>
-            </div>
-          </div>
-        );
+        return <SettingsView />;
       default:
         return <MainMenu onNavigate={setCurrentView} />;
     }
   };
 
+  const showTopBar = currentView !== "menu" && currentView !== "timer" && currentView !== "recipes";
+
   return (
     <div className="h-screen overflow-hidden bg-background">
-      {/* Top Bar - Only show in scale/scanner views */}
-      {currentView !== "menu" && (
+      {/* Top Bar - Show in most views except menu, timer, recipes */}
+      {showTopBar && (
         <>
           <TopBar
             isVoiceActive={isVoiceActive}
             isWifiConnected={true}
-            glucose={120}
-            glucoseTrend="stable"
+            glucose={glucoseData?.glucose}
+            glucoseTrend={glucoseData?.trend}
             timerSeconds={timerSeconds}
             onSettingsClick={() => setCurrentView("settings")}
             onTimerClick={() => setShowTimerDialog(true)}
@@ -78,12 +85,24 @@ const Index = () => {
       )}
 
       {/* Main Content */}
-      <div className={currentView !== "menu" ? "h-[calc(100vh-60px)]" : "h-screen"}>
+      <div className={showTopBar ? "h-[calc(100vh-60px)] overflow-y-auto" : "h-screen"}>
         {renderView()}
       </div>
 
-      {/* Floating Timer Button - Only show in scale view */}
-      {currentView === "scale" && !timerSeconds && (
+      {/* Back to Menu Button - Show in all views except menu */}
+      {currentView !== "menu" && (
+        <Button
+          onClick={handleBackToMenu}
+          size="icon"
+          variant="outline"
+          className="fixed bottom-6 left-6 h-16 w-16 rounded-full"
+        >
+          <ArrowLeft className="h-8 w-8" />
+        </Button>
+      )}
+
+      {/* Floating Timer Button - Only show in scale and scanner views */}
+      {(currentView === "scale" || currentView === "scanner") && !timerSeconds && (
         <Button
           onClick={() => setShowTimerDialog(true)}
           size="icon"
