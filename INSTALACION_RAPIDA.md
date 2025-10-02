@@ -298,6 +298,60 @@ sudo raspi-config
 # Ir a: Interface Options > I2C > Enable
 ```
 
+### Configurar UART para ESP32 (Báscula)
+
+```bash
+# Habilitar UART y deshabilitar console serial
+sudo raspi-config
+# Ir a: Interface Options > Serial Port
+# "Would you like a login shell accessible over serial?" -> NO
+# "Would you like the serial port hardware to be enabled?" -> YES
+
+# O editar directamente config.txt
+sudo nano /boot/firmware/config.txt
+
+# Agregar al final:
+enable_uart=1
+dtoverlay=disable-bt
+
+# Guardar y salir
+
+# Liberar UART de Bluetooth (opcional, mejora estabilidad)
+sudo systemctl disable hciuart
+
+# Agregar usuario a grupo dialout (permisos serial)
+sudo usermod -a -G dialout pi
+
+# Reiniciar
+sudo reboot
+```
+
+**Verificar comunicación con ESP32:**
+
+```bash
+# Listar puertos seriales disponibles
+ls -l /dev/serial*
+ls -l /dev/ttyAMA* /dev/ttyS*
+
+# Probar comunicación (con minicom o screen)
+sudo apt install -y minicom
+minicom -b 115200 -o -D /dev/serial0
+
+# O con Python
+python3 << EOF
+import serial
+ser = serial.Serial('/dev/serial0', 115200, timeout=1)
+print(f"Puerto abierto: {ser.is_open}")
+ser.close()
+EOF
+```
+
+**Pines UART en Raspberry Pi 5:**
+- **GPIO 14 (Pin 8)** - TX (transmit) → conectar a RX del ESP32
+- **GPIO 15 (Pin 10)** - RX (receive) → conectar a TX del ESP32
+- **GND** - Conectar a GND del ESP32
+- **3.3V o 5V** - Alimentación del ESP32 (según modelo)
+
 ## 🌐 Configuración de Red
 
 ### WiFi Estático (Opcional)
