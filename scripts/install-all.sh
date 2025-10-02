@@ -190,6 +190,27 @@ echo "xserver-xorg-legacy xserver-xorg-legacy/allowed_users select Anybody" | de
 DEBIAN_FRONTEND=noninteractive dpkg-reconfigure xserver-xorg-legacy || true
 log "✓ Xwrapper configurado"
 
+# Configure Xorg to use KMS/modesetting instead of fbdev
+log "[8b/20] Configurando Xorg para KMS (modesetting driver)..."
+# Remove fbdev driver if installed to prevent framebuffer mode
+apt-get purge -y xserver-xorg-video-fbdev 2>/dev/null || true
+apt-get autoremove -y || true
+
+# Remove any fbdev config files
+rm -f /usr/share/X11/xorg.conf.d/*fbdev*.conf /etc/X11/xorg.conf.d/*fbdev*.conf 2>/dev/null || true
+
+# Force modesetting driver (KMS/DRM) for Raspberry Pi 5
+install -d -m 0755 /etc/X11/xorg.conf.d
+cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
+Section "Device"
+  Identifier "Modesetting"
+  Driver "modesetting"
+  Option "AccelMethod" "glamor"
+EndSection
+EOF
+
+log "✓ Xorg configurado para KMS (modesetting)"
+
 # Configure Polkit rules
 log "[9/20] Configurando Polkit..."
 install -d -m 0755 /etc/polkit-1/rules.d
