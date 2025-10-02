@@ -1,7 +1,12 @@
-import { Syringe, Clock, AlertCircle } from "lucide-react";
+import { useState } from "react";
+import { Syringe, Clock, AlertCircle, Send } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { storage } from "@/services/storage";
+import { api } from "@/services/api";
+import { useToast } from "@/hooks/use-toast";
+import { logger } from "@/services/logger";
 
 interface BolusCalculatorProps {
   totalCarbs: number;
@@ -10,10 +15,14 @@ interface BolusCalculatorProps {
 }
 
 export const BolusCalculator = ({ totalCarbs, currentGlucose, onClose }: BolusCalculatorProps) => {
-  // Simplified bolus calculation (should use real user settings)
-  const carbRatio = 10; // 1U per 10g carbs
-  const correctionFactor = 30; // 1U per 30mg/dl above target
-  const targetGlucose = 100;
+  const { toast } = useToast();
+  const [isExporting, setIsExporting] = useState(false);
+  
+  // Get user settings from storage
+  const settings = storage.getSettings();
+  const carbRatio = settings.carbRatio || 10;
+  const correctionFactor = settings.correctionFactor || 30;
+  const targetGlucose = settings.targetGlucose || 100;
 
   const carbsInsulin = totalCarbs / carbRatio;
   const correctionInsulin = currentGlucose 
@@ -27,6 +36,56 @@ export const BolusCalculator = ({ totalCarbs, currentGlucose, onClose }: BolusCa
       return "Inyectar 15 minutos ANTES de comer";
     }
     return "Inyectar JUSTO ANTES de comer";
+  };
+
+  const handleExportToNightscout = async () => {
+    // Check if Nightscout is configured
+    if (!settings.nightscoutUrl) {
+      toast({
+        title: "Nightscout no configurado",
+        description: "Configura Nightscout en Ajustes → Diabetes",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsExporting(true);
+    try {
+      const timestamp = new Date().toISOString();
+      
+      await api.exportBolus(
+        totalCarbs,
+        totalInsulin,
+        timestamp
+      );
+
+      logger.info("Bolus exported to Nightscout", {
+        carbs: totalCarbs,
+        insulin: totalInsulin,
+        glucose: currentGlucose,
+      });
+
+      toast({
+        title: "¡Exportado a Nightscout!",
+        description: `${totalCarbs}g HC → ${totalInsulin.toFixed(1)}U insulina`,
+      });
+
+      // Haptic feedback
+      if (navigator.vibrate) {
+        navigator.vibrate([50, 100, 50]);
+      }
+
+      onClose();
+    } catch (error) {
+      logger.error("Failed to export to Nightscout", { error });
+      toast({
+        title: "Error al exportar",
+        description: "Verifica la configuración de Nightscout",
+        variant: "destructive",
+      });
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   return (
@@ -108,15 +167,20 @@ export const BolusCalculator = ({ totalCarbs, currentGlucose, onClose }: BolusCa
             Cerrar
           </Button>
           <Button
-            onClick={() => {
-              // TODO: Export to Nightscout
-              onClose();
-            }}
+            onClick={handleExportToNightscout}
             variant="success"
             size="xl"
             className="text-xl"
+            disabled={isExporting}
           >
-            Exportar a Nightscout
+            {isExporting ? (
+              "Exportando..."
+            ) : (
+              <>
+                <Send className="mr-2 h-6 w-6" />
+                Exportar a Nightscout
+              </>
+            )}
           </Button>
         </div>
       </Card>

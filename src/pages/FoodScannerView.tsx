@@ -1,9 +1,14 @@
 import { useState } from "react";
-import { Camera, Plus, Trash2, Check, X, Barcode } from "lucide-react";
+import { Camera, Plus, Trash2, Check, X, Barcode, Syringe } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { BolusCalculator } from "@/components/BolusCalculator";
+import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
+import { storage } from "@/services/storage";
+import { logger } from "@/services/logger";
+import { api } from "@/services/api";
 
 interface FoodItem {
   id: string;
@@ -16,11 +21,17 @@ interface FoodItem {
 }
 
 export const FoodScannerView = () => {
-  const [weight, setWeight] = useState(0);
+  const { weight: scaleWeight } = useScaleWebSocket();
   const [isScanning, setIsScanning] = useState(false);
   const [foods, setFoods] = useState<FoodItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showBolusCalculator, setShowBolusCalculator] = useState(false);
+  const [currentGlucose, setCurrentGlucose] = useState<number | undefined>();
   const { toast } = useToast();
+  
+  // Check if diabetes mode is active
+  const settings = storage.getSettings();
+  const isDiabetesMode = settings.diabetesMode;
 
   const totals = foods.reduce(
     (acc, food) => ({
@@ -33,25 +44,67 @@ export const FoodScannerView = () => {
   );
 
   const handleScan = async () => {
+    if (scaleWeight === 0) {
+      toast({
+        title: "Coloca el alimento",
+        description: "La báscula no detecta peso",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsScanning(true);
-    // TODO: Connect to backend camera + ChatGPT/AI
-    setTimeout(() => {
+    
+    try {
+      // TODO: Connect to backend camera + AI for real food recognition
+      // For now, simulate AI analysis
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Simulated AI response
+      const foodNames = [
+        "Manzana Roja", "Plátano", "Pan Blanco", "Arroz Blanco",
+        "Pasta", "Pollo", "Salmón", "Brócoli", "Tomate", "Lechuga"
+      ];
+      const randomFood = foodNames[Math.floor(Math.random() * foodNames.length)];
+      
       const newFood: FoodItem = {
         id: Date.now().toString(),
-        name: "Manzana Roja",
-        weight: weight || 150,
-        carbs: 21,
-        proteins: 0.5,
-        fats: 0.3,
-        glycemicIndex: 38,
+        name: randomFood,
+        weight: scaleWeight,
+        // Simulated nutritional values based on weight
+        carbs: Math.round((scaleWeight / 100) * 15),
+        proteins: Math.round((scaleWeight / 100) * 3),
+        fats: Math.round((scaleWeight / 100) * 0.5),
+        glycemicIndex: Math.floor(Math.random() * 40) + 30,
       };
+      
       setFoods([...foods, newFood]);
-      setIsScanning(false);
+      
+      logger.info("Food added to scanner", {
+        name: newFood.name,
+        weight: newFood.weight,
+        carbs: newFood.carbs,
+      });
+      
       toast({
         title: "Alimento añadido",
         description: `${newFood.name} - ${newFood.weight}g`,
       });
-    }, 2000);
+
+      // Haptic feedback
+      if (navigator.vibrate) {
+        navigator.vibrate(30);
+      }
+    } catch (error) {
+      logger.error("Failed to scan food", { error });
+      toast({
+        title: "Error al escanear",
+        description: "Intenta de nuevo",
+        variant: "destructive",
+      });
+    } finally {
+      setIsScanning(false);
+    }
   };
 
   const handleScanBarcode = () => {
@@ -67,13 +120,39 @@ export const FoodScannerView = () => {
     toast({ title: "Alimento eliminado" });
   };
 
-  const handleFinish = () => {
+  const handleFinish = async () => {
+    logger.info("Food analysis completed", {
+      totalWeight: totals.weight,
+      totalCarbs: totals.carbs,
+      totalProteins: totals.proteins,
+      totalFats: totals.fats,
+      itemCount: foods.length,
+    });
+
     toast({
       title: "Análisis completado",
       description: `Total: ${totals.carbs.toFixed(1)}g HC, ${totals.proteins.toFixed(1)}g Proteínas, ${totals.fats.toFixed(1)}g Grasas`,
       duration: 5000,
     });
-    // TODO: Calcular bolo si está activo
+
+    // Show bolus calculator if diabetes mode is active and there are carbs
+    if (isDiabetesMode && totals.carbs > 0) {
+      // Try to get current glucose from API
+      try {
+        const glucoseData = await api.getGlucose();
+        setCurrentGlucose(glucoseData.glucose);
+      } catch {
+        // If can't get glucose, continue without it
+        logger.debug("Could not fetch current glucose for bolus calculator");
+      }
+      
+      setShowBolusCalculator(true);
+    }
+
+    // Haptic feedback
+    if (navigator.vibrate) {
+      navigator.vibrate([50, 100, 50]);
+    }
   };
 
   return (
@@ -90,7 +169,7 @@ export const FoodScannerView = () => {
             <div className="text-center text-muted-foreground">
               <Camera className="mx-auto mb-4 h-16 w-16" />
               <p className="text-lg">Posiciona el alimento</p>
-              <p className="text-5xl font-bold text-primary">{weight.toFixed(0)}g</p>
+              <p className="text-5xl font-bold text-primary">{scaleWeight.toFixed(0)}g</p>
             </div>
           )}
         </div>
@@ -100,13 +179,13 @@ export const FoodScannerView = () => {
       <div className="grid grid-cols-2 gap-3">
         <Button
           onClick={handleScan}
-          disabled={isScanning || weight === 0}
+          disabled={isScanning || scaleWeight === 0}
           size="xl"
           variant="glow"
           className="h-20 text-xl"
         >
           <Plus className="mr-2 h-6 w-6" />
-          Añadir Alimento
+          {isScanning ? "Analizando..." : "Añadir Alimento"}
         </Button>
         <Button
           onClick={handleScanBarcode}
@@ -204,17 +283,64 @@ export const FoodScannerView = () => {
                 <p className="text-2xl font-bold text-success">{totals.fats.toFixed(1)}g</p>
               </div>
             </div>
-            <Button
-              onClick={handleFinish}
-              variant="success"
-              size="xl"
-              className="w-full text-xl"
-            >
-              <Check className="mr-2 h-6 w-6" />
-              Finalizar Análisis
-            </Button>
+            <div className="grid grid-cols-2 gap-3">
+              <Button
+                onClick={() => {
+                  setFoods([]);
+                  setSelectedId(null);
+                  toast({ title: "Lista limpiada" });
+                }}
+                variant="outline"
+                size="xl"
+                className="text-xl"
+              >
+                <X className="mr-2 h-6 w-6" />
+                Limpiar
+              </Button>
+              <Button
+                onClick={handleFinish}
+                variant="success"
+                size="xl"
+                className="text-xl"
+              >
+                <Check className="mr-2 h-6 w-6" />
+                Finalizar
+              </Button>
+            </div>
+            {isDiabetesMode && totals.carbs > 0 && (
+              <Button
+                onClick={async () => {
+                  try {
+                    const glucoseData = await api.getGlucose();
+                    setCurrentGlucose(glucoseData.glucose);
+                  } catch {
+                    // Continue without glucose
+                  }
+                  setShowBolusCalculator(true);
+                }}
+                variant="glow"
+                size="xl"
+                className="w-full text-xl mt-3"
+              >
+                <Syringe className="mr-2 h-6 w-6" />
+                Calcular Bolo de Insulina
+              </Button>
+            )}
           </div>
         </Card>
+      )}
+
+      {/* Bolus Calculator Dialog */}
+      {showBolusCalculator && (
+        <BolusCalculator
+          totalCarbs={totals.carbs}
+          currentGlucose={currentGlucose}
+          onClose={() => {
+            setShowBolusCalculator(false);
+            // Optionally clear the list after calculating bolus
+            setFoods([]);
+          }}
+        />
       )}
     </div>
   );
