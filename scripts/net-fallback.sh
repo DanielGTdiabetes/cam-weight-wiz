@@ -10,8 +10,8 @@ set -euo pipefail
 log() { logger -t bascula-net-fallback "$*"; }
 
 # Configuración
-AP_SSID="${AP_SSID:-Bascula_AP}"
-AP_PASS="${AP_PASS:-bascula1234}"
+AP_SSID="${AP_SSID:-Bascula-AP}"
+AP_PASS="${AP_PASS:-bascula2025}"
 AP_IFACE="${AP_IFACE:-wlan0}"
 AP_NAME="${AP_NAME:-BasculaAP}"
 
