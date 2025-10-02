@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { api, type GlucoseData } from "@/services/api";
+import { ApiError } from "@/services/apiWrapper";
+import { storage } from "@/services/storage";
+import { logger } from "@/services/logger";
 import { useToast } from "@/hooks/use-toast";
 
 interface UseGlucoseMonitorReturn extends GlucoseData {
@@ -18,7 +21,14 @@ export const useGlucoseMonitor = (
   const { toast } = useToast();
 
   useEffect(() => {
-    if (!enabled) return;
+    // Check if Nightscout is configured
+    const settings = storage.getSettings();
+    const isConfigured = !!settings.nightscoutUrl;
+    
+    if (!enabled || !isConfigured) {
+      logger.debug('Glucose monitor disabled', { enabled, isConfigured });
+      return;
+    }
 
     const fetchGlucose = async () => {
       try {
@@ -26,6 +36,7 @@ export const useGlucoseMonitor = (
         const glucoseData = await api.getGlucose();
         setData(glucoseData);
         setError(null);
+        logger.info('Glucose data fetched', { glucose: glucoseData.glucose });
 
         // Check for alarms
         if (glucoseData.glucose < lowThreshold) {
@@ -44,7 +55,13 @@ export const useGlucoseMonitor = (
           });
         }
       } catch (err) {
-        console.error("Failed to fetch glucose:", err);
+        if (err instanceof ApiError && err.code === 'NOT_CONFIGURED') {
+          // Silent fail if not configured
+          logger.debug('Nightscout not configured');
+          return;
+        }
+        
+        logger.error('Failed to fetch glucose', { error: err });
         setError("Error al obtener datos de glucosa");
       } finally {
         setIsLoading(false);

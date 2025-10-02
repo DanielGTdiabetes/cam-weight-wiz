@@ -1,6 +1,7 @@
 // API Service for FastAPI Backend Integration
-
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8080";
+import { apiWrapper, ApiError } from './apiWrapper';
+import { storage } from './storage';
+import { logger } from './logger';
 
 export interface WeightData {
   weight: number;
@@ -26,79 +27,67 @@ export interface GlucoseData {
 }
 
 class ApiService {
+  constructor() {
+    // Update API base URL from settings
+    const settings = storage.getSettings();
+    apiWrapper.updateBaseUrl(settings.apiUrl);
+  }
+
   // Scale endpoints
   async scaleTare(): Promise<void> {
-    const response = await fetch(`${API_URL}/api/scale/tare`, {
-      method: "POST",
-    });
-    if (!response.ok) throw new Error("Failed to tare scale");
+    await apiWrapper.post('/api/scale/tare');
   }
 
   async scaleZero(): Promise<void> {
-    const response = await fetch(`${API_URL}/api/scale/zero`, {
-      method: "POST",
-    });
-    if (!response.ok) throw new Error("Failed to zero scale");
+    await apiWrapper.post('/api/scale/zero');
   }
 
   async setCalibrationFactor(factor: number): Promise<void> {
-    const response = await fetch(`${API_URL}/api/scale/calibrate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ factor }),
-    });
-    if (!response.ok) throw new Error("Failed to set calibration");
+    await apiWrapper.post('/api/scale/calibrate', { factor });
   }
 
   // Food scanner endpoints
   async analyzeFood(imageBlob: Blob, weight: number): Promise<FoodAnalysis> {
+    // FormData needs special handling, use native fetch
+    const settings = storage.getSettings();
     const formData = new FormData();
     formData.append("image", imageBlob);
     formData.append("weight", weight.toString());
 
-    const response = await fetch(`${API_URL}/api/scanner/analyze`, {
+    const response = await fetch(`${settings.apiUrl}/api/scanner/analyze`, {
       method: "POST",
       body: formData,
     });
 
-    if (!response.ok) throw new Error("Failed to analyze food");
+    if (!response.ok) throw new ApiError("Failed to analyze food");
     return response.json();
   }
 
   async scanBarcode(barcode: string): Promise<FoodAnalysis> {
-    const response = await fetch(`${API_URL}/api/scanner/barcode/${barcode}`);
-    if (!response.ok) throw new Error("Failed to scan barcode");
-    return response.json();
+    return apiWrapper.get<FoodAnalysis>(`/api/scanner/barcode/${barcode}`);
   }
 
   // Timer endpoints
   async startTimer(seconds: number): Promise<void> {
-    const response = await fetch(`${API_URL}/api/timer/start`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ seconds }),
-    });
-    if (!response.ok) throw new Error("Failed to start timer");
+    await apiWrapper.post('/api/timer/start', { seconds });
   }
 
   async stopTimer(): Promise<void> {
-    const response = await fetch(`${API_URL}/api/timer/stop`, {
-      method: "POST",
-    });
-    if (!response.ok) throw new Error("Failed to stop timer");
+    await apiWrapper.post('/api/timer/stop');
   }
 
   async getTimerStatus(): Promise<{ running: boolean; remaining: number }> {
-    const response = await fetch(`${API_URL}/api/timer/status`);
-    if (!response.ok) throw new Error("Failed to get timer status");
-    return response.json();
+    return apiWrapper.get<{ running: boolean; remaining: number }>('/api/timer/status');
   }
 
   // Nightscout endpoints
   async getGlucose(): Promise<GlucoseData> {
-    const response = await fetch(`${API_URL}/api/nightscout/glucose`);
-    if (!response.ok) throw new Error("Failed to get glucose data");
-    return response.json();
+    // Check if Nightscout is configured
+    const settings = storage.getSettings();
+    if (!settings.nightscoutUrl) {
+      throw new ApiError('Nightscout no configurado', 0, 'NOT_CONFIGURED');
+    }
+    return apiWrapper.get<GlucoseData>('/api/nightscout/glucose');
   }
 
   async exportBolus(
@@ -106,76 +95,45 @@ class ApiService {
     insulin: number,
     timestamp: string
   ): Promise<void> {
-    const response = await fetch(`${API_URL}/api/nightscout/bolus`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ carbs, insulin, timestamp }),
-    });
-    if (!response.ok) throw new Error("Failed to export to Nightscout");
+    await apiWrapper.post('/api/nightscout/bolus', { carbs, insulin, timestamp });
   }
 
   // Voice/TTS endpoints
   async speak(text: string, voice?: string): Promise<void> {
-    const response = await fetch(`${API_URL}/api/voice/speak`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice }),
-    });
-    if (!response.ok) throw new Error("Failed to speak");
+    await apiWrapper.post('/api/voice/speak', { text, voice });
   }
 
   // Recipe endpoints
   async getRecipe(prompt: string): Promise<{ steps: string[] }> {
-    const response = await fetch(`${API_URL}/api/recipes/generate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt }),
-    });
-    if (!response.ok) throw new Error("Failed to get recipe");
-    return response.json();
+    return apiWrapper.post<{ steps: string[] }>('/api/recipes/generate', { prompt });
   }
 
   async nextRecipeStep(
     currentStep: number,
     userResponse?: string
   ): Promise<{ step: string; needsScale: boolean }> {
-    const response = await fetch(`${API_URL}/api/recipes/next`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ currentStep, userResponse }),
-    });
-    if (!response.ok) throw new Error("Failed to get next step");
-    return response.json();
+    return apiWrapper.post<{ step: string; needsScale: boolean }>(
+      '/api/recipes/next',
+      { currentStep, userResponse }
+    );
   }
 
   // Settings endpoints
   async getSettings(): Promise<Record<string, any>> {
-    const response = await fetch(`${API_URL}/api/settings`);
-    if (!response.ok) throw new Error("Failed to get settings");
-    return response.json();
+    return apiWrapper.get<Record<string, any>>('/api/settings');
   }
 
   async updateSettings(settings: Record<string, any>): Promise<void> {
-    const response = await fetch(`${API_URL}/api/settings`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(settings),
-    });
-    if (!response.ok) throw new Error("Failed to update settings");
+    await apiWrapper.put('/api/settings', settings);
   }
 
   // OTA Updates
   async checkUpdates(): Promise<{ available: boolean; version?: string }> {
-    const response = await fetch(`${API_URL}/api/updates/check`);
-    if (!response.ok) throw new Error("Failed to check updates");
-    return response.json();
+    return apiWrapper.get<{ available: boolean; version?: string }>('/api/updates/check');
   }
 
   async installUpdate(): Promise<void> {
-    const response = await fetch(`${API_URL}/api/updates/install`, {
-      method: "POST",
-    });
-    if (!response.ok) throw new Error("Failed to install update");
+    await apiWrapper.post('/api/updates/install');
   }
 }
 

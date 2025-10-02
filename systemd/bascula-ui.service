@@ -1,0 +1,16 @@
+[Unit]
+Description=Bascula UI - Chromium Kiosk Mode
+After=graphical.target
+
+[Service]
+Type=simple
+User=pi
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/pi/.Xauthority
+ExecStartPre=/bin/sleep 5
+ExecStart=/home/pi/bascula-ui/scripts/start-kiosk.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=graphical.target

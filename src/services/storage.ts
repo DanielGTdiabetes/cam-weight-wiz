@@ -1,7 +1,10 @@
 /**
- * Local Storage Service
+ * Local Storage Service with Versioning
  * Maneja la persistencia de configuraciones y datos locales
  */
+
+const STORAGE_VERSION = 2;
+const VERSION_KEY = 'storage_version';
 
 export interface AppSettings {
   // Scale settings
@@ -62,7 +65,61 @@ const DEFAULT_SETTINGS: AppSettings = {
   theme: 'dark',
 };
 
+// Migration functions for each version
+const migrations: Record<number, (data: any) => any> = {
+  1: (data) => {
+    // v0 -> v1: Initial version
+    return data;
+  },
+  2: (data) => {
+    // v1 -> v2: Ensure all new fields exist
+    if (data.settings) {
+      data.settings = { ...DEFAULT_SETTINGS, ...data.settings };
+    }
+    return data;
+  },
+};
+
+function migrateStorage() {
+  try {
+    const currentVersion = parseInt(localStorage.getItem(VERSION_KEY) || '0');
+    
+    if (currentVersion === STORAGE_VERSION) {
+      return; // Already up to date
+    }
+
+    console.log(`🔄 Migrating storage from v${currentVersion} to v${STORAGE_VERSION}`);
+
+    let data = {
+      settings: JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'),
+      history: JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'),
+    };
+
+    // Apply migrations sequentially
+    for (let version = currentVersion + 1; version <= STORAGE_VERSION; version++) {
+      if (migrations[version]) {
+        data = migrations[version](data);
+        console.log(`✅ Applied migration to v${version}`);
+      }
+    }
+
+    // Save migrated data
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(data.settings));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(data.history));
+    localStorage.setItem(VERSION_KEY, STORAGE_VERSION.toString());
+
+    console.log(`✅ Migration complete to v${STORAGE_VERSION}`);
+  } catch (error) {
+    console.error('❌ Storage migration failed:', error);
+  }
+}
+
 class StorageService {
+  constructor() {
+    // Run migrations on initialization
+    migrateStorage();
+  }
+
   // Settings management
   getSettings(): AppSettings {
     try {

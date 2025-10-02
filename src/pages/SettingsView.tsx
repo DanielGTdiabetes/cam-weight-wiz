@@ -20,6 +20,8 @@ export const SettingsView = () => {
     setVoiceEnabled(settings.isVoiceActive);
     setDiabetesMode(settings.diabetesMode);
     setCalibrationFactor(settings.calibrationFactor.toString());
+    setApiUrl(settings.apiUrl);
+    setWsUrl(settings.wsUrl);
     setChatGptKey(settings.chatGptKey);
     setNightscoutUrl(settings.nightscoutUrl);
     setNightscoutToken(settings.nightscoutToken);
@@ -45,6 +47,8 @@ export const SettingsView = () => {
   }>({ title: "", type: "text", field: "" });
   
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
+  const [apiUrl, setApiUrl] = useState("http://localhost:8080");
+  const [wsUrl, setWsUrl] = useState("ws://localhost:8080");
   const [chatGptKey, setChatGptKey] = useState("");
   const [nightscoutUrl, setNightscoutUrl] = useState("");
   const [nightscoutToken, setNightscoutToken] = useState("");
@@ -82,6 +86,8 @@ export const SettingsView = () => {
   const getCurrentValue = (field: string): string => {
     const values: Record<string, string> = {
       calibrationFactor,
+      apiUrl,
+      wsUrl,
       chatGptKey,
       nightscoutUrl,
       nightscoutToken,
