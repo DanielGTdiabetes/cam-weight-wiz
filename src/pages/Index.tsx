@@ -15,6 +15,7 @@ import { BasculinMascot } from "@/components/BasculinMascot";
 import { Clock, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
+import { networkDetector } from "@/services/networkDetector";
 import { api } from "@/services/api";
 
 const Index = () => {
@@ -54,13 +55,31 @@ const Index = () => {
     }
   }, []);
 
-  // Detect AP mode (simulate detection)
+  // Monitor network status for AP mode
   useEffect(() => {
-    const isAPMode = localStorage.getItem("ap_mode") === "true";
-    if (isAPMode) {
-      setShowAPMode(true);
-    }
-  }, []);
+    const handleNetworkStatus = (status: any) => {
+      // Show AP mode screen if WiFi is not connected
+      setShowAPMode(status.shouldActivateAP);
+      
+      // Show notification if reconnected
+      if (status.isWifiConnected && showAPMode) {
+        setNotification(`Conectado a ${status.ssid}`);
+        setBasculinMood("happy");
+        setMascoMsg("¡WiFi conectado!");
+      }
+    };
+
+    // Subscribe to network status
+    networkDetector.subscribe(handleNetworkStatus);
+    
+    // Start monitoring (check every 30 seconds)
+    networkDetector.startMonitoring(30000);
+
+    return () => {
+      networkDetector.unsubscribe(handleNetworkStatus);
+      networkDetector.stopMonitoring();
+    };
+  }, [showAPMode]);
 
   const handleTimerStart = async (seconds: number) => {
     setTimerSeconds(seconds);

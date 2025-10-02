@@ -7,12 +7,16 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
+import { CalibrationWizard } from "@/components/CalibrationWizard";
 import { storage } from "@/services/storage";
 import { useToast } from "@/hooks/use-toast";
+import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { cn } from "@/lib/utils";
 
 export const SettingsView = () => {
   const { toast } = useToast();
+  const { weight } = useScaleWebSocket();
+  const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
   
   // Load settings on mount
   useEffect(() => {
@@ -342,14 +346,24 @@ export const SettingsView = () => {
                   placeholder="Nuevo factor"
                   className="flex-1 text-lg cursor-pointer"
                 />
-                  <Button size="lg" variant="secondary">
+                  <Button 
+                    size="lg" 
+                    variant="secondary"
+                    onClick={() => setShowCalibrationWizard(true)}
+                  >
                     Calibrar
                   </Button>
                 </div>
               </div>
 
-              <Button variant="outline" size="lg" className="w-full">
-                Ejecutar Proceso de Calibración
+              <Button 
+                variant="glow" 
+                size="lg" 
+                className="w-full"
+                onClick={() => setShowCalibrationWizard(true)}
+              >
+                <Scale className="mr-2 h-5 w-5" />
+                Ejecutar Asistente de Calibración
               </Button>
             </div>
           </Card>
@@ -577,6 +591,12 @@ export const SettingsView = () => {
         showDecimal={keyboardConfig.showDecimal}
         min={keyboardConfig.min}
         max={keyboardConfig.max}
+      />
+
+      <CalibrationWizard
+        open={showCalibrationWizard}
+        onClose={() => setShowCalibrationWizard(false)}
+        currentWeight={weight}
       />
     </div>
   );
