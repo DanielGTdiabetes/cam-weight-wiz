@@ -34,16 +34,16 @@ export const AlphanumericKeyboard = ({
   const rows = showSymbols ? symbolRows : letterRows;
 
   return (
-    <div className={cn("space-y-2", className)}>
+    <div className={cn("space-y-3", className)}>
       {rows.map((row, rowIndex) => (
-        <div key={rowIndex} className="flex gap-1 justify-center">
+        <div key={rowIndex} className="flex gap-2 justify-center">
           {rowIndex === 2 && (
             <Button
               variant="outline"
-              size="lg"
+              size="xl"
               onClick={() => setIsUpperCase(!isUpperCase)}
               className={cn(
-                "h-12 px-3 font-bold",
+                "px-4 font-bold active:scale-95",
                 isUpperCase && "bg-primary/20"
               )}
             >
@@ -54,9 +54,9 @@ export const AlphanumericKeyboard = ({
             <Button
               key={keyIndex}
               variant="outline"
-              size="lg"
+              size="xl"
               onClick={() => onKeyPress(isUpperCase ? key.toUpperCase() : key)}
-              className="h-12 min-w-[2.5rem] px-2 text-lg font-medium"
+              className="min-w-[3rem] px-3 text-xl font-medium active:scale-95"
             >
               {isUpperCase ? key.toUpperCase() : key}
             </Button>
@@ -64,47 +64,47 @@ export const AlphanumericKeyboard = ({
           {rowIndex === 2 && (
             <Button
               variant="outline"
-              size="lg"
+              size="xl"
               onClick={onBackspace}
-              className="h-12 px-3"
+              className="px-4 active:scale-95"
             >
-              <Delete className="h-5 w-5" />
+              <Delete className="h-6 w-6" />
             </Button>
           )}
         </div>
       ))}
       
-      <div className="flex gap-1 justify-center">
+      <div className="flex gap-2 justify-center">
         <Button
           variant="outline"
-          size="lg"
+          size="xl"
           onClick={() => setShowSymbols(!showSymbols)}
-          className="h-12 px-4"
+          className="px-5 active:scale-95"
         >
           {showSymbols ? "ABC" : "123"}
         </Button>
         <Button
           variant="outline"
-          size="lg"
+          size="xl"
           onClick={() => onKeyPress(" ")}
-          className="h-12 flex-1"
+          className="flex-1 active:scale-95"
         >
           Espacio
         </Button>
         <Button
           variant="outline"
-          size="lg"
+          size="xl"
           onClick={() => onKeyPress(".")}
-          className="h-12 px-4"
+          className="px-5 active:scale-95"
         >
           .
         </Button>
         {onClear && (
           <Button
             variant="destructive"
-            size="lg"
+            size="xl"
             onClick={onClear}
-            className="h-12 px-4"
+            className="px-5 active:scale-95"
           >
             Borrar
           </Button>

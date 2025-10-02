@@ -119,36 +119,33 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
       </Card>
 
       {/* Control Buttons - Botones grandes para táctil */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-3 gap-5">
         <Button
           onClick={handleTare}
-          size="xl"
+          size="xxl"
           variant="outline"
-          className="h-24 text-2xl"
           disabled={!isConnected}
         >
-          <Zap className="mr-2 h-8 w-8" />
+          <Zap className="mr-3" />
           TARA
         </Button>
         
         <Button
           onClick={handleZero}
-          size="xl"
+          size="xxl"
           variant="outline"
-          className="h-24 text-2xl"
           disabled={!isConnected}
         >
-          <Scale className="mr-2 h-8 w-8" />
+          <Scale className="mr-3" />
           ZERO
         </Button>
         
         <Button
           onClick={toggleUnit}
-          size="xl"
+          size="xxl"
           variant="secondary"
-          className="h-24 text-2xl"
         >
-          <Droplets className="mr-2 h-8 w-8" />
+          <Droplets className="mr-3" />
           g ↔ ml
         </Button>
       </div>

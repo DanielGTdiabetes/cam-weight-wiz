@@ -71,18 +71,18 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
   ];
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-8">
-      <div className="w-full max-w-4xl">
-        <div className="mb-8 text-center">
-          <h1 className="mb-2 text-5xl font-bold text-primary text-glow-cyan">
+    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+      <div className="w-full max-w-5xl">
+        <div className="mb-6 text-center">
+          <h1 className="mb-3 text-6xl font-bold text-primary text-glow-cyan">
             Báscula Inteligente
           </h1>
-          <p className="text-xl text-muted-foreground">
+          <p className="text-2xl text-muted-foreground">
             Sistema de Nutrición y Diabetes
           </p>
         </div>
 
-        <div className="grid grid-cols-2 gap-6">
+        <div className="grid grid-cols-2 gap-5">
           {menuItems.map(({ id, icon: Icon, title, description, borderColor, hoverBorder, iconBg, iconHoverBg, glowClass }) => {
             const handleClick = (e: React.MouseEvent) => {
               e.preventDefault();
@@ -94,18 +94,18 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
             return (
               <Card
                 key={id}
-                className={`group cursor-pointer overflow-hidden ${borderColor} ${hoverBorder} ${glowClass} transition-smooth hover:scale-105`}
+                className={`group cursor-pointer overflow-hidden border-2 ${borderColor} ${hoverBorder} ${glowClass} transition-smooth hover:scale-[1.02] active:scale-[0.98]`}
                 onClick={handleClick}
               >
                 <div className="gradient-holographic absolute inset-0 opacity-0 transition-smooth group-hover:opacity-20 pointer-events-none" />
-                <div className="relative p-8 text-center pointer-events-none">
-                  <div className="mb-4 flex justify-center">
-                    <div className={`rounded-xl ${iconBg} ${iconHoverBg} p-6 transition-smooth group-hover:text-primary-foreground`}>
-                      <Icon className="h-12 w-12" />
+                <div className="relative p-6 text-center pointer-events-none">
+                  <div className="mb-3 flex justify-center">
+                    <div className={`rounded-2xl ${iconBg} ${iconHoverBg} p-5 transition-smooth group-hover:text-primary-foreground`}>
+                      <Icon className="h-14 w-14" />
                     </div>
                   </div>
-                  <h2 className="mb-2 text-2xl font-bold">{title}</h2>
-                  <p className="text-sm text-muted-foreground">{description}</p>
+                  <h2 className="mb-2 text-3xl font-bold">{title}</h2>
+                  <p className="text-lg text-muted-foreground">{description}</p>
                 </div>
               </Card>
             );

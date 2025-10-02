@@ -25,9 +25,9 @@ export const NumericKeyboard = ({
   ];
 
   return (
-    <div className={cn("grid gap-2", className)}>
+    <div className={cn("grid gap-3", className)}>
       {keys.map((row, rowIndex) => (
-        <div key={rowIndex} className="grid grid-cols-3 gap-2">
+        <div key={rowIndex} className="grid grid-cols-3 gap-3">
           {row.map((key, keyIndex) => {
             if (!key) return <div key={keyIndex} />;
             
@@ -36,11 +36,11 @@ export const NumericKeyboard = ({
                 <Button
                   key={keyIndex}
                   variant="outline"
-                  size="xl"
+                  size="xxl"
                   onClick={onBackspace}
-                  className="h-16 text-2xl"
+                  className="active:scale-95"
                 >
-                  <Delete className="h-6 w-6" />
+                  <Delete className="h-7 w-7" />
                 </Button>
               );
             }
@@ -49,9 +49,9 @@ export const NumericKeyboard = ({
               <Button
                 key={keyIndex}
                 variant="outline"
-                size="xl"
+                size="xxl"
                 onClick={() => onKeyPress(key)}
-                className="h-16 text-2xl font-bold"
+                className="font-bold active:scale-95"
               >
                 {key}
               </Button>
@@ -62,9 +62,9 @@ export const NumericKeyboard = ({
       {onClear && (
         <Button
           variant="destructive"
-          size="xl"
+          size="xxl"
           onClick={onClear}
-          className="h-16 text-xl"
+          className="active:scale-95"
         >
           Borrar Todo
         </Button>

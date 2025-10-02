@@ -5,13 +5,13 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium ring-offset-background transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md font-medium ring-offset-background transition-smooth focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 active:scale-95",
   {
     variants: {
       variant: {
         default: "bg-primary text-primary-foreground hover:bg-primary/90 glow-cyan",
         destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        outline: "border border-border bg-card hover:bg-accent hover:text-accent-foreground",
+        outline: "border-2 border-border bg-card hover:bg-accent hover:text-accent-foreground",
         secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80 glow-magenta",
         ghost: "hover:bg-accent hover:text-accent-foreground",
         link: "text-primary underline-offset-4 hover:underline",
@@ -20,11 +20,12 @@ const buttonVariants = cva(
         glow: "bg-gradient-to-r from-primary to-primary-glow text-primary-foreground hover:opacity-90 glow-cyan",
       },
       size: {
-        default: "h-10 px-4 py-2",
-        sm: "h-9 rounded-md px-3",
-        lg: "h-11 rounded-md px-8",
-        icon: "h-10 w-10",
-        xl: "h-14 rounded-lg px-10 text-base",
+        default: "h-12 px-5 py-3 text-base [&_svg]:size-5",
+        sm: "h-10 rounded-md px-4 text-sm [&_svg]:size-4",
+        lg: "h-14 rounded-lg px-8 text-lg [&_svg]:size-6",
+        icon: "h-12 w-12 [&_svg]:size-6",
+        xl: "h-16 rounded-lg px-12 text-xl [&_svg]:size-7",
+        xxl: "h-20 rounded-xl px-16 text-2xl [&_svg]:size-8",
       },
     },
     defaultVariants: {

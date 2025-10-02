@@ -30,38 +30,37 @@ export const TopBar = ({
   };
 
   return (
-    <div className="flex items-center justify-between border-b border-border bg-card/90 px-4 py-3 backdrop-blur-sm">
+    <div className="flex items-center justify-between border-b-2 border-border bg-card/90 px-5 py-3 backdrop-blur-sm">
       {/* Left side - Voice & WiFi */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-3">
         <Button
           size="icon"
           variant="ghost"
           onClick={onVoiceToggle}
-          className="h-10 w-10"
         >
           {isVoiceActive ? (
-            <Volume2 className="h-5 w-5 text-primary" />
+            <Volume2 className="h-7 w-7 text-primary" />
           ) : (
-            <VolumeX className="h-5 w-5 text-muted-foreground" />
+            <VolumeX className="h-7 w-7 text-muted-foreground" />
           )}
         </Button>
         
         {isWifiConnected ? (
-          <Wifi className="h-5 w-5 text-success" />
+          <Wifi className="h-7 w-7 text-success" />
         ) : (
-          <WifiOff className="h-5 w-5 text-destructive" />
+          <WifiOff className="h-7 w-7 text-destructive" />
         )}
       </div>
 
       {/* Center - Glucose & Timer */}
       <div className="flex items-center gap-4">
         {glucose !== undefined && (
-          <div className="flex items-center gap-2 rounded-lg bg-primary/10 px-4 py-2">
-            <span className="text-2xl font-bold text-primary">{glucose}</span>
-            <span className="text-sm text-muted-foreground">mg/dl</span>
+          <div className="flex items-center gap-3 rounded-xl bg-primary/10 px-5 py-3">
+            <span className="text-3xl font-bold text-primary">{glucose}</span>
+            <span className="text-base text-muted-foreground">mg/dl</span>
             {glucoseTrend && (
               <span className={cn(
-                "text-xl",
+                "text-2xl",
                 glucoseTrend === "up" && "text-warning",
                 glucoseTrend === "down" && "text-destructive",
                 glucoseTrend === "stable" && "text-success"
@@ -76,9 +75,9 @@ export const TopBar = ({
           <Button
             onClick={onTimerClick}
             variant="ghost"
-            className="gap-2 text-xl font-mono"
+            className="gap-2 text-2xl font-mono h-14"
           >
-            <Clock className="h-5 w-5" />
+            <Clock className="h-6 w-6" />
             {formatTime(timerSeconds)}
           </Button>
         )}
@@ -89,9 +88,8 @@ export const TopBar = ({
         size="icon"
         variant="ghost"
         onClick={onSettingsClick}
-        className="h-10 w-10"
       >
-        <Settings className="h-5 w-5" />
+        <Settings className="h-7 w-7" />
       </Button>
     </div>
   );

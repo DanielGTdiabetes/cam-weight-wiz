@@ -46,17 +46,17 @@ export const KeyboardDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl">
+      <DialogContent className="max-w-4xl">
         <DialogHeader>
-          <DialogTitle className="text-2xl">{title}</DialogTitle>
+          <DialogTitle className="text-3xl">{title}</DialogTitle>
         </DialogHeader>
         
-        <div className="space-y-4">
+        <div className="space-y-5">
           <Input
             type={type === "password" ? "password" : "text"}
             value={value}
             readOnly
-            className="text-xl h-14"
+            className="text-2xl h-16 border-2"
           />
           
           {isNumeric ? (
@@ -74,20 +74,20 @@ export const KeyboardDialog = ({
             />
           )}
 
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-4">
             <Button
               variant="outline"
-              size="xl"
+              size="xxl"
               onClick={onClose}
-              className="h-14 text-lg"
+              className="active:scale-95"
             >
               Cancelar
             </Button>
             <Button
               variant="glow"
-              size="xl"
+              size="xxl"
               onClick={handleConfirm}
-              className="h-14 text-lg"
+              className="active:scale-95"
             >
               Confirmar
             </Button>
