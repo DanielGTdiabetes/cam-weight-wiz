@@ -13,35 +13,60 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
       icon: Scale,
       title: "Báscula",
       description: "Pesar alimentos",
-      variant: "glow" as const,
+      color: "cyan",
+      borderColor: "border-primary/30",
+      hoverBorder: "hover:border-primary",
+      iconBg: "bg-primary/20",
+      iconHoverBg: "group-hover:bg-primary",
+      glowClass: "glow-cyan",
     },
     {
       id: "scanner",
       icon: Camera,
       title: "Escáner",
       description: "Identificar alimentos",
-      variant: "default" as const,
+      color: "magenta",
+      borderColor: "border-secondary/30",
+      hoverBorder: "hover:border-secondary",
+      iconBg: "bg-secondary/20",
+      iconHoverBg: "group-hover:bg-secondary",
+      glowClass: "group-hover:glow-magenta",
     },
     {
       id: "timer",
       icon: Timer,
       title: "Temporizador",
       description: "Temporizador de cocina",
-      variant: "secondary" as const,
+      color: "green",
+      borderColor: "border-success/30",
+      hoverBorder: "hover:border-success",
+      iconBg: "bg-success/20",
+      iconHoverBg: "group-hover:bg-success",
+      glowClass: "group-hover:glow-green",
     },
     {
       id: "recipes",
       icon: Book,
       title: "Recetas",
       description: "Asistente de recetas",
-      variant: "outline" as const,
+      color: "amber",
+      borderColor: "border-warning/30",
+      hoverBorder: "hover:border-warning",
+      iconBg: "bg-warning/20",
+      iconHoverBg: "group-hover:bg-warning",
+      glowClass: "group-hover:shadow-[0_0_20px_hsl(40_100%_55%/0.3)]",
     },
     {
       id: "settings",
       icon: SettingsIcon,
       title: "Ajustes",
       description: "Configuración",
-      variant: "outline" as const,
+      color: "muted",
+      borderColor: "border-muted/30",
+      hoverBorder: "hover:border-muted",
+      iconBg: "bg-muted/30",
+      iconHoverBg: "group-hover:bg-muted",
+      glowClass: "group-hover:shadow-[0_0_15px_hsl(220_15%_20%/0.5)]",
     },
   ];
 
@@ -58,16 +83,16 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
         </div>
 
         <div className="grid grid-cols-2 gap-6">
-          {menuItems.map(({ id, icon: Icon, title, description, variant }) => (
+          {menuItems.map(({ id, icon: Icon, title, description, borderColor, hoverBorder, iconBg, iconHoverBg, glowClass }) => (
             <Card
               key={id}
-              className="group cursor-pointer overflow-hidden border-primary/20 transition-smooth hover:scale-105 hover:border-primary/50 glow-cyan"
+              className={`group cursor-pointer overflow-hidden ${borderColor} ${hoverBorder} ${glowClass} transition-smooth hover:scale-105`}
               onClick={() => onNavigate(id)}
             >
-              <div className="gradient-holographic absolute inset-0 opacity-0 transition-smooth group-hover:opacity-30" />
+              <div className="gradient-holographic absolute inset-0 opacity-0 transition-smooth group-hover:opacity-20" />
               <div className="relative p-8 text-center">
                 <div className="mb-4 flex justify-center">
-                  <div className="rounded-xl bg-primary/20 p-6 transition-smooth group-hover:bg-primary group-hover:text-primary-foreground">
+                  <div className={`rounded-xl ${iconBg} ${iconHoverBg} p-6 transition-smooth group-hover:text-primary-foreground`}>
                     <Icon className="h-12 w-12" />
                   </div>
                 </div>
