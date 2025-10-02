@@ -71,3 +71,42 @@ Yes, you can!
 To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
 
 Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+
+## Mini-Web (AP setup)
+
+Pruebas de aceptación rápidas (backend servido en `http://localhost:8080`):
+
+```bash
+# Healthcheck
+curl -s http://localhost:8080/health
+
+# SPA principal (debe devolver HTML, no una página en blanco)
+curl -s http://localhost:8080/ | head
+
+# Leer PIN (solo visible en modo AP, bandera o cabecera forzada)
+curl -s http://localhost:8080/api/miniweb/pin
+
+# Verificar PIN persistente
+curl -s -X POST http://localhost:8080/api/miniweb/verify-pin \
+  -H 'Content-Type: application/json' \
+  -d '{"pin":"NNNN"}'
+
+# Escanear redes Wi-Fi (403 si falta permiso, 503 si no hay nmcli)
+curl -s http://localhost:8080/api/miniweb/scan-networks
+
+# Iniciar conexión Wi-Fi (ejemplo)
+curl -s -X POST http://localhost:8080/api/miniweb/connect-wifi \
+  -H 'Content-Type: application/json' \
+  -d '{"ssid":"MiRed","password":"secreto"}'
+
+# Estado de red actual
+curl -s http://localhost:8080/api/network/status
+```
+
+Expectativas clave:
+
+- `/api/miniweb/pin` → `200` solo en modo AP (`wlan0` = `192.168.4.1/24`), bandera `BASCULA_ALLOW_PIN_READ=1` o cabecera `X-Force-Pin: 1` desde `127.0.0.1`; en STA responde `403`.
+- El PIN permanece tras reinicios gracias a `/var/lib/bascula/miniweb_state.json`.
+- `POST /api/miniweb/verify-pin` permite 10 intentos por IP cada 10 minutos (luego `429`).
+- `GET /api/miniweb/scan-networks` funciona sin `sudo`; si PolicyKit no está aplicado devuelve `403 {"code":"NMCLI_NOT_AUTHORIZED"}`.
+- `POST /api/miniweb/connect-wifi` conecta con NetworkManager, desactiva el AP y programa un reinicio.

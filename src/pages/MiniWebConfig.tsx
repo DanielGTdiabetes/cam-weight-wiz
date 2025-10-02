@@ -19,9 +19,38 @@ export const MiniWebConfig = () => {
   const [password, setPassword] = useState("");
   const [isScanning, setIsScanning] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [pin, setPin] = useState("");
+  const [pinInput, setPinInput] = useState("");
+  const [devicePin, setDevicePin] = useState<string | null>(null);
+  const [pinMessage, setPinMessage] = useState<string | null>(null);
   const [isPinValid, setIsPinValid] = useState(false);
   const { toast } = useToast();
+
+  useEffect(() => {
+    const fetchPin = async () => {
+      try {
+        const response = await fetch('/api/miniweb/pin');
+        if (response.ok) {
+          const data = await response.json();
+          if (data?.pin) {
+            setDevicePin(data.pin);
+            setPinMessage(null);
+          }
+        } else if (response.status === 403) {
+          setDevicePin(null);
+          setPinMessage('El PIN se muestra en la pantalla del dispositivo');
+        } else {
+          setDevicePin(null);
+          setPinMessage('No se pudo obtener el PIN. Verifica la conexión.');
+        }
+      } catch (error) {
+        logger.error('Failed to fetch PIN', { error });
+        setDevicePin(null);
+        setPinMessage('No se pudo obtener el PIN. Verifica la conexión.');
+      }
+    };
+
+    fetchPin();
+  }, []);
 
   // Check PIN for security
   const checkPin = async (inputPin: string) => {
@@ -35,6 +64,12 @@ export const MiniWebConfig = () => {
       if (response.ok) {
         setIsPinValid(true);
         loadNetworks();
+      } else if (response.status === 429) {
+        toast({
+          title: 'Demasiados intentos',
+          description: 'Espera unos minutos antes de volver a intentar.',
+          variant: 'destructive',
+        });
       } else {
         toast({
           title: "PIN incorrecto",
@@ -54,9 +89,42 @@ export const MiniWebConfig = () => {
       if (response.ok) {
         const data = await response.json();
         setNetworks(data.networks || []);
+      } else {
+        let errorBody: any = null;
+        try {
+          errorBody = await response.json();
+        } catch (error) {
+          logger.error('Failed to parse scan error', { error });
+        }
+
+        if (response.status === 403 && errorBody?.code === 'NMCLI_NOT_AUTHORIZED') {
+          toast({
+            title: 'Permisos insuficientes',
+            description: 'Permisos de Wi-Fi insuficientes. Reinicia el dispositivo o finaliza la instalación para aplicar permisos.',
+            variant: 'destructive',
+          });
+        } else if (response.status === 503 && errorBody?.code === 'NMCLI_NOT_AVAILABLE') {
+          toast({
+            title: 'nmcli no disponible',
+            description: 'nmcli no disponible. Instala NetworkManager.',
+            variant: 'destructive',
+          });
+        } else {
+          toast({
+            title: 'Error al escanear redes',
+            description: 'No se pudo obtener la lista de redes Wi-Fi.',
+            variant: 'destructive',
+          });
+        }
+        setNetworks([]);
       }
     } catch (error) {
       logger.error('Failed to scan networks', { error });
+      toast({
+        title: 'Error al escanear redes',
+        description: 'No se pudo obtener la lista de redes Wi-Fi.',
+        variant: 'destructive',
+      });
     } finally {
       setIsScanning(false);
     }
@@ -87,16 +155,17 @@ export const MiniWebConfig = () => {
           title: "¡Conectado!",
           description: "El dispositivo se reiniciará en modo normal",
         });
-        
+
         // Wait 3 seconds then reload
         setTimeout(() => {
           window.location.href = '/';
         }, 3000);
       } else {
-        const error = await response.json();
+        const error = await response.json().catch(() => ({}));
+        const detail = error?.detail || error?.message;
         toast({
           title: "Error al conectar",
-          description: error.message || "Verifica la contraseña",
+          description: detail || "Verifica la contraseña",
           variant: "destructive",
         });
       }
@@ -133,24 +202,30 @@ export const MiniWebConfig = () => {
               <Label className="text-lg">PIN de Acceso</Label>
               <Input
                 type="password"
-                value={pin}
-                onChange={(e) => setPin(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && checkPin(pin)}
+                value={pinInput}
+                onChange={(e) => setPinInput(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && checkPin(pinInput)}
                 placeholder="Ingresa el PIN de 4 dígitos"
                 className="text-2xl text-center h-16 tracking-wider"
                 maxLength={4}
               />
-              <p className="text-sm text-muted-foreground text-center">
-                El PIN se muestra en la pantalla del dispositivo
-              </p>
+              {devicePin ? (
+                <div className="text-center space-y-1">
+                  <p className="text-xs uppercase tracking-widest text-muted-foreground">PIN actual</p>
+                  <p className="text-4xl font-bold tracking-[0.6em]">{devicePin}</p>
+                  <p className="text-xs text-muted-foreground">También visible en la pantalla del dispositivo.</p>
+                </div>
+              ) : pinMessage ? (
+                <p className="text-sm text-muted-foreground text-center">{pinMessage}</p>
+              ) : null}
             </div>
 
             <Button
-              onClick={() => checkPin(pin)}
+              onClick={() => checkPin(pinInput)}
               variant="glow"
               size="xl"
               className="w-full text-xl"
-              disabled={pin.length !== 4}
+              disabled={pinInput.length !== 4}
             >
               Acceder
             </Button>
