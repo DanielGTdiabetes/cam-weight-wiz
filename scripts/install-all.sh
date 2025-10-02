@@ -130,14 +130,13 @@ else
   # El usuario puede habilitar más hardware después del primer arranque exitoso
   cat >> "${CONF}" <<'EOF'
 # --- Bascula-Cam: Hardware Configuration ---
-# HDMI básico + modo seguro 1024x600
+# HDMI forzado + modo 1024x600@60Hz
 hdmi_force_hotplug=1
-dtoverlay=vc4-kms-v3d
-disable_overscan=1
-# Forzar modo 1024x600@60 (útil para pantallas 7" sin EDID)
 hdmi_group=2
 hdmi_mode=87
 hdmi_cvt=1024 600 60 3 0 0 0
+dtoverlay=vc4-kms-v3d-pi5
+disable_overscan=1
 
 # I2C
 dtparam=i2c_arm=on
