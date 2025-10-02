@@ -41,7 +41,26 @@ export const RecoveryMode = () => {
   };
 
   const handleRetry = () => {
-    window.location.reload();
+    // Clear recovery flags
+    localStorage.removeItem("recovery_mode");
+    localStorage.removeItem("last_error");
+    localStorage.removeItem("update_error");
+    
+    // Try to clear service worker cache
+    if ("caches" in window) {
+      caches.open("recovery-cache").then((cache) => {
+        cache.delete(new Request("/recovery-flag"));
+      });
+    }
+    
+    toast({
+      title: "Reiniciando aplicación",
+      description: "Intentando cargar normalmente...",
+    });
+    
+    setTimeout(() => {
+      window.location.reload();
+    }, 1000);
   };
 
   return (
@@ -67,6 +86,14 @@ export const RecoveryMode = () => {
             <li>Problema de conexión con hardware</li>
             <li>Archivos del sistema dañados</li>
           </ul>
+          
+          {localStorage.getItem("last_error") && (
+            <div className="mt-4 rounded-lg bg-destructive/10 p-4">
+              <p className="text-sm font-mono text-destructive">
+                {JSON.parse(localStorage.getItem("last_error") || "{}").message}
+              </p>
+            </div>
+          )}
         </div>
 
         <div className="space-y-4">
