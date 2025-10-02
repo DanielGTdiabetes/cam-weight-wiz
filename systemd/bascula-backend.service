@@ -7,7 +7,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/bascula-backend
 Environment="PATH=/home/pi/bascula-backend/venv/bin"
-ExecStart=/home/pi/bascula-backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2
+ExecStart=/home/pi/bascula-backend/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8080 --workers 2
 Restart=always
 RestartSec=5
 
