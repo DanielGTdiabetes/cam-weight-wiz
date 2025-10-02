@@ -375,6 +375,114 @@ EOF
 chmod 0755 /usr/local/bin/say.sh
 log "✓ Piper TTS instalado"
 
+# Setup X735 v3 Power Management Board
+log "[13b/20] Configurando X735 v3 (gestión de alimentación y ventilador)..."
+install -d -m 0755 /opt
+if [[ ! -d /opt/x735-script/.git && "${NET_OK}" = "1" ]]; then
+  git clone https://github.com/geekworm-com/x735-script /opt/x735-script || warn "No se pudo clonar x735-script"
+fi
+
+if [[ -d /opt/x735-script ]]; then
+  cd /opt/x735-script || true
+  chmod +x *.sh || true
+  # Raspberry Pi 5 usa pwmchip2 en lugar de pwmchip0
+  sed -i 's/pwmchip0/pwmchip2/g' x735-fan.sh 2>/dev/null || true
+  ./install-fan-service.sh || true
+  ./install-pwr-service.sh || true
+  
+  # Override para esperar a que PWM esté disponible
+  install -d -m 0755 /etc/systemd/system/x735-fan.service.d
+  cat > /etc/systemd/system/x735-fan.service.d/override.conf <<'EOF'
+[Unit]
+After=local-fs.target sysinit.target
+ConditionPathExistsGlob=/sys/class/pwm/pwmchip*
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 20); do for c in /sys/class/pwm/pwmchip2 /sys/class/pwm/pwmchip1 /sys/class/pwm/pwmchip0; do [ -d "$c" ] && exit 0; done; sleep 1; done; exit 0'
+Restart=on-failure
+RestartSec=5
+EOF
+
+  systemctl daemon-reload || true
+  systemctl enable x735-fan.service x735-pwr.service 2>/dev/null || true
+  
+  # Añadir alias para apagar el sistema desde la X735
+  cp -f ./xSoft.sh /usr/local/bin/ 2>/dev/null || true
+  if [[ -f "${TARGET_HOME}/.bashrc" ]] && ! grep -q 'alias x735off=' "${TARGET_HOME}/.bashrc" 2>/dev/null; then
+    echo 'alias x735off="sudo /usr/local/bin/xSoft.sh 0 20"' >> "${TARGET_HOME}/.bashrc"
+    chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.bashrc" || true
+  fi
+  
+  log "✓ X735 v3 configurada (ventilador + power management)"
+else
+  warn "X735 script no disponible, continuando sin soporte X735"
+fi
+
+# Script de verificación X735 (se ejecuta en cada arranque si es necesario)
+cat > /usr/local/sbin/x735-ensure.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+STAMP=/var/lib/x735-setup.done
+LOG(){ printf "[x735] %s\n" "$*"; }
+
+# Detectar qué pwmchip está disponible
+PWMCHIP=
+for c in /sys/class/pwm/pwmchip2 /sys/class/pwm/pwmchip1 /sys/class/pwm/pwmchip0; do
+  if [[ -d "$c" ]]; then 
+    PWMCHIP="${c##*/}"
+    break
+  fi
+done
+
+if [[ -z "${PWMCHIP}" ]]; then
+  LOG "PWM no disponible; reintentando en próximo arranque"
+  exit 0
+fi
+
+# Clonar scripts si no existen
+if [[ ! -d /opt/x735-script/.git ]]; then
+  git clone https://github.com/geekworm-com/x735-script /opt/x735-script || true
+fi
+
+cd /opt/x735-script || exit 0
+chmod +x *.sh || true
+
+# Actualizar el pwmchip correcto en el script
+sed -i "s/pwmchip[0-9]\+/${PWMCHIP}/g" x735-fan.sh 2>/dev/null || true
+
+# Instalar servicios
+./install-fan-service.sh || true
+./install-pwr-service.sh || true
+systemctl enable --now x735-fan.service x735-pwr.service 2>/dev/null || true
+
+touch "${STAMP}"
+LOG "X735 setup completado (pwmchip=${PWMCHIP})"
+exit 0
+EOF
+chmod 0755 /usr/local/sbin/x735-ensure.sh
+
+# Servicio systemd para verificar X735 en cada arranque
+cat > /etc/systemd/system/x735-ensure.service <<'EOF'
+[Unit]
+Description=Ensure X735 fan/power services
+After=multi-user.target local-fs.target
+ConditionPathExists=!/var/lib/x735-setup.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/x735-ensure.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable x735-ensure.service || true
+
+cd "${BASCULA_CURRENT_LINK}"
+log "✓ X735 v3 power management configurado"
+
 # Setup OCR service
 log "[14/20] Configurando servicio OCR..."
 install -d -m 0755 /opt/ocr-service
@@ -605,7 +713,9 @@ echo "Comandos útiles:"
 echo "  journalctl -u bascula-miniweb.service -f"
 echo "  journalctl -u bascula-app.service -f"
 echo "  journalctl -u ocr-service.service -f"
+echo "  journalctl -u x735-fan.service -f    # monitorear ventilador"
 echo "  libcamera-hello  # probar cámara"
 echo "  say.sh 'Hola'    # probar voz"
+echo "  x735off          # apagar el sistema de forma segura"
 echo ""
 log "Instalación finalizada"

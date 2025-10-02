@@ -168,6 +168,28 @@ sudo bash ~/bascula-ui/scripts/install-all.sh
 
 Esto instalará todo el software pero no modificará `/boot/firmware/config.txt`.
 
+## Verificar Hardware X735 v3
+
+Si tienes la placa X735 v3 instalada:
+
+```bash
+# Verificar que PWM está disponible
+ls -la /sys/class/pwm/
+
+# Ver estado de los servicios X735
+systemctl status x735-fan.service
+systemctl status x735-pwr.service
+
+# Ver logs
+journalctl -u x735-fan.service -n 50
+journalctl -u x735-pwr.service -n 50
+```
+
+Si el ventilador no funciona:
+- Asegúrate de tener kernel >= 6.6.22: `uname -r`
+- Verifica que existe `/sys/class/pwm/pwmchip2` (Raspberry Pi 5)
+- Reinicia los servicios: `sudo systemctl restart x735-fan.service`
+
 ## Contacto y Soporte
 
 Si los problemas persisten:
