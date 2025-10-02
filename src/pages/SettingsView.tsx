@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Settings, Scale, Wifi, Heart, Download } from "lucide-react";
+import { useState, useEffect } from "react";
+import { Settings, Scale, Wifi, Heart, Download, Save, Upload, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -7,9 +7,29 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
+import { storage } from "@/services/storage";
+import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
 export const SettingsView = () => {
+  const { toast } = useToast();
+  
+  // Load settings on mount
+  useEffect(() => {
+    const settings = storage.getSettings();
+    setVoiceEnabled(settings.isVoiceActive);
+    setDiabetesMode(settings.diabetesMode);
+    setCalibrationFactor(settings.calibrationFactor.toString());
+    setChatGptKey(settings.chatGptKey);
+    setNightscoutUrl(settings.nightscoutUrl);
+    setNightscoutToken(settings.nightscoutToken);
+    setCorrectionFactor(settings.correctionFactor.toString());
+    setCarbRatio(settings.carbRatio.toString());
+    setTargetGlucose(settings.targetGlucose.toString());
+    setHypoAlarm(settings.hypoAlarm.toString());
+    setHyperAlarm(settings.hyperAlarm.toString());
+  }, []);
+  
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [diabetesMode, setDiabetesMode] = useState(false);
   const [bolusAssistant, setBolusAssistant] = useState(false);
@@ -17,9 +37,11 @@ export const SettingsView = () => {
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [keyboardConfig, setKeyboardConfig] = useState<{
     title: string;
-    type: "numeric" | "text" | "password" | "url";
+    type: "numeric" | "text" | "password" | "url" | "apikey";
     showDecimal?: boolean;
     field: string;
+    min?: number;
+    max?: number;
   }>({ title: "", type: "text", field: "" });
   
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
@@ -34,8 +56,24 @@ export const SettingsView = () => {
   
   const [tempValue, setTempValue] = useState("");
 
-  const openKeyboard = (title: string, type: "numeric" | "text" | "password" | "url", field: string, showDecimal = false) => {
-    setKeyboardConfig({ title, type, field, showDecimal });
+  // Save settings when they change
+  useEffect(() => {
+    storage.saveSettings({ isVoiceActive: voiceEnabled });
+  }, [voiceEnabled]);
+
+  useEffect(() => {
+    storage.saveSettings({ diabetesMode });
+  }, [diabetesMode]);
+
+  const openKeyboard = (
+    title: string, 
+    type: "numeric" | "text" | "password" | "url" | "apikey", 
+    field: string, 
+    showDecimal = false,
+    min?: number,
+    max?: number
+  ) => {
+    setKeyboardConfig({ title, type, field, showDecimal, min, max });
     const currentValue = getCurrentValue(field);
     setTempValue(currentValue);
     setKeyboardOpen(true);
@@ -72,6 +110,109 @@ export const SettingsView = () => {
     const setter = setters[keyboardConfig.field];
     if (setter) {
       setter(tempValue);
+      
+      // Save to storage based on field
+      const field = keyboardConfig.field;
+      if (field === 'calibrationFactor') {
+        storage.saveSettings({ calibrationFactor: parseFloat(tempValue) || 1 });
+      } else if (field === 'chatGptKey') {
+        storage.saveSettings({ chatGptKey: tempValue });
+      } else if (field === 'nightscoutUrl') {
+        storage.saveSettings({ nightscoutUrl: tempValue });
+      } else if (field === 'nightscoutToken') {
+        storage.saveSettings({ nightscoutToken: tempValue });
+      } else if (field === 'correctionFactor') {
+        storage.saveSettings({ correctionFactor: parseFloat(tempValue) || 50 });
+      } else if (field === 'carbRatio') {
+        storage.saveSettings({ carbRatio: parseFloat(tempValue) || 10 });
+      } else if (field === 'targetGlucose') {
+        storage.saveSettings({ targetGlucose: parseFloat(tempValue) || 100 });
+      } else if (field === 'hypoAlarm') {
+        storage.saveSettings({ hypoAlarm: parseFloat(tempValue) || 70 });
+      } else if (field === 'hyperAlarm') {
+        storage.saveSettings({ hyperAlarm: parseFloat(tempValue) || 180 });
+      }
+      
+      // Haptic feedback on save
+      if (navigator.vibrate) {
+        navigator.vibrate(30);
+      }
+      
+      toast({
+        title: "Guardado",
+        description: "Configuración actualizada correctamente",
+      });
+    }
+  };
+
+  const handleExportData = () => {
+    try {
+      const data = storage.exportData();
+      const blob = new Blob([data], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bascula-backup-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      
+      toast({
+        title: "Exportado",
+        description: "Datos exportados correctamente",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo exportar los datos",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleImportData = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+          try {
+            const content = event.target?.result as string;
+            const success = storage.importData(content);
+            if (success) {
+              toast({
+                title: "Importado",
+                description: "Datos importados correctamente. Recarga la página.",
+              });
+              // Reload page to apply settings
+              setTimeout(() => window.location.reload(), 2000);
+            } else {
+              throw new Error('Invalid data');
+            }
+          } catch (error) {
+            toast({
+              title: "Error",
+              description: "Archivo inválido",
+              variant: "destructive",
+            });
+          }
+        };
+        reader.readAsText(file);
+      }
+    };
+    input.click();
+  };
+
+  const handleResetSettings = () => {
+    if (confirm('¿Estás seguro? Se perderán todas las configuraciones.')) {
+      storage.resetSettings();
+      toast({
+        title: "Reiniciado",
+        description: "Configuraciones restauradas a valores por defecto",
+      });
+      setTimeout(() => window.location.reload(), 1000);
     }
   };
 
@@ -128,6 +269,41 @@ export const SettingsView = () => {
                   <option>Voz Masculina (es-ES)</option>
                 </select>
               </div>
+
+              <div className="border-t border-border pt-6">
+                <h4 className="text-lg font-semibold mb-4">Gestión de Datos</h4>
+                <div className="space-y-3">
+                  <Button 
+                    variant="outline" 
+                    size="lg" 
+                    className="w-full justify-start"
+                    onClick={handleExportData}
+                  >
+                    <Save className="mr-2 h-5 w-5" />
+                    Exportar Configuración y Datos
+                  </Button>
+                  
+                  <Button 
+                    variant="outline" 
+                    size="lg" 
+                    className="w-full justify-start"
+                    onClick={handleImportData}
+                  >
+                    <Upload className="mr-2 h-5 w-5" />
+                    Importar Configuración
+                  </Button>
+                  
+                  <Button 
+                    variant="destructive" 
+                    size="lg" 
+                    className="w-full justify-start"
+                    onClick={handleResetSettings}
+                  >
+                    <Trash2 className="mr-2 h-5 w-5" />
+                    Restablecer a Valores por Defecto
+                  </Button>
+                </div>
+              </div>
             </div>
           </Card>
         </TabsContent>
@@ -152,14 +328,14 @@ export const SettingsView = () => {
                   Factor de calibración actual: {calibrationFactor}
                 </p>
                 <div className="flex gap-2">
-                  <Input
-                    type="text"
-                    value={calibrationFactor}
-                    readOnly
-                    onClick={() => openKeyboard("Factor de Calibración", "numeric", "calibrationFactor", true)}
-                    placeholder="Nuevo factor"
-                    className="flex-1 text-lg cursor-pointer"
-                  />
+                <Input
+                  type="text"
+                  value={calibrationFactor}
+                  readOnly
+                  onClick={() => openKeyboard("Factor de Calibración", "numeric", "calibrationFactor", true, 0.1, 10000)}
+                  placeholder="Nuevo factor"
+                  className="flex-1 text-lg cursor-pointer"
+                />
                   <Button size="lg" variant="secondary">
                     Calibrar
                   </Button>
@@ -197,7 +373,7 @@ export const SettingsView = () => {
                   type="password"
                   value={chatGptKey}
                   readOnly
-                  onClick={() => openKeyboard("API Key de ChatGPT", "password", "chatGptKey")}
+                  onClick={() => openKeyboard("API Key de ChatGPT", "apikey", "chatGptKey")}
                   placeholder="sk-..."
                   className="text-lg cursor-pointer"
                 />
@@ -287,7 +463,7 @@ export const SettingsView = () => {
                             type="text"
                             value={correctionFactor}
                             readOnly
-                            onClick={() => openKeyboard("Factor de Corrección", "numeric", "correctionFactor")}
+                            onClick={() => openKeyboard("Factor de Corrección", "numeric", "correctionFactor", false, 1, 200)}
                             placeholder="30"
                             className="cursor-pointer"
                           />
@@ -299,7 +475,7 @@ export const SettingsView = () => {
                             type="text"
                             value={carbRatio}
                             readOnly
-                            onClick={() => openKeyboard("Ratio Carbohidratos", "numeric", "carbRatio")}
+                            onClick={() => openKeyboard("Ratio Carbohidratos", "numeric", "carbRatio", false, 1, 100)}
                             placeholder="10"
                             className="cursor-pointer"
                           />
@@ -311,7 +487,7 @@ export const SettingsView = () => {
                             type="text"
                             value={targetGlucose}
                             readOnly
-                            onClick={() => openKeyboard("Objetivo Glucosa", "numeric", "targetGlucose")}
+                            onClick={() => openKeyboard("Objetivo Glucosa", "numeric", "targetGlucose", false, 70, 180)}
                             placeholder="100"
                             className="cursor-pointer"
                           />
@@ -325,7 +501,7 @@ export const SettingsView = () => {
                         type="text"
                         value={hypoAlarm}
                         readOnly
-                        onClick={() => openKeyboard("Alarma Hipoglucemia", "numeric", "hypoAlarm")}
+                        onClick={() => openKeyboard("Alarma Hipoglucemia", "numeric", "hypoAlarm", false, 40, 90)}
                         placeholder="70"
                         className="cursor-pointer"
                       />
@@ -337,7 +513,7 @@ export const SettingsView = () => {
                         type="text"
                         value={hyperAlarm}
                         readOnly
-                        onClick={() => openKeyboard("Alarma Hiperglucemia", "numeric", "hyperAlarm")}
+                        onClick={() => openKeyboard("Alarma Hiperglucemia", "numeric", "hyperAlarm", false, 150, 300)}
                         placeholder="180"
                         className="cursor-pointer"
                       />
@@ -393,6 +569,8 @@ export const SettingsView = () => {
         title={keyboardConfig.title}
         type={keyboardConfig.type}
         showDecimal={keyboardConfig.showDecimal}
+        min={keyboardConfig.min}
+        max={keyboardConfig.max}
       />
     </div>
   );

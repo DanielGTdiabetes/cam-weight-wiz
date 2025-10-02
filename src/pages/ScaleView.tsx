@@ -1,19 +1,23 @@
 import { useState, useEffect } from "react";
-import { Scale, Zap, Droplets } from "lucide-react";
+import { Scale, Zap, Droplets, History, Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
+import { useWeightHistory } from "@/hooks/useWeightHistory";
 import { api } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
+import { WeightHistoryDialog } from "@/components/WeightHistoryDialog";
 
 interface ScaleViewProps {
   onNavigate: (view: string) => void;
 }
 
 export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
-  const { weight, isStable, unit, isConnected, error } = useScaleWebSocket();
+  const { weight, isStable, unit, isConnected, error, reconnectAttempts } = useScaleWebSocket();
+  const { addRecord } = useWeightHistory();
   const [displayUnit, setDisplayUnit] = useState<"g" | "ml">("g");
+  const [showHistory, setShowHistory] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => {
@@ -54,6 +58,24 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
 
   const toggleUnit = () => {
     setDisplayUnit(prev => prev === "g" ? "ml" : "g");
+    // Haptic feedback
+    if (navigator.vibrate) {
+      navigator.vibrate(30);
+    }
+  };
+
+  const handleSaveWeight = () => {
+    if (weight > 0) {
+      addRecord(displayWeight, displayUnit, isStable);
+      toast({ 
+        title: "Guardado", 
+        description: `Peso: ${displayWeight.toFixed(1)} ${displayUnit}` 
+      });
+      // Haptic feedback
+      if (navigator.vibrate) {
+        navigator.vibrate([30, 50, 30]);
+      }
+    }
   };
 
   // Display weight in selected unit
@@ -65,9 +87,12 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
     <div className="flex h-full flex-col bg-background p-4">
       {/* Connection Status */}
       {!isConnected && (
-        <div className="mb-4 rounded-lg border-warning/50 bg-warning/10 p-3 text-center">
+        <div className="mb-4 rounded-lg border-warning/50 bg-warning/10 p-3 text-center animate-fade-in">
           <p className="text-sm font-medium text-warning">
-            Conectando con la báscula...
+            {reconnectAttempts > 0 
+              ? `Reconectando... Intento ${reconnectAttempts}/10`
+              : 'Conectando con la báscula...'
+            }
           </p>
         </div>
       )}
@@ -119,7 +144,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
       </Card>
 
       {/* Control Buttons - Botones grandes para táctil */}
-      <div className="grid grid-cols-3 gap-5">
+      <div className="grid grid-cols-2 gap-5 mb-5">
         <Button
           onClick={handleTare}
           size="xxl"
@@ -139,7 +164,9 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
           <Scale className="mr-3" />
           ZERO
         </Button>
-        
+      </div>
+
+      <div className="grid grid-cols-3 gap-5">
         <Button
           onClick={toggleUnit}
           size="xxl"
@@ -148,7 +175,31 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
           <Droplets className="mr-3" />
           g ↔ ml
         </Button>
+
+        <Button
+          onClick={handleSaveWeight}
+          size="xxl"
+          variant="success"
+          disabled={weight === 0}
+        >
+          <Save className="mr-3" />
+          Guardar
+        </Button>
+
+        <Button
+          onClick={() => setShowHistory(true)}
+          size="xxl"
+          variant="outline"
+        >
+          <History className="mr-3" />
+          Historial
+        </Button>
       </div>
+
+      <WeightHistoryDialog 
+        open={showHistory}
+        onClose={() => setShowHistory(false)}
+      />
     </div>
   );
 };
