@@ -50,9 +50,32 @@ const Index = () => {
   // Detect recovery mode (simulate detection)
   useEffect(() => {
     const isRecoveryNeeded = localStorage.getItem("recovery_mode") === "true";
-    if (isRecoveryNeeded) {
-      setShowRecovery(true);
+    if (!isRecoveryNeeded) {
+      return;
     }
+
+    let cancelled = false;
+
+    const verifyBackend = async () => {
+      try {
+        const response = await fetch('/api/network/status', { cache: 'no-store' });
+        if (!response.ok) {
+          return;
+        }
+      } catch (error) {
+        console.error('Backend unreachable, enabling recovery mode', error);
+        if (!cancelled) {
+          setShowRecovery(true);
+        }
+        return;
+      }
+    };
+
+    void verifyBackend();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Monitor network status for AP mode

@@ -98,6 +98,9 @@ apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
 
 log "✓ Dependencias base instaladas"
 
+# Ensure NetworkManager service is enabled and running
+systemctl enable NetworkManager --now || true
+
 # Install camera dependencies
 log "[4/20] Instalando dependencias de cámara..."
 apt-get install -y libcamera-apps v4l-utils python3-picamera2 \
@@ -234,20 +237,11 @@ log "✓ Xorg configurado para DRM card1"
 # Configure Polkit rules
 log "[9/20] Configurando Polkit..."
 install -d -m 0755 /etc/polkit-1/rules.d
-cat > /etc/polkit-1/rules.d/50-bascula-nm.rules <<EOF
+cat > /etc/polkit-1/rules.d/10-bascula-nmcli.rules <<'EOF'
+// 10-bascula-nmcli.rules
 polkit.addRule(function(action, subject) {
-  function allowed() {
-    return subject.user == "${TARGET_USER}" ||
-           subject.isInGroup("${TARGET_GROUP}") ||
-           subject.user == "bascula" ||
-           subject.isInGroup("bascula");
-  }
-  if (!allowed()) return polkit.Result.NOT_HANDLED;
-
-  const id = action.id;
-  if (id == "org.freedesktop.NetworkManager.settings.modify.system" ||
-      id == "org.freedesktop.NetworkManager.network-control" ||
-      id == "org.freedesktop.NetworkManager.enable-disable-wifi") {
+  if ((subject.isInGroup("pi") || subject.user === "pi")
+      && action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
     return polkit.Result.YES;
   }
 });
@@ -270,7 +264,7 @@ polkit.addRule(function(action, subject) {
   }
 });
 EOF
-systemctl restart polkit NetworkManager || true
+sudo systemctl restart polkit || sudo systemctl restart polkitd || true
 log "✓ Polkit configurado"
 
 # Create config.json
@@ -638,19 +632,21 @@ log "✓ Nginx configurado"
 
 # Create mini-web backend service
 log "[17/20] Configurando servicio mini-web..."
+install -d -m 0755 -o pi -g pi /var/lib/bascula
 cat > /etc/systemd/system/bascula-miniweb.service <<EOF
 [Unit]
 Description=Bascula Mini-Web Backend
-After=network.target
+After=network.target NetworkManager.service
 
 [Service]
 Type=simple
-User=${TARGET_USER}
-Group=${TARGET_GROUP}
-WorkingDirectory=${BASCULA_CURRENT_LINK}
-Environment=PATH=${VENV_DIR}/bin
-Environment=BASCULA_CFG_DIR=${CFG_DIR}
-ExecStart=${VENV_DIR}/bin/python backend/miniweb.py
+User=pi
+Group=pi
+WorkingDirectory=/opt/bascula/current
+Environment=PATH=/opt/bascula/current/.venv/bin
+# Permitir leer PIN vía API solo en modo AP; por defecto 0
+Environment=BASCULA_ALLOW_PIN_READ=0
+ExecStart=/opt/bascula/current/.venv/bin/python /opt/bascula/current/backend/miniweb.py
 Restart=always
 RestartSec=5
 
@@ -788,6 +784,7 @@ echo "  sudo reboot"
 echo ""
 echo "Después del reinicio, acceder a:"
 echo "  http://${IP:-<IP>} o http://localhost"
+echo "  Mini-Web: visita http://${IP:-<IP>}:8080 · PIN: consulta /api/miniweb/pin en AP o mira la pantalla"
 echo ""
 echo "Comandos útiles:"
 echo "  journalctl -u bascula-miniweb.service -f"

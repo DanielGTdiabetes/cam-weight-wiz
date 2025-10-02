@@ -1,12 +1,16 @@
 [Unit]
-Description=Bascula Mini-Web (FastAPI)
-After=network.target
+Description=Bascula Mini-Web Backend
+After=network.target NetworkManager.service
 
 [Service]
 Type=simple
+User=pi
+Group=pi
 WorkingDirectory=/opt/bascula/current
-Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=/opt/bascula/current/.venv/bin/python backend/miniweb.py
+Environment=PATH=/opt/bascula/current/.venv/bin
+# Permitir leer PIN vía API solo en modo AP; por defecto 0
+Environment=BASCULA_ALLOW_PIN_READ=0
+ExecStart=/opt/bascula/current/.venv/bin/python /opt/bascula/current/backend/miniweb.py
 Restart=always
 RestartSec=5
 
