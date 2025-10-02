@@ -1,0 +1,14 @@
+[Unit]
+Description=Bascula Mini-Web (FastAPI)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bascula/current
+Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/opt/bascula/current/.venv/bin/python backend/miniweb.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
