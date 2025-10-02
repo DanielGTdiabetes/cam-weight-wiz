@@ -59,6 +59,30 @@ export const TimerFullView = () => {
     ? (seconds / (inputMinutes * 60)) * 100 
     : 0;
 
+  const [customInput, setCustomInput] = useState("");
+
+  const handleKeyPress = (key: string) => {
+    if (customInput.length < 4) {
+      setCustomInput(customInput + key);
+    }
+  };
+
+  const handleBackspace = () => {
+    setCustomInput(customInput.slice(0, -1));
+  };
+
+  const handleClearInput = () => {
+    setCustomInput("");
+  };
+
+  const handleStartCustom = () => {
+    const mins = parseInt(customInput) || 0;
+    if (mins > 0) {
+      handleStart(mins);
+      setCustomInput("");
+    }
+  };
+
   const presets = [
     { label: "1 min", value: 1 },
     { label: "5 min", value: 5 },
@@ -71,21 +95,96 @@ export const TimerFullView = () => {
   if (showPresets) {
     return (
       <div className="flex h-full items-center justify-center p-8">
-        <Card className="w-full max-w-2xl p-8">
+        <Card className="w-full max-w-3xl p-8">
           <h2 className="mb-8 text-center text-4xl font-bold">
             Configurar Temporizador
           </h2>
-          <div className="grid grid-cols-3 gap-4">
-            {presets.map((preset) => (
-              <Button
-                key={preset.value}
-                onClick={() => handleStart(preset.value)}
-                variant="outline"
-                className="h-24 text-2xl"
-              >
-                {preset.label}
-              </Button>
-            ))}
+          
+          {/* Entrada manual */}
+          <div className="mb-8 space-y-4">
+            <div className="text-center">
+              <p className="mb-2 text-lg text-muted-foreground">Minutos</p>
+              <div className="mx-auto w-64 rounded-lg border-2 border-primary/30 bg-card p-4">
+                <p className="text-5xl font-bold text-primary">
+                  {customInput || "0"}
+                </p>
+              </div>
+            </div>
+            
+            {/* Teclado numérico */}
+            <div className="mx-auto max-w-xs">
+              <div className="grid gap-2">
+                {[["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["", "0", "⌫"]].map((row, rowIndex) => (
+                  <div key={rowIndex} className="grid grid-cols-3 gap-2">
+                    {row.map((key, keyIndex) => {
+                      if (!key) return <div key={keyIndex} />;
+                      
+                      if (key === "⌫") {
+                        return (
+                          <Button
+                            key={keyIndex}
+                            variant="outline"
+                            size="xl"
+                            onClick={handleBackspace}
+                            className="h-16 text-2xl"
+                          >
+                            ←
+                          </Button>
+                        );
+                      }
+
+                      return (
+                        <Button
+                          key={keyIndex}
+                          variant="outline"
+                          size="xl"
+                          onClick={() => handleKeyPress(key)}
+                          className="h-16 text-2xl font-bold"
+                        >
+                          {key}
+                        </Button>
+                      );
+                    })}
+                  </div>
+                ))}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <Button
+                  variant="destructive"
+                  size="xl"
+                  onClick={handleClearInput}
+                  className="h-16 text-xl"
+                >
+                  Borrar
+                </Button>
+                <Button
+                  variant="glow"
+                  size="xl"
+                  onClick={handleStartCustom}
+                  className="h-16 text-xl"
+                  disabled={!customInput || parseInt(customInput) === 0}
+                >
+                  Iniciar
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          {/* Presets */}
+          <div className="border-t border-border pt-6">
+            <p className="mb-4 text-center text-lg text-muted-foreground">O elige un preset:</p>
+            <div className="grid grid-cols-3 gap-4">
+              {presets.map((preset) => (
+                <Button
+                  key={preset.value}
+                  onClick={() => handleStart(preset.value)}
+                  variant="outline"
+                  className="h-20 text-xl"
+                >
+                  {preset.label}
+                </Button>
+              ))}
+            </div>
           </div>
         </Card>
       </div>

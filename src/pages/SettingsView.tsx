@@ -6,12 +6,74 @@ import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { cn } from "@/lib/utils";
 
 export const SettingsView = () => {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [diabetesMode, setDiabetesMode] = useState(false);
   const [bolusAssistant, setBolusAssistant] = useState(false);
+  
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [keyboardConfig, setKeyboardConfig] = useState<{
+    title: string;
+    type: "numeric" | "text" | "password" | "url";
+    showDecimal?: boolean;
+    field: string;
+  }>({ title: "", type: "text", field: "" });
+  
+  const [calibrationFactor, setCalibrationFactor] = useState("420.5");
+  const [chatGptKey, setChatGptKey] = useState("");
+  const [nightscoutUrl, setNightscoutUrl] = useState("");
+  const [nightscoutToken, setNightscoutToken] = useState("");
+  const [correctionFactor, setCorrectionFactor] = useState("30");
+  const [carbRatio, setCarbRatio] = useState("10");
+  const [targetGlucose, setTargetGlucose] = useState("100");
+  const [hypoAlarm, setHypoAlarm] = useState("70");
+  const [hyperAlarm, setHyperAlarm] = useState("180");
+  
+  const [tempValue, setTempValue] = useState("");
+
+  const openKeyboard = (title: string, type: "numeric" | "text" | "password" | "url", field: string, showDecimal = false) => {
+    setKeyboardConfig({ title, type, field, showDecimal });
+    const currentValue = getCurrentValue(field);
+    setTempValue(currentValue);
+    setKeyboardOpen(true);
+  };
+
+  const getCurrentValue = (field: string): string => {
+    const values: Record<string, string> = {
+      calibrationFactor,
+      chatGptKey,
+      nightscoutUrl,
+      nightscoutToken,
+      correctionFactor,
+      carbRatio,
+      targetGlucose,
+      hypoAlarm,
+      hyperAlarm,
+    };
+    return values[field] || "";
+  };
+
+  const handleKeyboardConfirm = () => {
+    const setters: Record<string, (value: string) => void> = {
+      calibrationFactor: setCalibrationFactor,
+      chatGptKey: setChatGptKey,
+      nightscoutUrl: setNightscoutUrl,
+      nightscoutToken: setNightscoutToken,
+      correctionFactor: setCorrectionFactor,
+      carbRatio: setCarbRatio,
+      targetGlucose: setTargetGlucose,
+      hypoAlarm: setHypoAlarm,
+      hyperAlarm: setHyperAlarm,
+    };
+    
+    const setter = setters[keyboardConfig.field];
+    if (setter) {
+      setter(tempValue);
+    }
+  };
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -87,13 +149,16 @@ export const SettingsView = () => {
               <div className="space-y-2">
                 <Label className="text-lg font-medium">Calibración</Label>
                 <p className="text-sm text-muted-foreground mb-2">
-                  Factor de calibración actual: 420.5
+                  Factor de calibración actual: {calibrationFactor}
                 </p>
                 <div className="flex gap-2">
                   <Input
-                    type="number"
+                    type="text"
+                    value={calibrationFactor}
+                    readOnly
+                    onClick={() => openKeyboard("Factor de Calibración", "numeric", "calibrationFactor", true)}
                     placeholder="Nuevo factor"
-                    className="flex-1 text-lg"
+                    className="flex-1 text-lg cursor-pointer"
                   />
                   <Button size="lg" variant="secondary">
                     Calibrar
@@ -130,8 +195,11 @@ export const SettingsView = () => {
                 <Label className="text-lg font-medium">API Key de ChatGPT</Label>
                 <Input
                   type="password"
+                  value={chatGptKey}
+                  readOnly
+                  onClick={() => openKeyboard("API Key de ChatGPT", "password", "chatGptKey")}
                   placeholder="sk-..."
-                  className="text-lg"
+                  className="text-lg cursor-pointer"
                 />
               </div>
 
@@ -190,41 +258,89 @@ export const SettingsView = () => {
                   <div className="space-y-4">
                     <div className="space-y-2">
                       <Label>URL Nightscout</Label>
-                      <Input placeholder="https://mi-nightscout.herokuapp.com" />
+                      <Input
+                        value={nightscoutUrl}
+                        readOnly
+                        onClick={() => openKeyboard("URL Nightscout", "url", "nightscoutUrl")}
+                        placeholder="https://mi-nightscout.herokuapp.com"
+                        className="cursor-pointer"
+                      />
                     </div>
                     
                     <div className="space-y-2">
                       <Label>API Token</Label>
-                      <Input type="password" placeholder="Token de acceso" />
+                      <Input
+                        type="password"
+                        value={nightscoutToken}
+                        readOnly
+                        onClick={() => openKeyboard("API Token", "password", "nightscoutToken")}
+                        placeholder="Token de acceso"
+                        className="cursor-pointer"
+                      />
                     </div>
 
                     {bolusAssistant && (
                       <>
                         <div className="space-y-2">
                           <Label>Factor de Corrección</Label>
-                          <Input type="number" placeholder="30" />
+                          <Input
+                            type="text"
+                            value={correctionFactor}
+                            readOnly
+                            onClick={() => openKeyboard("Factor de Corrección", "numeric", "correctionFactor")}
+                            placeholder="30"
+                            className="cursor-pointer"
+                          />
                         </div>
                         
                         <div className="space-y-2">
                           <Label>Ratio Carbohidratos</Label>
-                          <Input type="number" placeholder="10" />
+                          <Input
+                            type="text"
+                            value={carbRatio}
+                            readOnly
+                            onClick={() => openKeyboard("Ratio Carbohidratos", "numeric", "carbRatio")}
+                            placeholder="10"
+                            className="cursor-pointer"
+                          />
                         </div>
 
                         <div className="space-y-2">
                           <Label>Objetivo Glucosa (mg/dl)</Label>
-                          <Input type="number" placeholder="100" />
+                          <Input
+                            type="text"
+                            value={targetGlucose}
+                            readOnly
+                            onClick={() => openKeyboard("Objetivo Glucosa", "numeric", "targetGlucose")}
+                            placeholder="100"
+                            className="cursor-pointer"
+                          />
                         </div>
                       </>
                     )}
 
                     <div className="space-y-2">
                       <Label>Alarma Hipoglucemia (mg/dl)</Label>
-                      <Input type="number" placeholder="70" />
+                      <Input
+                        type="text"
+                        value={hypoAlarm}
+                        readOnly
+                        onClick={() => openKeyboard("Alarma Hipoglucemia", "numeric", "hypoAlarm")}
+                        placeholder="70"
+                        className="cursor-pointer"
+                      />
                     </div>
 
                     <div className="space-y-2">
                       <Label>Alarma Hiperglucemia (mg/dl)</Label>
-                      <Input type="number" placeholder="180" />
+                      <Input
+                        type="text"
+                        value={hyperAlarm}
+                        readOnly
+                        onClick={() => openKeyboard("Alarma Hiperglucemia", "numeric", "hyperAlarm")}
+                        placeholder="180"
+                        className="cursor-pointer"
+                      />
                     </div>
                   </div>
                 </>
@@ -267,6 +383,17 @@ export const SettingsView = () => {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <KeyboardDialog
+        open={keyboardOpen}
+        onClose={() => setKeyboardOpen(false)}
+        value={tempValue}
+        onChange={setTempValue}
+        onConfirm={handleKeyboardConfirm}
+        title={keyboardConfig.title}
+        type={keyboardConfig.type}
+        showDecimal={keyboardConfig.showDecimal}
+      />
     </div>
   );
 };
