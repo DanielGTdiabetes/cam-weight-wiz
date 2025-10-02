@@ -1,251 +1,176 @@
-# Modo Recovery - Báscula Inteligente
+# Modo de Recuperación - Báscula Inteligente
 
-## 🛡️ ¿Qué es el Modo Recovery?
+## 🚨 Sistema No Arranca Después de la Instalación
 
-El Modo Recovery es una pantalla de emergencia que se activa automáticamente cuando:
-- Una actualización OTA falla durante la instalación
-- El Service Worker detecta errores críticos al cachear archivos
-- La aplicación React encuentra un error fatal (Error Boundary)
-- Los archivos del sistema están corruptos o incompletos
+Si el sistema se queda en la pantalla de carga del kernel después de ejecutar `install-all.sh`, es probable que alguna configuración de hardware esté causando conflictos.
 
-## 🔄 Activación Automática
+## Solución Rápida
 
-El sistema detecta fallos en múltiples niveles:
+### Opción 1: Editar desde otra computadora
 
-### 1. **Service Worker (public/service-worker.js)**
-```javascript
-// Detecta fallos durante la instalación/actualización
-- Si falla cache.addAll() → Guarda flag en recovery-cache
-- Envía mensaje UPDATE_FAILED a todos los clientes
-- Almacena error en localStorage con timestamp
+1. **Apaga la Raspberry Pi**
+2. **Saca la tarjeta SD** y conéctala a otra computadora
+3. **Monta la partición de boot** (debería aparecer como `bootfs` o `boot`)
+4. **Edita el archivo** `/boot/firmware/config.txt` (o `/boot/config.txt` en versiones antiguas)
+5. **Comenta las líneas problemáticas** añadiendo `#` al inicio:
+
+```bash
+# --- Bascula-Cam: Hardware Configuration ---
+# HDMI para pantalla 7" (1024x600)
+hdmi_force_hotplug=1
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt=1024 600 60 3 0 0 0
+dtoverlay=vc4-kms-v3d
+disable_overscan=1
+
+# Audio I2S (comentar si no tienes hardware I2S conectado)
+#dtparam=audio=off
+#dtoverlay=i2s-mmap
+#dtoverlay=hifiberry-dac
+
+# I2C
+dtparam=i2c_arm=on
+
+# UART para ESP32
+enable_uart=1
+dtoverlay=disable-bt
+
+# Camera Module 3 (comentar si la cámara no está conectada)
+#camera_auto_detect=1
+#dtoverlay=imx708
+# --- Bascula-Cam (end) ---
 ```
 
-### 2. **Error Boundary (src/components/ErrorBoundary.tsx)**
-```javascript
-// Captura errores de React que causarían pantalla blanca
-- componentDidCatch() → Registra error en logger
-- Guarda información del error en localStorage
-- Activa automáticamente el Modo Recovery
-```
+6. **Guarda el archivo** y expulsa la tarjeta SD de forma segura
+7. **Vuelve a insertar la SD** en la Raspberry Pi
+8. **Enciende** el sistema
 
-### 3. **Main Entry Point (src/main.tsx)**
-```javascript
-// Escucha mensajes del Service Worker
-- Recibe UPDATE_FAILED → Activa recovery_mode
-- Recibe UPDATE_SUCCESS → Limpia flags de recovery
-- Verifica recovery-cache al iniciar
-```
+### Opción 2: Usar un monitor y teclado
 
-### 4. **Index Page (src/pages/Index.tsx)**
-```javascript
-// Verifica flag de recovery al montar
-useEffect(() => {
-  const isRecoveryNeeded = localStorage.getItem("recovery_mode") === "true";
-  if (isRecoveryNeeded) setShowRecovery(true);
-}, []);
-```
-
-## 🎯 Funcionalidades del Modo Recovery
-
-El componente `RecoveryMode.tsx` ofrece tres opciones:
-
-### 1. **Reintentar Cargar App** 
-```typescript
-- Limpia todos los flags de recovery
-- Elimina errores almacenados
-- Limpia recovery-cache del Service Worker
-- Recarga la aplicación después de 1 segundo
-```
-
-### 2. **Reinstalar Última Versión**
-```typescript
-- Llama a api.installUpdate()
-- Muestra toast de confirmación
-- Espera 30 segundos antes de recargar
-- Permite que el sistema descargue versión limpia
-```
-
-### 3. **Reiniciar Sistema**
-```typescript
-- Muestra mensaje de reinicio
-- Recarga la aplicación después de 3 segundos
-- Útil para problemas de hardware/configuración
-```
-
-## 📋 Información Mostrada
-
-La pantalla de Recovery muestra:
-- Icono de alerta prominente
-- Título "Modo Recovery"
-- Lista de posibles causas
-- **Mensaje de error específico** (si está disponible en localStorage)
-- Tres botones de acción claramente identificados
-- Instrucción para acceder a mini-web desde otro dispositivo
-
-## 🧪 Testing del Modo Recovery
-
-### Método 1: Simular fallo de actualización
-```javascript
-// En la consola del navegador:
-localStorage.setItem("recovery_mode", "true");
-localStorage.setItem("update_error", JSON.stringify({
-  error: "Failed to fetch during update",
-  timestamp: new Date().toISOString()
-}));
-window.location.reload();
-```
-
-### Método 2: Simular error de React
-```javascript
-// Agrega temporalmente en cualquier componente:
-throw new Error("Test recovery mode");
-```
-
-### Método 3: Forzar fallo de Service Worker
-```javascript
-// En service-worker.js, temporalmente cambia STATIC_ASSETS a una URL inválida:
-const STATIC_ASSETS = [
-  '/archivo-que-no-existe.js'
-];
-```
-
-## 🔧 Recuperación Paso a Paso
-
-1. **Usuario ve pantalla de Recovery** → Sistema detectó fallo crítico
-2. **Intenta "Reintentar Cargar App"** → Si fue error temporal, se resuelve
-3. **Si persiste, "Reinstalar Última Versión"** → Descarga versión limpia del servidor
-4. **Si aún falla, acceder a Mini-Web** → Desde otro dispositivo: `http://192.168.4.1/config`
-5. **Último recurso: "Reiniciar Sistema"** → Recarga completa del sistema
-
-## 📦 Archivos Involucrados
-
-```
-public/service-worker.js         → Detección de fallos de actualización
-src/main.tsx                     → Entry point con listeners de SW
-src/App.tsx                      → Root component (envuelto en ErrorBoundary)
-src/components/ErrorBoundary.tsx → Captura errores de React
-src/components/RecoveryMode.tsx  → UI del modo recovery
-src/pages/Index.tsx              → Verifica y muestra RecoveryMode
-src/services/logger.ts           → Registra errores críticos
-```
-
-## 🚀 Integración con Otros Sistemas
-
-### Con Sistema de Actualizaciones OTA
-```typescript
-// El backend puede notificar fallo de actualización vía WebSocket
-// Frontend activa recovery_mode automáticamente
-```
-
-### Con Mini-Web AP Mode
-```typescript
-// Si Recovery falla, usuario puede:
-// 1. Conectarse al WiFi AP de la báscula
-// 2. Acceder a http://192.168.4.1/config
-// 3. Reconfigurar conexión de red
-// 4. Forzar actualización manual
-```
-
-### Con Logger Service
-```typescript
-// Todos los errores críticos se registran en:
-localStorage.getItem("critical_errors") // Array de errores
-// El usuario puede exportar logs desde Recovery Mode
-```
-
-## ⚙️ Configuración Avanzada
-
-### Personalizar Tiempo de Espera
-```typescript
-// En RecoveryMode.tsx, puedes ajustar:
-setTimeout(() => window.location.reload(), 30000); // 30 segundos
-```
-
-### Agregar Nuevas Acciones de Recovery
-```typescript
-// Ejemplo: Limpiar base de datos local
-const handleClearData = async () => {
-  await storage.clear();
-  toast({ title: "Datos locales eliminados" });
-  handleRetry();
-};
-```
-
-## 🎨 Diseño Visual
-
-El Modo Recovery usa:
-- `bg-warning/5` - Fondo sutil de advertencia
-- `border-warning/50` - Borde naranja para alertar
-- Icono `AlertCircle` grande (20x20 con padding)
-- Botones con variantes: `glow`, `secondary`, `outline`
-- Cards con `max-w-2xl` para evitar que sea muy ancho
-
-## 📊 Métricas y Monitoreo
-
-Para producción, considera agregar:
-```typescript
-// Enviar telemetría cuando se activa Recovery Mode
-analytics.track("recovery_mode_activated", {
-  reason: lastError?.message,
-  timestamp: Date.now(),
-  userAgent: navigator.userAgent
-});
-```
-
-## 🔒 Seguridad
-
-- El Modo Recovery **no expone información sensible** del usuario
-- Los errores mostrados son **mensajes genéricos**
-- Para debug detallado, usar la mini-web con PIN de acceso
-- Los logs críticos se guardan localmente, no se envían automáticamente
-
-## 🌐 Acceso Remoto en Emergencia
-
-Si el usuario no puede interactuar con la pantalla táctil:
-
-1. **Conectar teclado USB** a la Raspberry Pi
-2. **Presionar Ctrl+Alt+F2** → Acceder a terminal TTY
-3. **Ejecutar:** `sudo systemctl restart bascula-ui`
-4. **O limpiar flags manualmente:**
+1. **Conecta un monitor HDMI** y **teclado USB** a la Raspberry Pi
+2. Si logras ver algo en pantalla, **presiona Ctrl+Alt+F1** para cambiar a terminal
+3. **Inicia sesión** con tu usuario (por defecto: `pi`)
+4. **Edita el config.txt**:
    ```bash
-   rm -rf /home/pi/.config/chromium/Default/Local\ Storage/leveldb
+   sudo nano /boot/firmware/config.txt
+   ```
+5. **Comenta las líneas** como se indica arriba
+6. **Guarda** (Ctrl+O, Enter) y **sal** (Ctrl+X)
+7. **Reinicia**:
+   ```bash
+   sudo reboot
    ```
 
-## ✅ Checklist de Testing
+## Configuración Mínima Segura
 
-- [ ] Forzar error en Service Worker → Recovery se activa
-- [ ] Simular error de React → Error Boundary captura
-- [ ] Probar "Reintentar Cargar App" → Limpia flags correctamente
-- [ ] Probar "Reinstalar Última Versión" → Llama a API
-- [ ] Probar "Reiniciar Sistema" → Recarga después de 3s
-- [ ] Verificar que mensaje de error se muestra
-- [ ] Confirmar que UPDATE_SUCCESS limpia recovery_mode
-- [ ] Acceder a mini-web desde otro dispositivo
+Si quieres una configuración mínima que garantice el arranque, reemplaza la sección `# --- Bascula-Cam` con:
 
-## 🔄 Flujo Completo de Recovery
+```bash
+# --- Bascula-Cam: Configuración Mínima ---
+# HDMI básico
+hdmi_force_hotplug=1
+dtoverlay=vc4-kms-v3d
 
-```mermaid
-graph TD
-    A[App Normal] -->|Error Crítico| B{Tipo de Error}
-    B -->|Service Worker Fail| C[Guarda en recovery-cache]
-    B -->|React Error| D[ErrorBoundary captura]
-    B -->|Update Fail| E[Mensaje desde SW]
-    C --> F[recovery_mode = true]
-    D --> F
-    E --> F
-    F --> G[Index.tsx detecta flag]
-    G --> H[Muestra RecoveryMode]
-    H --> I{Usuario Elige}
-    I -->|Reintentar| J[Limpia flags + reload]
-    I -->|Reinstalar| K[api.installUpdate]
-    I -->|Reiniciar| L[Reload después 3s]
-    J --> M{Funciona?}
-    K --> M
-    L --> M
-    M -->|Sí| N[App Normal]
-    M -->|No| O[Acceder Mini-Web]
+# UART para ESP32
+enable_uart=1
+dtoverlay=disable-bt
+
+# I2C
+dtparam=i2c_arm=on
+# --- Bascula-Cam (end) ---
 ```
 
----
+Esta configuración solo habilita lo esencial (HDMI, UART, I2C) sin hardware específico.
 
-**Nota:** Este sistema proporciona una red de seguridad robusta para que el dispositivo nunca quede completamente inoperativo, incluso después de actualizaciones fallidas o errores críticos.
+## Habilitar Hardware Paso a Paso
+
+Una vez que el sistema arranque con la configuración mínima:
+
+### 1. Habilitar Cámara Module 3
+
+```bash
+sudo nano /boot/firmware/config.txt
+```
+
+Añadir:
+```bash
+camera_auto_detect=1
+dtoverlay=imx708
+```
+
+Reiniciar y probar:
+```bash
+sudo reboot
+libcamera-hello --list-cameras
+```
+
+### 2. Habilitar Audio I2S (HifiBerry DAC / MAX98357A)
+
+```bash
+sudo nano /boot/firmware/config.txt
+```
+
+Añadir:
+```bash
+dtparam=audio=off
+dtoverlay=i2s-mmap
+dtoverlay=hifiberry-dac
+```
+
+Reiniciar y probar:
+```bash
+sudo reboot
+aplay -l
+```
+
+### 3. Configurar HDMI Personalizado (Pantalla 1024x600)
+
+```bash
+sudo nano /boot/firmware/config.txt
+```
+
+Añadir:
+```bash
+hdmi_group=2
+hdmi_mode=87
+hdmi_cvt=1024 600 60 3 0 0 0
+```
+
+Reiniciar:
+```bash
+sudo reboot
+```
+
+## Verificar Servicios
+
+Una vez que el sistema arranque correctamente:
+
+```bash
+# Ver estado de los servicios
+sudo systemctl status bascula-miniweb.service
+sudo systemctl status bascula-app.service
+sudo systemctl status ocr-service.service
+
+# Ver logs
+journalctl -u bascula-miniweb.service -f
+journalctl -u bascula-app.service -f
+```
+
+## Script de Instalación Seguro
+
+Ejecutar el instalador sin configurar hardware específico:
+
+```bash
+export SKIP_HARDWARE_CONFIG=1
+sudo bash ~/bascula-ui/scripts/install-all.sh
+```
+
+Esto instalará todo el software pero no modificará `/boot/firmware/config.txt`.
+
+## Contacto y Soporte
+
+Si los problemas persisten:
+- Revisa los logs del kernel: `dmesg | tail -50`
+- Verifica el sistema de archivos: `sudo fsck /dev/mmcblk0p2`
+- Considera reinstalar Raspberry Pi OS desde cero

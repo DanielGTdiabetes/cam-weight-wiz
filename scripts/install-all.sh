@@ -119,24 +119,21 @@ log "✓ Usuario ${TARGET_USER} añadido a grupos necesarios"
 
 # Configure boot config
 log "[7/20] Configurando boot/config.txt..."
-# Limpiar configuración anterior
-sed -i '/# --- Bascula-Cam/,/# --- Bascula-Cam (end) ---/d' "${CONF}"
 
-# Añadir nueva configuración
-cat >> "${CONF}" <<'EOF'
+if [[ "${SKIP_HARDWARE_CONFIG:-0}" == "1" ]]; then
+  warn "SKIP_HARDWARE_CONFIG=1, saltando modificación de config.txt"
+else
+  # Limpiar configuración anterior
+  sed -i '/# --- Bascula-Cam/,/# --- Bascula-Cam (end) ---/d' "${CONF}"
+
+  # Añadir configuración mínima segura por defecto
+  # El usuario puede habilitar más hardware después del primer arranque exitoso
+  cat >> "${CONF}" <<'EOF'
 # --- Bascula-Cam: Hardware Configuration ---
-# HDMI para pantalla 7" (1024x600)
+# HDMI básico
 hdmi_force_hotplug=1
-hdmi_group=2
-hdmi_mode=87
-hdmi_cvt=1024 600 60 3 0 0 0
 dtoverlay=vc4-kms-v3d
 disable_overscan=1
-
-# Audio I2S (HifiBerry DAC / MAX98357A)
-dtparam=audio=off
-dtoverlay=i2s-mmap
-dtoverlay=hifiberry-dac
 
 # I2C
 dtparam=i2c_arm=on
@@ -145,13 +142,29 @@ dtparam=i2c_arm=on
 enable_uart=1
 dtoverlay=disable-bt
 
-# Camera Module 3 (IMX708)
-camera_auto_detect=1
-dtoverlay=imx708
+# Configuración avanzada opcional (comentado por seguridad):
+# Descomentar solo si tienes el hardware conectado y verificado
+
+# HDMI Personalizado 1024x600 (descomentar para pantalla 7")
+#hdmi_group=2
+#hdmi_mode=87
+#hdmi_cvt=1024 600 60 3 0 0 0
+
+# Audio I2S - HifiBerry DAC / MAX98357A (descomentar si tienes DAC I2S)
+#dtparam=audio=off
+#dtoverlay=i2s-mmap
+#dtoverlay=hifiberry-dac
+
+# Camera Module 3 IMX708 (descomentar si tienes Camera Module 3 conectada)
+#camera_auto_detect=1
+#dtoverlay=imx708
 # --- Bascula-Cam (end) ---
 EOF
 
-log "✓ Configuración de hardware añadida a ${CONF}"
+  log "✓ Configuración mínima segura añadida a ${CONF}"
+  warn "Hardware específico (cámara, audio I2S, HDMI custom) comentado por seguridad"
+  warn "Edita ${CONF} para habilitar después del primer arranque exitoso"
+fi
 
 # Disable Bluetooth UART
 systemctl disable --now hciuart 2>/dev/null || true
