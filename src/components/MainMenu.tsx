@@ -83,24 +83,33 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
         </div>
 
         <div className="grid grid-cols-2 gap-6">
-          {menuItems.map(({ id, icon: Icon, title, description, borderColor, hoverBorder, iconBg, iconHoverBg, glowClass }) => (
-            <Card
-              key={id}
-              className={`group cursor-pointer overflow-hidden ${borderColor} ${hoverBorder} ${glowClass} transition-smooth hover:scale-105`}
-              onClick={() => onNavigate(id)}
-            >
-              <div className="gradient-holographic absolute inset-0 opacity-0 transition-smooth group-hover:opacity-20" />
-              <div className="relative p-8 text-center">
-                <div className="mb-4 flex justify-center">
-                  <div className={`rounded-xl ${iconBg} ${iconHoverBg} p-6 transition-smooth group-hover:text-primary-foreground`}>
-                    <Icon className="h-12 w-12" />
+          {menuItems.map(({ id, icon: Icon, title, description, borderColor, hoverBorder, iconBg, iconHoverBg, glowClass }) => {
+            const handleClick = (e: React.MouseEvent) => {
+              e.preventDefault();
+              e.stopPropagation();
+              console.log("MainMenu: Navigating to:", id);
+              onNavigate(id);
+            };
+
+            return (
+              <Card
+                key={id}
+                className={`group cursor-pointer overflow-hidden ${borderColor} ${hoverBorder} ${glowClass} transition-smooth hover:scale-105`}
+                onClick={handleClick}
+              >
+                <div className="gradient-holographic absolute inset-0 opacity-0 transition-smooth group-hover:opacity-20 pointer-events-none" />
+                <div className="relative p-8 text-center pointer-events-none">
+                  <div className="mb-4 flex justify-center">
+                    <div className={`rounded-xl ${iconBg} ${iconHoverBg} p-6 transition-smooth group-hover:text-primary-foreground`}>
+                      <Icon className="h-12 w-12" />
+                    </div>
                   </div>
+                  <h2 className="mb-2 text-2xl font-bold">{title}</h2>
+                  <p className="text-sm text-muted-foreground">{description}</p>
                 </div>
-                <h2 className="mb-2 text-2xl font-bold">{title}</h2>
-                <p className="text-sm text-muted-foreground">{description}</p>
-              </div>
-            </Card>
-          ))}
+              </Card>
+            );
+          })}
         </div>
       </div>
     </div>

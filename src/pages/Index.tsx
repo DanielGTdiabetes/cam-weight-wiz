@@ -83,12 +83,18 @@ const Index = () => {
     setBasculinMood("sleeping");
   };
 
+  const handleNavigate = (view: string) => {
+    console.log("Index: Changing view from", currentView, "to", view);
+    setCurrentView(view);
+  };
+
   const renderView = () => {
+    console.log("Index: Rendering view:", currentView);
     switch (currentView) {
       case "menu":
-        return <MainMenu onNavigate={setCurrentView} />;
+        return <MainMenu onNavigate={handleNavigate} />;
       case "scale":
-        return <ScaleView onNavigate={setCurrentView} />;
+        return <ScaleView onNavigate={handleNavigate} />;
       case "scanner":
         return <FoodScannerView />;
       case "timer":
@@ -98,7 +104,7 @@ const Index = () => {
       case "settings":
         return <SettingsView />;
       default:
-        return <MainMenu onNavigate={setCurrentView} />;
+        return <MainMenu onNavigate={handleNavigate} />;
     }
   };
 
