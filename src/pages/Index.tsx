@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { MainMenu } from "@/components/MainMenu";
 import { ScaleView } from "@/pages/ScaleView";
 import { FoodScannerView } from "@/pages/FoodScannerView";
@@ -8,6 +8,10 @@ import { SettingsView } from "@/pages/SettingsView";
 import { TopBar } from "@/components/TopBar";
 import { NotificationBar } from "@/components/NotificationBar";
 import { TimerDialog } from "@/components/TimerDialog";
+import { Mode1515Dialog } from "@/components/Mode1515Dialog";
+import { RecoveryMode } from "@/components/RecoveryMode";
+import { APModeScreen } from "@/components/APModeScreen";
+import { BasculinMascot } from "@/components/BasculinMascot";
 import { Clock, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
@@ -19,14 +23,42 @@ const Index = () => {
   const [timerSeconds, setTimerSeconds] = useState<number | undefined>(undefined);
   const [notification, setNotification] = useState<string>("");
   const [isVoiceActive, setIsVoiceActive] = useState(false);
-  const [diabetesMode, setDiabetesMode] = useState(false);
+  const [diabetesMode, setDiabetesMode] = useState(true); // Enable by default for demo
+  const [show1515Mode, setShow1515Mode] = useState(false);
+  const [showRecovery, setShowRecovery] = useState(false);
+  const [showAPMode, setShowAPMode] = useState(false);
+  const [mascoMsg, setMascoMsg] = useState<string | undefined>();
 
   // Monitor glucose if diabetes mode is enabled
   const glucoseData = useGlucoseMonitor(diabetesMode);
 
+  // Check for hypoglycemia
+  useEffect(() => {
+    if (glucoseData && glucoseData.glucose < 70 && diabetesMode) {
+      setShow1515Mode(true);
+    }
+  }, [glucoseData, diabetesMode]);
+
+  // Detect recovery mode (simulate detection)
+  useEffect(() => {
+    const isRecoveryNeeded = localStorage.getItem("recovery_mode") === "true";
+    if (isRecoveryNeeded) {
+      setShowRecovery(true);
+    }
+  }, []);
+
+  // Detect AP mode (simulate detection)
+  useEffect(() => {
+    const isAPMode = localStorage.getItem("ap_mode") === "true";
+    if (isAPMode) {
+      setShowAPMode(true);
+    }
+  }, []);
+
   const handleTimerStart = async (seconds: number) => {
     setTimerSeconds(seconds);
     setShowTimerDialog(false);
+    setMascoMsg("Temporizador iniciado");
     
     try {
       await api.startTimer(seconds);
@@ -61,8 +93,32 @@ const Index = () => {
 
   const showTopBar = currentView !== "menu" && currentView !== "timer" && currentView !== "recipes";
 
+  // Show special screens first
+  if (showRecovery) {
+    return <RecoveryMode />;
+  }
+
+  if (showAPMode) {
+    return <APModeScreen />;
+  }
+
   return (
     <div className="h-screen overflow-hidden bg-background">
+      {/* Mode 15/15 Dialog */}
+      {show1515Mode && glucoseData && (
+        <Mode1515Dialog
+          glucose={glucoseData.glucose}
+          onClose={() => setShow1515Mode(false)}
+        />
+      )}
+
+      {/* Basculin Mascot */}
+      <BasculinMascot
+        isActive={currentView !== "menu"}
+        message={mascoMsg}
+        position="corner"
+      />
+
       {/* Top Bar - Show in most views except menu, timer, recipes */}
       {showTopBar && (
         <>
