@@ -90,7 +90,7 @@ apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
     python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial \
     python3-pil python3-pil.imagetk python3-xdg \
     x11-xserver-utils xserver-xorg xinit openbox xserver-xorg-legacy \
-    chromium-browser unclutter fonts-dejavu-core \
+    chromium unclutter fonts-dejavu-core \
     libjpeg-dev zlib1g-dev libpng-dev \
     alsa-utils sox ffmpeg \
     libzbar0 gpiod python3-rpi.gpio \
@@ -640,7 +640,7 @@ xset s noblank
 unclutter -idle 0.5 -root &
 openbox &
 sleep 2
-chromium-browser \
+chromium \
   --kiosk \
   --noerrdialogs \
   --disable-infobars \
