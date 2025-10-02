@@ -15,7 +15,7 @@ import { BasculinMascot } from "@/components/BasculinMascot";
 import { Clock, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
-import { networkDetector } from "@/services/networkDetector";
+import { networkDetector, NetworkStatus } from "@/services/networkDetector";
 import { api } from "@/services/api";
 
 const Index = () => {
@@ -57,7 +57,7 @@ const Index = () => {
 
   // Monitor network status for AP mode
   useEffect(() => {
-    const handleNetworkStatus = (status: any) => {
+    const handleNetworkStatus = (status: NetworkStatus) => {
       // Show AP mode screen if WiFi is not connected
       setShowAPMode(status.shouldActivateAP);
       

@@ -17,7 +17,7 @@ export const Mode1515Dialog = ({ glucose, onClose }: Mode1515DialogProps) => {
   useEffect(() => {
     // Announce the hypoglycemia
     speak(`Atención: Hipoglucemia detectada. Tu glucosa está en ${glucose} miligramos por decilitro. Sigue el protocolo 15/15.`);
-  }, []);
+  }, [speak, glucose]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;

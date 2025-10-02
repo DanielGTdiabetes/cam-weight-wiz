@@ -2,7 +2,7 @@
 
 import { logger } from './logger';
 
-interface NetworkStatus {
+export interface NetworkStatus {
   isOnline: boolean;
   isWifiConnected: boolean;
   shouldActivateAP: boolean;
