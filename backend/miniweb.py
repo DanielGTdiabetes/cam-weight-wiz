@@ -1,9 +1,11 @@
 """
-Mini-Web Configuration Server
-Runs on AP mode for WiFi configuration
+Mini-Web Configuration Server + Scale Backend
+- WiFi configuration in AP mode
+- Serial communication with ESP32 scale
+- WebSocket for real-time weight data
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -11,8 +13,71 @@ import subprocess
 import os
 import random
 import string
+import asyncio
+import serial
+import json
+from typing import Optional
+from contextlib import asynccontextmanager
 
-app = FastAPI()
+# Global state for scale connection
+scale_serial: Optional[serial.Serial] = None
+active_connections: list[WebSocket] = []
+
+# Configuration
+CONFIG_PATH = os.path.expanduser("~/.bascula/config.json")
+DEFAULT_SERIAL_PORT = "/dev/serial0"
+DEFAULT_BAUD_RATE = 115200
+
+def load_config():
+    """Load configuration from JSON file"""
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+    return {}
+
+def get_serial_config():
+    """Get serial port configuration"""
+    config = load_config()
+    return {
+        "port": config.get("scale", {}).get("port", DEFAULT_SERIAL_PORT),
+        "baud": config.get("scale", {}).get("baud", DEFAULT_BAUD_RATE),
+    }
+
+async def init_scale():
+    """Initialize serial connection to ESP32 scale"""
+    global scale_serial
+    try:
+        serial_config = get_serial_config()
+        scale_serial = serial.Serial(
+            port=serial_config["port"],
+            baudrate=serial_config["baud"],
+            timeout=1
+        )
+        print(f"✅ Scale connected on {serial_config['port']} @ {serial_config['baud']}")
+    except Exception as e:
+        print(f"⚠️ Scale not connected: {e}")
+        scale_serial = None
+
+async def close_scale():
+    """Close serial connection"""
+    global scale_serial
+    if scale_serial and scale_serial.is_open:
+        scale_serial.close()
+        print("Scale connection closed")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown events"""
+    # Startup
+    await init_scale()
+    yield
+    # Shutdown
+    await close_scale()
+
+app = FastAPI(lifespan=lifespan)
 
 # CORS for local access
 app.add_middleware(
@@ -198,11 +263,91 @@ def disable_ap_mode():
     except:
         pass
 
+# ============= SCALE ENDPOINTS =============
+
+@app.websocket("/ws/scale")
+async def websocket_scale(websocket: WebSocket):
+    """WebSocket endpoint for real-time weight data"""
+    await websocket.accept()
+    active_connections.append(websocket)
+    
+    try:
+        while True:
+            if scale_serial and scale_serial.is_open:
+                try:
+                    # Read line from ESP32
+                    if scale_serial.in_waiting > 0:
+                        line = scale_serial.readline().decode('utf-8').strip()
+                        
+                        # Expected format from ESP32: {"weight":123.45,"stable":true,"unit":"g"}
+                        try:
+                            data = json.loads(line)
+                            await websocket.send_json(data)
+                        except json.JSONDecodeError:
+                            # If not JSON, try to parse as simple number
+                            try:
+                                weight = float(line)
+                                await websocket.send_json({
+                                    "weight": weight,
+                                    "stable": True,
+                                    "unit": "g"
+                                })
+                            except ValueError:
+                                pass
+                except Exception as e:
+                    print(f"Error reading from scale: {e}")
+            
+            # Send heartbeat even if no data
+            await asyncio.sleep(0.1)
+            
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        if websocket in active_connections:
+            active_connections.remove(websocket)
+
+@app.post("/api/scale/tare")
+async def scale_tare():
+    """Send tare command to scale"""
+    if scale_serial and scale_serial.is_open:
+        try:
+            scale_serial.write(b"TARE\n")
+            return {"success": True, "message": "Tare command sent"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        raise HTTPException(status_code=503, detail="Scale not connected")
+
+@app.post("/api/scale/zero")
+async def scale_zero():
+    """Send zero/calibrate command to scale"""
+    if scale_serial and scale_serial.is_open:
+        try:
+            scale_serial.write(b"ZERO\n")
+            return {"success": True, "message": "Zero command sent"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+    else:
+        raise HTTPException(status_code=503, detail="Scale not connected")
+
+@app.get("/api/scale/status")
+async def scale_status():
+    """Get scale connection status"""
+    connected = scale_serial is not None and scale_serial.is_open
+    serial_config = get_serial_config()
+    
+    return {
+        "connected": connected,
+        "port": serial_config["port"],
+        "baud": serial_config["baud"]
+    }
+
 if __name__ == "__main__":
     import uvicorn
     
     print("=" * 60)
-    print("🌐 Mini-Web Configuration Server")
+    print("🌐 Mini-Web Configuration Server + Scale Backend")
     print("=" * 60)
     print(f"📍 Access URL: http://192.168.4.1:8080")
     print(f"🔐 PIN: {CURRENT_PIN}")
