@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Settings, Scale, Wifi, Heart, Download, Save, Upload, Trash2 } from "lucide-react";
+import { Settings, Scale, Wifi, Heart, Download, Save, Upload, Trash2, Volume2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -12,6 +12,7 @@ import { storage } from "@/services/storage";
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { cn } from "@/lib/utils";
+import { api } from "@/services/api";
 
 export const SettingsView = () => {
   const { toast } = useToast();
@@ -63,6 +64,9 @@ export const SettingsView = () => {
   const [hyperAlarm, setHyperAlarm] = useState("180");
   
   const [tempValue, setTempValue] = useState("");
+  const [isTestingAudio, setIsTestingAudio] = useState(false);
+  const [isTestingChatGPT, setIsTestingChatGPT] = useState(false);
+  const [isTestingNightscout, setIsTestingNightscout] = useState(false);
 
   // Save settings when they change
   useEffect(() => {
@@ -226,6 +230,64 @@ export const SettingsView = () => {
     }
   };
 
+  const handleTestAudio = async () => {
+    setIsTestingAudio(true);
+    try {
+      await api.speak("Hola, este es un test del sistema de audio");
+      toast({
+        title: "Test de Audio",
+        description: "Audio funcionando correctamente",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo reproducir el audio",
+        variant: "destructive",
+      });
+    } finally {
+      setIsTestingAudio(false);
+    }
+  };
+
+  const handleTestChatGPT = async () => {
+    setIsTestingChatGPT(true);
+    try {
+      // Test with a simple recipe request
+      await api.getRecipe("test");
+      toast({
+        title: "Test ChatGPT",
+        description: "Conexión con ChatGPT exitosa",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo conectar con ChatGPT. Verifica tu API key",
+        variant: "destructive",
+      });
+    } finally {
+      setIsTestingChatGPT(false);
+    }
+  };
+
+  const handleTestNightscout = async () => {
+    setIsTestingNightscout(true);
+    try {
+      await api.getGlucose();
+      toast({
+        title: "Test Nightscout",
+        description: "Conexión con Nightscout exitosa",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo conectar con Nightscout. Verifica la URL y token",
+        variant: "destructive",
+      });
+    } finally {
+      setIsTestingNightscout(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto p-4">
       <Tabs defaultValue="general" className="w-full">
@@ -279,6 +341,17 @@ export const SettingsView = () => {
                   <option>Voz Masculina (es-ES)</option>
                 </select>
               </div>
+
+              <Button 
+                variant="outline" 
+                size="lg" 
+                className="w-full justify-start"
+                onClick={handleTestAudio}
+                disabled={isTestingAudio || !voiceEnabled}
+              >
+                <Volume2 className="mr-2 h-5 w-5" />
+                {isTestingAudio ? "Probando..." : "Probar Audio"}
+              </Button>
 
               <div className="border-t border-border pt-6">
                 <h4 className="text-lg font-semibold mb-4">Gestión de Datos</h4>
@@ -398,6 +471,17 @@ export const SettingsView = () => {
                   className="text-lg cursor-pointer"
                 />
               </div>
+
+              <Button 
+                variant="outline" 
+                size="lg" 
+                className="w-full justify-start"
+                onClick={handleTestChatGPT}
+                disabled={isTestingChatGPT || !chatGptKey}
+              >
+                <CheckCircle2 className="mr-2 h-5 w-5" />
+                {isTestingChatGPT ? "Probando..." : "Probar Conexión ChatGPT"}
+              </Button>
 
               <div>
                 <Label className="text-lg font-medium mb-2 block">Acceso Mini-Web</Label>
@@ -538,6 +622,17 @@ export const SettingsView = () => {
                         className="cursor-pointer"
                       />
                     </div>
+
+                    <Button 
+                      variant="outline" 
+                      size="lg" 
+                      className="w-full justify-start"
+                      onClick={handleTestNightscout}
+                      disabled={isTestingNightscout || !nightscoutUrl}
+                    >
+                      <CheckCircle2 className="mr-2 h-5 w-5" />
+                      {isTestingNightscout ? "Probando..." : "Probar Conexión Nightscout"}
+                    </Button>
                   </div>
                 </>
               )}
