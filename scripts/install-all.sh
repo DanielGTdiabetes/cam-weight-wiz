@@ -84,8 +84,13 @@ echo -e "${GREEN}✓ Dependencias instaladas${NC}"
 echo -e "${YELLOW}[5/15] Instalando dependencias Python del sistema...${NC}"
 sudo apt install -y \
     python3-picamera2 \
+    python3-libcamera \
+    libcamera-apps \
     python3-serial \
     python3-opencv \
+    python3-pil \
+    python3-numpy \
+    v4l-utils \
     libatlas-base-dev
 echo -e "${GREEN}✓ Dependencias Python del sistema instaladas${NC}"
 
@@ -122,19 +127,39 @@ sudo usermod -aG i2c pi
 sudo usermod -aG gpio pi
 sudo usermod -aG audio pi
 
-# Enable I2C for audio (MAX98357A)
-if ! grep -q "^dtparam=i2c_arm=on" /boot/config.txt; then
-    echo "dtparam=i2c_arm=on" | sudo tee -a /boot/config.txt
+# Detect boot config location (Bookworm uses /boot/firmware/)
+if [ -f "/boot/firmware/config.txt" ]; then
+    BOOT_CONFIG="/boot/firmware/config.txt"
+else
+    BOOT_CONFIG="/boot/config.txt"
 fi
 
-# Enable serial for ESP32
-if ! grep -q "^enable_uart=1" /boot/config.txt; then
-    echo "enable_uart=1" | sudo tee -a /boot/config.txt
+# Enable I2C
+if ! grep -q "^dtparam=i2c_arm=on" $BOOT_CONFIG; then
+    echo "dtparam=i2c_arm=on" | sudo tee -a $BOOT_CONFIG
+fi
+
+# Enable UART for ESP32 scale
+if ! grep -q "^enable_uart=1" $BOOT_CONFIG; then
+    echo "enable_uart=1" | sudo tee -a $BOOT_CONFIG
+fi
+
+# Disable Bluetooth on UART (improves stability)
+if ! grep -q "^dtoverlay=disable-bt" $BOOT_CONFIG; then
+    echo "dtoverlay=disable-bt" | sudo tee -a $BOOT_CONFIG
+fi
+
+# Enable Camera Module 3 (IMX708)
+if ! grep -q "^camera_auto_detect=1" $BOOT_CONFIG; then
+    echo "camera_auto_detect=1" | sudo tee -a $BOOT_CONFIG
+fi
+if ! grep -q "^dtoverlay=imx708" $BOOT_CONFIG; then
+    echo "dtoverlay=imx708" | sudo tee -a $BOOT_CONFIG
 fi
 
 # Configure screen resolution for 7" display (1024x600)
-if ! grep -q "^hdmi_force_hotplug=1" /boot/config.txt; then
-    sudo tee -a /boot/config.txt > /dev/null <<SCREENEOF
+if ! grep -q "^hdmi_force_hotplug=1" $BOOT_CONFIG; then
+    sudo tee -a $BOOT_CONFIG > /dev/null <<SCREENEOF
 
 # 7" Display Configuration
 hdmi_force_hotplug=1

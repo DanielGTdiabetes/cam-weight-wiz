@@ -48,6 +48,8 @@ El script instalará automáticamente:
 - ✅ Servicios systemd (auto-start)
 - ✅ Modo kiosk (Chromium fullscreen)
 - ✅ Configuración de pantalla táctil 7"
+- ✅ Librerías de cámara (libcamera, picamera2)
+- ✅ Dependencias para procesamiento de imagen (OpenCV, PIL)
 
 ### 3. Configuración Post-Instalación
 
@@ -70,8 +72,9 @@ VITE_WS_URL=ws://localhost:8080
 **Ejemplo `.env` backend:**
 ```env
 # Hardware
-SCALE_DEVICE=/dev/ttyUSB0
-CAMERA_INDEX=0
+SCALE_DEVICE=/dev/serial0  # UART para ESP32
+CAMERA_INDEX=0  # Para Camera Module 3 CSI
+CAMERA_TYPE=picamera2  # o 'usb' para cámara USB
 
 # Nightscout (opcional)
 NIGHTSCOUT_URL=https://tu-sitio.herokuapp.com
@@ -280,15 +283,75 @@ sudo usermod -a -G dialout pi
 sudo reboot
 ```
 
-### Habilitar Cámara
+### Configurar Camera Module 3 (CSI)
 
 ```bash
-# Para cámara CSI (ribbon cable)
+# Instalar libcamera y picamera2
+sudo apt update
+sudo apt install -y python3-picamera2 python3-libcamera libcamera-apps
+
+# Instalar dependencias de imagen para Python
+sudo apt install -y python3-opencv python3-pil python3-numpy
+
+# Habilitar cámara en raspi-config
 sudo raspi-config
 # Ir a: Interface Options > Camera > Enable
 
-# Para cámara USB, verificar:
-ls /dev/video*
+# Configurar en boot/config.txt
+sudo nano /boot/firmware/config.txt
+
+# Asegurarse de tener estas líneas:
+camera_auto_detect=1
+dtoverlay=imx708  # Para Camera Module 3
+
+# Guardar y reiniciar
+sudo reboot
+```
+
+**Verificar Camera Module 3:**
+
+```bash
+# Listar cámaras detectadas
+libcamera-hello --list-cameras
+
+# Debería mostrar algo como:
+# Available cameras
+# -----------------
+# 0 : imx708 [4608x2592] (/base/axi/pcie@120000/rp1/i2c@80000/imx708@1a)
+
+# Capturar foto de prueba (5 segundos preview)
+libcamera-still -o test.jpg -t 5000
+
+# Probar con Python
+python3 << EOF
+from picamera2 import Picamera2
+import time
+
+picam2 = Picamera2()
+config = picam2.create_still_configuration()
+picam2.configure(config)
+picam2.start()
+time.sleep(2)
+picam2.capture_file("test_python.jpg")
+picam2.stop()
+print("✅ Foto capturada: test_python.jpg")
+EOF
+```
+
+**Para cámara USB (alternativa):**
+
+```bash
+# Verificar dispositivos de video
+ls -l /dev/video*
+
+# Instalar v4l-utils
+sudo apt install -y v4l-utils
+
+# Ver información de la cámara
+v4l2-ctl --list-devices
+
+# Probar captura
+fswebcam -r 1920x1080 --no-banner test_usb.jpg
 ```
 
 ### Habilitar I2C (opcional, sensores)
@@ -458,14 +521,33 @@ groups pi  # Debe incluir "dialout"
 ### Cámara no Funciona
 
 ```bash
-# Para cámara CSI
-libcamera-hello
+# Verificar que la cámara está conectada correctamente
+libcamera-hello --list-cameras
+
+# Para Camera Module 3 CSI
+libcamera-still -o test.jpg
+
+# Verificar configuración en boot
+grep -E "camera|imx708" /boot/firmware/config.txt
+
+# Debe mostrar:
+# camera_auto_detect=1
+# dtoverlay=imx708
 
 # Para cámara USB
+v4l2-ctl --list-devices
 fswebcam test.jpg
 
 # Verificar permisos
 groups pi  # Debe incluir "video"
+sudo usermod -a -G video pi
+
+# Ver logs del kernel sobre la cámara
+dmesg | grep -i camera
+dmesg | grep -i imx708
+
+# Reiniciar si hiciste cambios
+sudo reboot
 ```
 
 ### WiFi AP no se Activa
