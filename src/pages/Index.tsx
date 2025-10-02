@@ -28,6 +28,7 @@ const Index = () => {
   const [showRecovery, setShowRecovery] = useState(false);
   const [showAPMode, setShowAPMode] = useState(false);
   const [mascoMsg, setMascoMsg] = useState<string | undefined>();
+  const [basculinMood, setBasculinMood] = useState<"normal" | "happy" | "worried" | "alert" | "sleeping">("normal");
 
   // Monitor glucose if diabetes mode is enabled
   const glucoseData = useGlucoseMonitor(diabetesMode);
@@ -36,6 +37,12 @@ const Index = () => {
   useEffect(() => {
     if (glucoseData && glucoseData.glucose < 70 && diabetesMode) {
       setShow1515Mode(true);
+      setBasculinMood("alert");
+      setMascoMsg("¡Alerta! Glucosa baja detectada");
+    } else if (glucoseData && glucoseData.glucose >= 70 && glucoseData.glucose <= 180) {
+      setBasculinMood("happy");
+    } else if (glucoseData && glucoseData.glucose > 180) {
+      setBasculinMood("worried");
     }
   }, [glucoseData, diabetesMode]);
 
@@ -59,17 +66,21 @@ const Index = () => {
     setTimerSeconds(seconds);
     setShowTimerDialog(false);
     setMascoMsg("Temporizador iniciado");
+    setBasculinMood("happy");
     
     try {
       await api.startTimer(seconds);
     } catch (err) {
       console.error("Failed to start timer:", err);
+      setBasculinMood("worried");
+      setMascoMsg("Error al iniciar temporizador");
     }
   };
 
   const handleBackToMenu = () => {
     setCurrentView("menu");
     setTimerSeconds(undefined);
+    setBasculinMood("sleeping");
   };
 
   const renderView = () => {
@@ -117,6 +128,8 @@ const Index = () => {
         isActive={currentView !== "menu"}
         message={mascoMsg}
         position="corner"
+        mood={basculinMood}
+        enableVoice={isVoiceActive}
       />
 
       {/* Top Bar - Show in most views except menu, timer, recipes */}
