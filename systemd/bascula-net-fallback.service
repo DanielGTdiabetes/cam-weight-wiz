@@ -1,0 +1,13 @@
+[Unit]
+Description=Bascula Network Fallback AP
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bascula/current/scripts/net-fallback.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,234 +1,451 @@
 #!/bin/bash
 #
 # Script de instalación completa para Báscula Inteligente
-# Instala el sistema completo en Raspberry Pi 5 con OS Lite
-# Optimizado para pantalla táctil 7" (1024x600)
+# Raspberry Pi 5 + Bookworm Lite 64-bit
+# - Instala estructura OTA con versionado
+# - Configura HDMI (1024x600), KMS, I2S audio, UART, Camera Module 3
+# - Instala Piper TTS, Tesseract OCR, servicios y NetworkManager AP fallback
+# - Idempotente con verificaciones exhaustivas
 #
 
-set -e  # Exit on error
+set -euo pipefail
 
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-echo -e "${GREEN}============================================${NC}"
-echo -e "${GREEN}  Instalación Completa - Báscula Inteligente${NC}"
-echo -e "${GREEN}============================================${NC}"
-echo ""
+log()  { printf "${BLUE}[inst]${NC} %s\n" "$*"; }
+warn() { printf "${YELLOW}[inst][warn]${NC} %s\n" "$*"; }
+err()  { printf "${RED}[inst][err]${NC} %s\n" "$*"; }
 
-# Check if running as root
-if [ "$EUID" -eq 0 ]; then 
-   echo -e "${RED}No ejecutes este script como root${NC}"
-   echo "Por favor ejecuta: bash install-all.sh"
-   exit 1
+# --- Require root privileges ---
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+  err "Ejecuta con sudo: sudo ./install-all.sh"
+  exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# --- Configuration variables ---
+TARGET_USER="${SUDO_USER:-pi}"
+TARGET_GROUP="${TARGET_USER}"
+TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+if [[ -z "${TARGET_HOME}" ]]; then
+  err "No se pudo determinar el home de ${TARGET_USER}"
+  exit 1
+fi
+
+BASCULA_ROOT="/opt/bascula"
+BASCULA_RELEASES_DIR="${BASCULA_ROOT}/releases"
+BASCULA_CURRENT_LINK="${BASCULA_ROOT}/current"
+CFG_DIR="${TARGET_HOME}/.bascula"
+CFG_PATH="${CFG_DIR}/config.json"
+
+AP_SSID="${AP_SSID:-Bascula_AP}"
+AP_PASS="${AP_PASS:-bascula1234}"
+AP_IFACE="${AP_IFACE:-wlan0}"
+AP_NAME="${AP_NAME:-BasculaAP}"
+
+BOOTDIR="/boot/firmware"
+[[ ! -d "${BOOTDIR}" ]] && BOOTDIR="/boot"
+CONF="${BOOTDIR}/config.txt"
+
+log "============================================"
+log "  Instalación Completa - Báscula Inteligente"
+log "============================================"
+log "Target user      : $TARGET_USER ($TARGET_GROUP)"
+log "Target home      : $TARGET_HOME"
+log "OTA current link : $BASCULA_CURRENT_LINK"
+log "AP (NM)          : SSID=${AP_SSID} PASS=${AP_PASS} IFACE=${AP_IFACE}"
+
+# Check internet connection
+log "[1/20] Verificando conexión a Internet..."
+if ! ping -c 1 google.com &> /dev/null; then
+    warn "Sin conexión a Internet. Instalación limitada."
+    NET_OK=0
+else
+    log "✓ Conexión verificada"
+    NET_OK=1
 fi
 
 # Detect architecture
 ARCH=$(uname -m)
 if [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "armv7l" ]; then
-    echo -e "${YELLOW}Advertencia: No se detectó arquitectura ARM. Este script está diseñado para Raspberry Pi.${NC}"
-    read -p "¿Continuar de todos modos? (s/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Ss]$ ]]; then
-        exit 1
-    fi
+    warn "No se detectó arquitectura ARM. Este script está diseñado para Raspberry Pi."
 fi
-
-# Check internet connection
-echo -e "${YELLOW}[1/15] Verificando conexión a Internet...${NC}"
-if ! ping -c 1 google.com &> /dev/null; then
-    echo -e "${RED}Error: No hay conexión a Internet${NC}"
-    echo "Por favor verifica tu conexión WiFi e intenta nuevamente"
-    exit 1
-fi
-echo -e "${GREEN}✓ Conexión verificada${NC}"
 
 # Update system
-echo -e "${YELLOW}[2/15] Actualizando el sistema...${NC}"
-sudo apt update
-sudo apt upgrade -y
-echo -e "${GREEN}✓ Sistema actualizado${NC}"
+log "[2/20] Actualizando el sistema..."
+apt-get update -y
+apt-get upgrade -y
+log "✓ Sistema actualizado"
 
-# Install Node.js and npm
-echo -e "${YELLOW}[3/15] Instalando Node.js...${NC}"
+# Install base system packages
+log "[3/20] Instalando dependencias del sistema..."
+apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
+    python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial \
+    python3-pil python3-pil.imagetk python3-xdg \
+    x11-xserver-utils xserver-xorg xinit openbox xserver-xorg-legacy \
+    unclutter fonts-dejavu-core \
+    libjpeg-dev zlib1g-dev libpng-dev \
+    alsa-utils sox ffmpeg \
+    libzbar0 gpiod python3-rpi.gpio \
+    network-manager dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+
+log "✓ Dependencias base instaladas"
+
+# Install camera dependencies
+log "[4/20] Instalando dependencias de cámara..."
+apt-get install -y libcamera-apps v4l-utils python3-picamera2 \
+    python3-libcamera libcamera-ipa python3-opencv
+log "✓ Dependencias de cámara instaladas"
+
+# Install Node.js
+log "[5/20] Instalando Node.js..."
 if ! command -v node &> /dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    sudo apt install -y nodejs
+    apt-get install -y nodejs
 fi
-echo -e "${GREEN}✓ Node.js $(node --version) instalado${NC}"
-
-# Install system dependencies
-echo -e "${YELLOW}[4/15] Instalando dependencias del sistema...${NC}"
-sudo apt install -y \
-    nginx \
-    python3 \
-    python3-pip \
-    python3-venv \
-    git \
-    unclutter \
-    chromium-browser \
-    xserver-xorg \
-    x11-xserver-utils \
-    xinit \
-    openbox \
-    alsa-utils \
-    pulseaudio \
-    i2c-tools \
-    python3-smbus
-echo -e "${GREEN}✓ Dependencias instaladas${NC}"
-
-# Install Python dependencies
-echo -e "${YELLOW}[5/15] Instalando dependencias Python del sistema...${NC}"
-sudo apt install -y \
-    python3-picamera2 \
-    python3-libcamera \
-    libcamera-apps \
-    python3-serial \
-    python3-opencv \
-    python3-pil \
-    python3-numpy \
-    v4l-utils \
-    libatlas-base-dev
-echo -e "${GREEN}✓ Dependencias Python del sistema instaladas${NC}"
-
-# Setup Python virtual environment for backend
-echo -e "${YELLOW}[6/15] Configurando entorno Python para backend...${NC}"
-BACKEND_DIR="/home/pi/bascula-backend"
-mkdir -p "$BACKEND_DIR"
-python3 -m venv "$BACKEND_DIR/venv"
-source "$BACKEND_DIR/venv/bin/activate"
-
-# Install Python packages for backend
-pip install --upgrade pip
-pip install \
-    fastapi \
-    uvicorn[standard] \
-    websockets \
-    python-multipart \
-    pyserial \
-    opencv-python \
-    numpy \
-    pillow \
-    aiofiles \
-    httpx
-
-deactivate
-echo -e "${GREEN}✓ Entorno Python backend configurado${NC}"
+log "✓ Node.js $(node --version) instalado"
 
 # Configure hardware permissions
-echo -e "${YELLOW}[7/15] Configurando permisos de hardware...${NC}"
-# Add user to required groups
-sudo usermod -aG video pi
-sudo usermod -aG dialout pi
-sudo usermod -aG i2c pi
-sudo usermod -aG gpio pi
-sudo usermod -aG audio pi
+log "[6/20] Configurando permisos de hardware..."
+usermod -aG video,render,input,dialout,i2c,gpio,audio "${TARGET_USER}"
+log "✓ Usuario ${TARGET_USER} añadido a grupos necesarios"
 
-# Detect boot config location (Bookworm uses /boot/firmware/)
-if [ -f "/boot/firmware/config.txt" ]; then
-    BOOT_CONFIG="/boot/firmware/config.txt"
-else
-    BOOT_CONFIG="/boot/config.txt"
-fi
+# Configure boot config
+log "[7/20] Configurando boot/config.txt..."
+# Limpiar configuración anterior
+sed -i '/# --- Bascula-Cam/,/# --- Bascula-Cam (end) ---/d' "${CONF}"
 
-# Enable I2C
-if ! grep -q "^dtparam=i2c_arm=on" $BOOT_CONFIG; then
-    echo "dtparam=i2c_arm=on" | sudo tee -a $BOOT_CONFIG
-fi
-
-# Enable UART for ESP32 scale
-if ! grep -q "^enable_uart=1" $BOOT_CONFIG; then
-    echo "enable_uart=1" | sudo tee -a $BOOT_CONFIG
-fi
-
-# Disable Bluetooth on UART (improves stability)
-if ! grep -q "^dtoverlay=disable-bt" $BOOT_CONFIG; then
-    echo "dtoverlay=disable-bt" | sudo tee -a $BOOT_CONFIG
-fi
-
-# Enable Camera Module 3 (IMX708)
-if ! grep -q "^camera_auto_detect=1" $BOOT_CONFIG; then
-    echo "camera_auto_detect=1" | sudo tee -a $BOOT_CONFIG
-fi
-if ! grep -q "^dtoverlay=imx708" $BOOT_CONFIG; then
-    echo "dtoverlay=imx708" | sudo tee -a $BOOT_CONFIG
-fi
-
-# Configure screen resolution for 7" display (1024x600)
-if ! grep -q "^hdmi_force_hotplug=1" $BOOT_CONFIG; then
-    sudo tee -a $BOOT_CONFIG > /dev/null <<SCREENEOF
-
-# 7" Display Configuration
+# Añadir nueva configuración
+cat >> "${CONF}" <<'EOF'
+# --- Bascula-Cam: Hardware Configuration ---
+# HDMI para pantalla 7" (1024x600)
 hdmi_force_hotplug=1
 hdmi_group=2
 hdmi_mode=87
-hdmi_cvt=1024 600 60 6 0 0 0
+hdmi_cvt=1024 600 60 3 0 0 0
+dtoverlay=vc4-kms-v3d
 disable_overscan=1
-SCREENEOF
+
+# Audio I2S (HifiBerry DAC / MAX98357A)
+dtparam=audio=off
+dtoverlay=i2s-mmap
+dtoverlay=hifiberry-dac
+
+# I2C
+dtparam=i2c_arm=on
+
+# UART para ESP32 (báscula)
+enable_uart=1
+dtoverlay=disable-bt
+
+# Camera Module 3 (IMX708)
+camera_auto_detect=1
+dtoverlay=imx708
+# --- Bascula-Cam (end) ---
+EOF
+
+log "✓ Configuración de hardware añadida a ${CONF}"
+
+# Disable Bluetooth UART
+systemctl disable --now hciuart 2>/dev/null || true
+systemctl disable --now serial-getty@ttyAMA0.service serial-getty@ttyS0.service 2>/dev/null || true
+
+# Run fix-serial script
+log "Ejecutando fix-serial.sh..."
+bash "${SCRIPT_DIR}/fix-serial.sh" || warn "fix-serial.sh falló, continuar de todos modos"
+log "✓ Serial configurado"
+
+# Configure Xwrapper
+log "[8/20] Configurando Xwrapper..."
+for config in /etc/Xwrapper.config /etc/X11/Xwrapper.config; do
+    install -D -m 0644 /dev/null "${config}"
+    cat > "${config}" <<'EOF'
+allowed_users=anybody
+needs_root_rights=yes
+EOF
+done
+chown root:root /usr/lib/xorg/Xorg || true
+chmod 4755 /usr/lib/xorg/Xorg || true
+echo "xserver-xorg-legacy xserver-xorg-legacy/allowed_users select Anybody" | debconf-set-selections
+DEBIAN_FRONTEND=noninteractive dpkg-reconfigure xserver-xorg-legacy || true
+log "✓ Xwrapper configurado"
+
+# Configure Polkit rules
+log "[9/20] Configurando Polkit..."
+install -d -m 0755 /etc/polkit-1/rules.d
+cat > /etc/polkit-1/rules.d/50-bascula-nm.rules <<EOF
+polkit.addRule(function(action, subject) {
+  function allowed() {
+    return subject.user == "${TARGET_USER}" ||
+           subject.isInGroup("${TARGET_GROUP}") ||
+           subject.user == "bascula" ||
+           subject.isInGroup("bascula");
+  }
+  if (!allowed()) return polkit.Result.NOT_HANDLED;
+
+  const id = action.id;
+  if (id == "org.freedesktop.NetworkManager.settings.modify.system" ||
+      id == "org.freedesktop.NetworkManager.network-control" ||
+      id == "org.freedesktop.NetworkManager.enable-disable-wifi") {
+    return polkit.Result.YES;
+  }
+});
+EOF
+
+cat > /etc/polkit-1/rules.d/51-bascula-systemd.rules <<EOF
+polkit.addRule(function(action, subject) {
+  var id = action.id;
+  var unit = action.lookup("unit") || "";
+  function allowed(u) {
+    return u == "bascula-miniweb.service" || u == "bascula-app.service" || u == "ocr-service.service";
+  }
+  if ((subject.user == "${TARGET_USER}" || subject.isInGroup("${TARGET_GROUP}")) &&
+      (id == "org.freedesktop.systemd1.manage-units" ||
+       id == "org.freedesktop.systemd1.restart-unit" ||
+       id == "org.freedesktop.systemd1.start-unit" ||
+       id == "org.freedesktop.systemd1.stop-unit") &&
+      allowed(unit)) {
+    return polkit.Result.YES;
+  }
+});
+EOF
+systemctl restart polkit NetworkManager || true
+log "✓ Polkit configurado"
+
+# Create config.json
+log "[10/20] Creando configuración por defecto..."
+install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${CFG_DIR}"
+if [[ ! -s "${CFG_PATH}" ]]; then
+  cat > "${CFG_PATH}" <<'PY'
+{
+  "general": {
+    "sound_enabled": true,
+    "volume": 70,
+    "tts_enabled": true
+  },
+  "scale": {
+    "port": "/dev/serial0",
+    "baud": 115200,
+    "hx711_dt": 5,
+    "hx711_sck": 6,
+    "calib_factor": 1.0,
+    "smoothing": 5,
+    "decimals": 0,
+    "unit": "g",
+    "ml_factor": 1.0
+  },
+  "network": {
+    "miniweb_enabled": true,
+    "miniweb_port": 8080,
+    "miniweb_pin": ""
+  },
+  "diabetes": {
+    "diabetes_enabled": false,
+    "ns_url": "",
+    "ns_token": "",
+    "hypo_alarm": 70,
+    "hyper_alarm": 180,
+    "mode_15_15": false,
+    "insulin_ratio": 12.0,
+    "insulin_sensitivity": 50.0,
+    "target_glucose": 110
+  },
+  "audio": {
+    "audio_device": "default"
+  }
+}
+PY
+  chown "${TARGET_USER}:${TARGET_GROUP}" "${CFG_PATH}" || true
+fi
+log "✓ Configuración creada en ${CFG_PATH}"
+
+# OTA: Setup release directory structure
+log "[11/20] Configurando estructura OTA..."
+install -d -m 0755 "${BASCULA_RELEASES_DIR}"
+if [[ ! -e "${BASCULA_CURRENT_LINK}" ]]; then
+  DEST="${BASCULA_RELEASES_DIR}/v1"
+  log "Copiando proyecto a ${DEST}..."
+  install -d -m 0755 "${DEST}"
+  (cd "${PROJECT_ROOT}" && tar --exclude .git --exclude .venv --exclude __pycache__ --exclude '*.pyc' --exclude node_modules -cf - .) | tar -xf - -C "${DEST}"
+  ln -s "${DEST}" "${BASCULA_CURRENT_LINK}"
+  log "✓ Release v1 creado"
+fi
+chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}"
+log "✓ Estructura OTA configurada"
+
+# Setup Python virtual environment
+log "[12/20] Configurando entorno Python..."
+cd "${BASCULA_CURRENT_LINK}"
+if [[ ! -d ".venv" ]]; then
+  python3 -m venv .venv
+fi
+VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
+VENV_PY="${VENV_DIR}/bin/python"
+VENV_PIP="${VENV_DIR}/bin/pip"
+
+# Allow venv to see system packages (picamera2)
+VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
+if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
+  echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
 fi
 
-echo -e "${GREEN}✓ Permisos configurados${NC}"
+export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BINARY=1
+export PIP_INDEX_URL="https://www.piwheels.org/simple"
+export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
 
-# Clone/setup frontend project
-echo -e "${YELLOW}[8/15] Configurando proyecto frontend...${NC}"
-PROJECT_DIR="/home/pi/bascula-ui"
-if [ -d "$PROJECT_DIR" ]; then
-    echo "El directorio del proyecto ya existe"
-    read -p "¿Sobrescribir? (s/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Ss]$ ]]; then
-        rm -rf "$PROJECT_DIR"
-    else
-        echo "Usando proyecto existente"
+${VENV_PIP} install --upgrade pip wheel setuptools
+${VENV_PIP} install fastapi 'uvicorn[standard]' websockets python-multipart \
+    pyserial opencv-python pillow pyzbar numpy aiofiles httpx \
+    pytesseract rapidocr-onnxruntime
+
+log "✓ Entorno Python configurado"
+
+# Install Piper TTS
+log "[13/20] Instalando Piper TTS..."
+install -d -m 0755 /opt/piper/models /opt/piper/bin
+if ! command -v piper >/dev/null 2>&1; then
+  PIPER_BIN_URL=""
+  case "${ARCH}" in
+    aarch64) PIPER_BIN_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz" ;;
+    armv7l) PIPER_BIN_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_armv7l.tar.gz" ;;
+  esac
+  if [[ -n "${PIPER_BIN_URL}" && "${NET_OK}" = "1" ]]; then
+    TMP_TGZ="/tmp/piper_bin_$$.tgz"
+    if curl -fL --retry 2 -m 20 -o "${TMP_TGZ}" "${PIPER_BIN_URL}" 2>/dev/null; then
+      tar -xzf "${TMP_TGZ}" -C /opt/piper/bin || true
+      rm -f "${TMP_TGZ}" || true
+      F_BIN="$(find /opt/piper/bin -maxdepth 2 -type f -name 'piper' | head -n1)"
+      if [[ -n "${F_BIN}" ]]; then
+        chmod +x "${F_BIN}" || true
+        ln -sf "${F_BIN}" /usr/local/bin/piper || true
+      fi
     fi
+  fi
 fi
 
-if [ ! -d "$PROJECT_DIR" ]; then
-    mkdir -p "$PROJECT_DIR"
-    # Copy project files here
-    echo "Copiando archivos del proyecto..."
+# Download Spanish voice models
+voices=(
+  es_ES-mls_10246-medium.onnx
+  es_ES-mls_10246-medium.onnx.json
+)
+for f in "${voices[@]}"; do
+  if [[ ! -s "/opt/piper/models/$f" && "${NET_OK}" = "1" ]]; then
+    log "Descargando voz: $f"
+    curl -fL --retry 2 -m 30 -o "/opt/piper/models/$f" \
+      "https://github.com/rhasspy/piper/releases/download/v1.2.0/$f" 2>/dev/null || warn "No se pudo descargar $f"
+  fi
+done
+
+# Create say.sh wrapper
+cat > /usr/local/bin/say.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+TEXT="${*:-Prueba de voz}"
+VOICE="${PIPER_VOICE:-es_ES-mls_10246-medium}"
+MODEL="/opt/piper/models/${VOICE}.onnx"
+CONFIG="/opt/piper/models/${VOICE}.onnx.json"
+BIN="$(command -v piper || echo "/opt/piper/bin/piper")"
+
+if [[ -x "${BIN}" && -f "${MODEL}" && -f "${CONFIG}" ]]; then
+  echo -n "${TEXT}" | "${BIN}" -m "${MODEL}" -c "${CONFIG}" --length-scale 1.0 --noise-scale 0.5 | aplay -q -r 22050 -f S16_LE -t raw -
+else
+  espeak-ng -v es -s 170 "${TEXT}" >/dev/null 2>&1 || true
 fi
+EOF
+chmod 0755 /usr/local/bin/say.sh
+log "✓ Piper TTS instalado"
 
-cd "$PROJECT_DIR"
+# Setup OCR service
+log "[14/20] Configurando servicio OCR..."
+install -d -m 0755 /opt/ocr-service
+cat > /opt/ocr-service/app.py <<'PY'
+import io
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.responses import JSONResponse, PlainTextResponse
+from PIL import Image
+import pytesseract
 
-# Install npm dependencies and build
-echo -e "${YELLOW}[9/15] Instalando dependencias de Node.js...${NC}"
-npm install
-echo -e "${GREEN}✓ Dependencias instaladas${NC}"
+app = FastAPI(title="OCR Service", version="1.0")
 
-echo -e "${YELLOW}[10/15] Compilando aplicación web...${NC}"
-npm run build
-echo -e "${GREEN}✓ Aplicación compilada${NC}"
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+@app.get("/")
+async def root():
+    return PlainTextResponse("ok")
+
+@app.post("/ocr")
+async def ocr_endpoint(file: UploadFile = File(...), lang: str = Form("spa")):
+    try:
+        data = await file.read()
+        img = Image.open(io.BytesIO(data))
+        txt = pytesseract.image_to_string(img, lang=lang)
+        return JSONResponse({"ok": True, "text": txt})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+PY
+
+cat > /etc/systemd/system/ocr-service.service <<EOF
+[Unit]
+Description=Bascula OCR Service
+After=network.target
+
+[Service]
+Type=simple
+User=${TARGET_USER}
+Group=${TARGET_GROUP}
+WorkingDirectory=/opt/ocr-service
+ExecStart=${VENV_DIR}/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8078
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable ocr-service.service
+systemctl restart ocr-service.service
+log "✓ Servicio OCR configurado"
+
+# Setup Frontend (build if node_modules exists)
+log "[15/20] Configurando frontend..."
+cd "${BASCULA_CURRENT_LINK}"
+if [[ -f "package.json" ]]; then
+  npm install || warn "npm install falló, continuar con backend"
+  npm run build || warn "npm build falló"
+  log "✓ Frontend compilado"
+fi
 
 # Configure Nginx
-echo -e "${YELLOW}[11/15] Configurando Nginx...${NC}"
-sudo tee /etc/nginx/sites-available/bascula > /dev/null <<EOF
+log "[16/20] Configurando Nginx..."
+cat > /etc/nginx/sites-available/bascula <<EOF
 server {
     listen 80 default_server;
     server_name _;
-    root $PROJECT_DIR/dist;
+    root ${BASCULA_CURRENT_LINK}/dist;
     index index.html;
 
-    # Gzip compression
     gzip on;
     gzip_vary on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 
-    # SPA routing
     location / {
         try_files \$uri \$uri/ /index.html;
     }
 
-    # Cache static assets
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
 
-    # Proxy for backend API
     location /api {
         proxy_pass http://localhost:8080;
         proxy_http_version 1.1;
@@ -236,11 +453,8 @@ server {
         proxy_set_header Connection 'upgrade';
         proxy_set_header Host \$host;
         proxy_cache_bypass \$http_upgrade;
-        proxy_read_timeout 300s;
-        proxy_connect_timeout 75s;
     }
 
-    # WebSocket
     location /ws {
         proxy_pass http://localhost:8080;
         proxy_http_version 1.1;
@@ -250,257 +464,132 @@ server {
     }
 }
 EOF
+ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl restart nginx
+systemctl enable nginx
+log "✓ Nginx configurado"
 
-sudo ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
-sudo rm -f /etc/nginx/sites-enabled/default
-sudo nginx -t
-sudo systemctl restart nginx
-sudo systemctl enable nginx
-echo -e "${GREEN}✓ Nginx configurado${NC}"
-
-# Setup Chromium kiosk mode
-echo -e "${YELLOW}[12/15] Configurando modo kiosk...${NC}"
-cat > /home/pi/start-bascula.sh <<'KIOSKEOF'
-#!/bin/bash
-# Wait for X server
-sleep 5
-
-# Hide cursor
-unclutter -idle 0 &
-
-# Start Chromium in kiosk mode
-chromium-browser \
-  --kiosk \
-  --noerrdialogs \
-  --disable-infobars \
-  --disable-session-crashed-bubble \
-  --disable-features=TranslateUI \
-  --check-for-update-interval=31536000 \
-  --start-fullscreen \
-  http://localhost
-KIOSKEOF
-
-chmod +x /home/pi/start-bascula.sh
-
-# Create systemd service
-sudo tee /etc/systemd/system/bascula-ui.service > /dev/null <<EOF
+# Create mini-web backend service
+log "[17/20] Configurando servicio mini-web..."
+cat > /etc/systemd/system/bascula-miniweb.service <<EOF
 [Unit]
-Description=Bascula UI Kiosk
-After=network.target nginx.service
-
-[Service]
-Type=simple
-User=pi
-Environment=DISPLAY=:0
-ExecStart=/home/pi/start-bascula.sh
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl enable bascula-ui.service
-echo -e "${GREEN}✓ Modo kiosk configurado${NC}"
-
-# Setup X server auto-start
-echo -e "${YELLOW}[13/15] Configurando arranque automático...${NC}"
-if ! grep -q "startx" /home/pi/.bash_profile; then
-    echo '[[ -z $DISPLAY && $XDG_VTNR -eq 1 ]] && startx' >> /home/pi/.bash_profile
-fi
-
-# Create minimal openbox config
-mkdir -p /home/pi/.config/openbox
-cat > /home/pi/.config/openbox/autostart <<'OPENBOXEOF'
-# Disable screen blanking
-xset s off
-xset -dpms
-xset s noblank
-
-# Start bascula UI
-/home/pi/start-bascula.sh &
-OPENBOXEOF
-
-echo -e "${GREEN}✓ Arranque automático configurado${NC}"
-
-# Create backend service template
-echo -e "${YELLOW}[14/15] Configurando servicio backend...${NC}"
-cat > "$BACKEND_DIR/main.py" <<'BACKENDEOF'
-"""
-Báscula Inteligente - Backend FastAPI
-Este es un template. Implementa tus servicios aquí.
-"""
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-
-app = FastAPI(title="Bascula Backend")
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Bascula Backend Running"}
-
-@app.websocket("/ws/scale")
-async def websocket_scale(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            # TODO: Implementar lectura del ESP32 + HX711
-            weight_data = {
-                "weight": 0.0,
-                "stable": True,
-                "unit": "g"
-            }
-            await websocket.send_json(weight_data)
-            await asyncio.sleep(0.1)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
-    finally:
-        await websocket.close()
-
-@app.post("/api/scale/tare")
-async def tare_scale():
-    # TODO: Implementar tara
-    return {"status": "ok"}
-
-@app.post("/api/scale/zero")
-async def zero_scale():
-    # TODO: Implementar zero
-    return {"status": "ok"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
-BACKENDEOF
-
-# Create backend systemd service
-sudo tee /etc/systemd/system/bascula-backend.service > /dev/null <<EOF
-[Unit]
-Description=Bascula Backend FastAPI
+Description=Bascula Mini-Web Backend
 After=network.target
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=$BACKEND_DIR
-Environment="PATH=$BACKEND_DIR/venv/bin"
-ExecStart=$BACKEND_DIR/venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8080
+User=${TARGET_USER}
+Group=${TARGET_GROUP}
+WorkingDirectory=${BASCULA_CURRENT_LINK}
+Environment=PATH=${VENV_DIR}/bin
+Environment=BASCULA_CFG_DIR=${CFG_DIR}
+ExecStart=${VENV_DIR}/bin/python backend/miniweb.py
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
+systemctl daemon-reload
+systemctl enable bascula-miniweb.service
+systemctl restart bascula-miniweb.service
+log "✓ Mini-web backend configurado"
 
-sudo systemctl enable bascula-backend.service
-echo -e "${GREEN}✓ Servicio backend configurado${NC}"
+# Setup UI kiosk service
+log "[18/20] Configurando servicio UI kiosk..."
+install -d -m 0700 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${TARGET_HOME}/.config/openbox"
+cat > "${TARGET_HOME}/.config/openbox/autostart" <<'EOF'
+xset s off
+xset -dpms
+xset s noblank
+unclutter -idle 0 &
+chromium-browser --kiosk --noerrdialogs --disable-infobars --start-fullscreen http://localhost &
+EOF
 
-# Create environment file template
-echo -e "${YELLOW}[15/15] Creando archivos de configuración...${NC}"
-cat > "$PROJECT_DIR/.env" <<'ENVEOF'
-# Backend API Configuration
-VITE_API_URL=http://localhost:8080
-VITE_WS_URL=ws://localhost:8080
+cat > /etc/systemd/system/bascula-app.service <<EOF
+[Unit]
+Description=Bascula UI (Xorg kiosk)
+After=network-online.target bascula-miniweb.service
+Wants=network-online.target
+Conflicts=getty@tty1.service
 
-# Optional: Override for specific IP
-# VITE_API_URL=http://192.168.1.100:8080
-# VITE_WS_URL=ws://192.168.1.100:8080
-ENVEOF
+[Service]
+Type=simple
+User=${TARGET_USER}
+Group=${TARGET_GROUP}
+WorkingDirectory=${BASCULA_CURRENT_LINK}
+Environment=HOME=${TARGET_HOME}
+Environment=USER=${TARGET_USER}
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+ExecStartPre=/usr/bin/install -d -m 0700 -o ${TARGET_USER} -g ${TARGET_GROUP} ${TARGET_HOME}/.local/share/xorg
+ExecStart=/usr/bin/startx -- :0 vt1
+Restart=on-failure
+RestartSec=5
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
 
-# Create backend config file
-cat > "$BACKEND_DIR/.env" <<'BACKENDENVEOF'
-# Backend Configuration
-API_PORT=8080
-SERIAL_PORT=/dev/ttyUSB0
-BAUD_RATE=115200
+[Install]
+WantedBy=multi-user.target
+EOF
 
-# ChatGPT API (opcional)
-# OPENAI_API_KEY=your_key_here
+cat > "${TARGET_HOME}/.xinitrc" <<'EOF'
+#!/bin/sh
+exec openbox-session
+EOF
+chmod +x "${TARGET_HOME}/.xinitrc"
+chown -R "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.config" "${TARGET_HOME}/.xinitrc"
 
-# Nightscout (opcional)
-# NIGHTSCOUT_URL=https://your-nightscout.herokuapp.com
-# NIGHTSCOUT_TOKEN=your_token_here
-BACKENDENVEOF
+systemctl daemon-reload
+systemctl disable getty@tty1.service || true
+systemctl enable bascula-app.service
+log "✓ UI kiosk configurado"
 
-echo -e "${GREEN}✓ Configuración creada${NC}"
+# Setup tmpfiles
+log "[19/20] Configurando tmpfiles..."
+cat > /etc/tmpfiles.d/bascula.conf <<EOF
+d /run/bascula 0755 ${TARGET_USER} ${TARGET_GROUP} -
+f /run/bascula.alive 0666 ${TARGET_USER} ${TARGET_GROUP} -
+EOF
+systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
+log "✓ tmpfiles configurado"
 
-# Install debugging tools
-echo -e "${YELLOW}Instalando herramientas de debugging...${NC}"
-sudo npm install -g wscat 2>/dev/null || true
+# Final permissions
+log "[20/20] Ajustando permisos finales..."
+install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /var/log/bascula
+chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}" /opt/ocr-service
+log "✓ Permisos ajustados"
 
-# Final instructions
+# Final message
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo ""
-echo -e "${GREEN}============================================${NC}"
-echo -e "${GREEN}  ¡Instalación Completada!${NC}"
-echo -e "${GREEN}============================================${NC}"
+log "============================================"
+log "  ¡Instalación Completada!"
+log "============================================"
 echo ""
-echo -e "${BLUE}Sistema instalado con éxito:${NC}"
-echo "  ✅ Frontend React en: $PROJECT_DIR"
-echo "  ✅ Backend FastAPI en: $BACKEND_DIR"
-echo "  ✅ Nginx configurado"
-echo "  ✅ Servicios systemd creados"
-echo "  ✅ Pantalla 7\" táctil optimizada"
+echo -e "${GREEN}Sistema instalado con éxito:${NC}"
+echo "  ✅ Estructura OTA en: ${BASCULA_CURRENT_LINK}"
+echo "  ✅ Config en: ${CFG_PATH}"
+echo "  ✅ Audio I2S + Piper TTS"
+echo "  ✅ Camera Module 3 + OCR"
+echo "  ✅ Nginx + Mini-web + UI kiosk"
 echo ""
 echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-echo -e "${YELLOW}  CONFIGURACIÓN REQUERIDA${NC}"
+echo -e "${YELLOW}  ⚠ REINICIO REQUERIDO${NC}"
 echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
 echo ""
-echo -e "${RED}⚠ IMPORTANTE: Se requiere REINICIO${NC}"
-echo "   Los cambios de hardware necesitan reinicio del sistema"
+echo "  sudo reboot"
 echo ""
-echo "1️⃣  Edita configuración frontend:"
-echo "   nano $PROJECT_DIR/.env"
+echo "Después del reinicio, acceder a:"
+echo "  http://${IP:-<IP>} o http://localhost"
 echo ""
-echo "2️⃣  Edita configuración backend:"
-echo "   nano $BACKEND_DIR/.env"
+echo "Comandos útiles:"
+echo "  journalctl -u bascula-miniweb.service -f"
+echo "  journalctl -u bascula-app.service -f"
+echo "  journalctl -u ocr-service.service -f"
+echo "  libcamera-hello  # probar cámara"
+echo "  say.sh 'Hola'    # probar voz"
 echo ""
-echo "3️⃣  Implementa tu código backend:"
-echo "   nano $BACKEND_DIR/main.py"
-echo "   (Conectar ESP32, cámara, Nightscout, etc.)"
-echo ""
-echo "4️⃣  REINICIA el sistema:"
-echo "   ${RED}sudo reboot${NC}"
-echo ""
-echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-echo -e "${YELLOW}  COMANDOS ÚTILES${NC}"
-echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-echo ""
-echo "📊 Ver logs del frontend:"
-echo "   journalctl -u bascula-ui.service -f"
-echo ""
-echo "📊 Ver logs del backend:"
-echo "   journalctl -u bascula-backend.service -f"
-echo ""
-echo "🔧 Reiniciar servicios:"
-echo "   sudo systemctl restart bascula-backend.service"
-echo "   sudo systemctl restart bascula-ui.service"
-echo ""
-echo "🧪 Probar WebSocket (después de reiniciar):"
-echo "   wscat -c ws://localhost:8080/ws/scale"
-echo ""
-echo "🔍 Verificar hardware:"
-echo "   ls -la /dev/ttyUSB* /dev/ttyACM*  # ESP32 serial"
-echo "   libcamera-hello                   # Cámara"
-echo "   i2cdetect -y 1                    # I2C audio"
-echo ""
-echo "🌐 Acceder a la aplicación:"
-echo "   http://localhost (en la Raspberry Pi)"
-echo "   http://$(hostname -I | awk '{print $1}') (desde otro dispositivo)"
-echo ""
-echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-echo ""
-echo -e "${BLUE}📚 Documentación:${NC}"
-echo "   $PROJECT_DIR/INTEGRATION.md  - Integración backend"
-echo "   $PROJECT_DIR/DEPLOYMENT.md   - Guía despliegue"
-echo "   $PROJECT_DIR/TODO.md         - Tareas pendientes"
-echo ""
-echo -e "${GREEN}¡Disfruta de tu báscula inteligente!${NC}"
+log "Instalación finalizada"

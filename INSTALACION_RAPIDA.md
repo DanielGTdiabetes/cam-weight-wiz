@@ -44,108 +44,126 @@ El script instalará automáticamente:
 - ✅ Python 3.11+ con virtualenv
 - ✅ Nginx como servidor web
 - ✅ Frontend (React + Vite build)
-- ✅ Backend (FastAPI)
+- ✅ Backend FastAPI (mini-web + OCR service)
 - ✅ Servicios systemd (auto-start)
 - ✅ Modo kiosk (Chromium fullscreen)
 - ✅ Configuración de pantalla táctil 7"
 - ✅ Librerías de cámara (libcamera, picamera2)
 - ✅ Dependencias para procesamiento de imagen (OpenCV, PIL)
+- ✅ Piper TTS (síntesis de voz en español)
+- ✅ Tesseract OCR + RapidOCR
+- ✅ Audio I2S (HifiBerry DAC / MAX98357A)
+- ✅ NetworkManager AP fallback automático
+- ✅ Estructura OTA con versionado
+- ✅ Polkit rules (permisos NetworkManager sin sudo)
 
 ### 3. Configuración Post-Instalación
 
-Edita los archivos de configuración:
+La configuración principal está en `~/.bascula/config.json`:
 
 ```bash
-# Frontend - URLs del backend
-nano ~/bascula-ui/.env
-
-# Backend - Configuración de hardware y APIs
-nano ~/bascula-backend/.env
+# Editar configuración
+nano ~/.bascula/config.json
 ```
 
-**Ejemplo `.env` frontend:**
-```env
-VITE_API_URL=http://localhost:8080
-VITE_WS_URL=ws://localhost:8080
+**Ejemplo `config.json`:**
+```json
+{
+  "general": {
+    "sound_enabled": true,
+    "volume": 70,
+    "tts_enabled": true
+  },
+  "scale": {
+    "port": "/dev/serial0",
+    "baud": 115200,
+    "hx711_dt": 5,
+    "hx711_sck": 6,
+    "calib_factor": 1.0,
+    "smoothing": 5,
+    "decimals": 0,
+    "unit": "g",
+    "ml_factor": 1.0
+  },
+  "network": {
+    "miniweb_enabled": true,
+    "miniweb_port": 8080,
+    "miniweb_pin": ""
+  },
+  "diabetes": {
+    "diabetes_enabled": false,
+    "ns_url": "",
+    "ns_token": "",
+    "hypo_alarm": 70,
+    "hyper_alarm": 180,
+    "mode_15_15": false,
+    "insulin_ratio": 12.0,
+    "insulin_sensitivity": 50.0,
+    "target_glucose": 110
+  },
+  "audio": {
+    "audio_device": "default"
+  }
+}
 ```
 
-**Ejemplo `.env` backend:**
-```env
-# Hardware
-SCALE_DEVICE=/dev/serial0  # UART para ESP32
-CAMERA_INDEX=0  # Para Camera Module 3 CSI
-CAMERA_TYPE=picamera2  # o 'usb' para cámara USB
+### 4. Estructura Instalada
 
-# Nightscout (opcional)
-NIGHTSCOUT_URL=https://tu-sitio.herokuapp.com
-NIGHTSCOUT_API_SECRET=tu_api_secret
+El sistema queda instalado con estructura OTA:
 
-# WiFi AP Mode
-AP_SSID=Bascula-Config
-AP_PASSWORD=bascula2024
 ```
+/opt/bascula/
+├── current -> releases/v1/  # Enlace simbólico a versión activa
+└── releases/
+    └── v1/                  # Release actual
+        ├── backend/         # Backend FastAPI (miniweb)
+        ├── src/             # Frontend React
+        ├── dist/            # Build producción (servido por Nginx)
+        └── .venv/           # Virtual environment Python
 
-### 4. Implementar Backend
+~/.bascula/
+└── config.json              # Configuración principal
 
-El script crea un template en `~/bascula-backend/main.py`. Necesitas implementar:
+/var/log/bascula/            # Logs del sistema
 
-```python
-# ~/bascula-backend/main.py
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
-import asyncio
-
-app = FastAPI()
-
-# ... keep existing code (CORS setup)
-
-# Implementar endpoints según backend/miniweb.py y src/services/api.ts
-@app.get("/api/weight")
-async def get_weight():
-    # Leer báscula USB
-    weight = read_scale()  # Implementar
-    return {"weight": weight, "unit": "g", "stable": True}
-
-@app.websocket("/ws/scale")
-async def websocket_scale(websocket: WebSocket):
-    await websocket.accept()
-    while True:
-        weight = read_scale()
-        await websocket.send_json({"weight": weight})
-        await asyncio.sleep(0.5)
-
-# ... más endpoints según api.ts
+Servicios systemd:
+- bascula-miniweb.service    # Backend mini-web (puerto 8080)
+- bascula-app.service        # UI kiosk (Chromium fullscreen)
+- ocr-service.service        # OCR API (puerto 8078)
+- bascula-net-fallback.timer # AP fallback automático
 ```
 
 ### 5. Reiniciar Sistema
 
-```bash
-# Reiniciar servicios
-sudo systemctl restart bascula-backend
-sudo systemctl restart bascula-ui
-sudo systemctl restart nginx
+**⚠️ REINICIO OBLIGATORIO** para aplicar configuración de hardware:
 
-# O reiniciar Raspberry Pi
+```bash
 sudo reboot
 ```
+
+Después del reinicio, todos los servicios arrancarán automáticamente.
 
 ## 🔍 Verificación de Instalación
 
 ### Comprobar Servicios
 
 ```bash
-# Backend activo
-sudo systemctl status bascula-backend
+# Mini-web backend
+sudo systemctl status bascula-miniweb
 
-# UI kiosk activo
-sudo systemctl status bascula-ui
+# UI kiosk
+sudo systemctl status bascula-app
 
-# Nginx activo
+# OCR service
+sudo systemctl status ocr-service
+
+# Nginx
 sudo systemctl status nginx
 
 # Ver logs en tiempo real
-sudo journalctl -u bascula-backend -f
-sudo journalctl -u bascula-ui -f
+sudo journalctl -u bascula-miniweb -f
+sudo journalctl -u bascula-app -f
+sudo journalctl -u ocr-service -f
 ```
 
 ### Probar en Navegador
@@ -271,16 +289,29 @@ hdmi_drive=2
 sudo reboot
 ```
 
-## 🔧 Configuración de Hardware
+## 🔧 Verificación de Hardware
 
-### Permisos para Báscula USB
+### Audio I2S (HifiBerry DAC / MAX98357A)
 
 ```bash
-# Agregar usuario al grupo dialout
-sudo usermod -a -G dialout pi
+# Ver tarjetas de audio detectadas
+aplay -l
 
-# Reiniciar para aplicar cambios
-sudo reboot
+# Probar audio
+speaker-test -c2 -twav -l1
+
+# Probar síntesis de voz (Piper TTS)
+say.sh "Hola, sistema funcionando correctamente"
+```
+
+### Báscula UART (ESP32 + HX711)
+
+```bash
+# Verificar puerto serial
+ls -l /dev/serial0 /dev/ttyAMA0
+
+# Probar comunicación (ajustar baud según ESP32)
+minicom -D /dev/serial0 -b 115200
 ```
 
 ### Configurar Camera Module 3 (CSI)

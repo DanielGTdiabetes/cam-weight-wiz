@@ -1,0 +1,11 @@
+[Unit]
+Description=Bascula Network Fallback AP Timer
+Requires=bascula-net-fallback.service
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target
