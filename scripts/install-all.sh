@@ -214,6 +214,23 @@ EOF
 
 log "✓ Xorg configurado para KMS (modesetting)"
 
+# Configure Xorg to use correct DRM card (vc4 = card1)
+log "[8c/20] Configurando Xorg para usar card1 (vc4)..."
+cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
+Section "Device"
+  Identifier "vc4"
+  Driver "modesetting"
+  Option "AccelMethod" "glamor"
+  Option "kmsdev" "/dev/dri/card1"
+EndSection
+
+Section "Screen"
+  Identifier "Screen0"
+  Device "vc4"
+EndSection
+EOF
+log "✓ Xorg configurado para DRM card1"
+
 # Configure Polkit rules
 log "[9/20] Configurando Polkit..."
 install -d -m 0755 /etc/polkit-1/rules.d
