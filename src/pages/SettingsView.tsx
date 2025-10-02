@@ -119,6 +119,8 @@ export const SettingsView = () => {
       targetGlucose: setTargetGlucose,
       hypoAlarm: setHypoAlarm,
       hyperAlarm: setHyperAlarm,
+      apiUrl: setApiUrl,
+      wsUrl: setWsUrl,
     };
     
     const setter = setters[keyboardConfig.field];
@@ -145,6 +147,10 @@ export const SettingsView = () => {
         storage.saveSettings({ hypoAlarm: parseFloat(tempValue) || 70 });
       } else if (field === 'hyperAlarm') {
         storage.saveSettings({ hyperAlarm: parseFloat(tempValue) || 180 });
+      } else if (field === 'apiUrl') {
+        storage.saveSettings({ apiUrl: tempValue });
+      } else if (field === 'wsUrl') {
+        storage.saveSettings({ wsUrl: tempValue });
       }
       
       // Haptic feedback on save

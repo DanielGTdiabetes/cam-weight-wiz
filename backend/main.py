@@ -389,16 +389,32 @@ async def export_bolus(data: BolusData):
 async def speak_text(data: SpeakRequest):
     """Convert text to speech using Piper TTS"""
     try:
+        # Sanitize text to prevent command injection
+        safe_text = data.text.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+        
         # Use Piper TTS if installed
         if os.path.exists("/usr/local/bin/piper"):
             voice_model = f"/opt/piper/models/{data.voice}.onnx"
             if os.path.exists(voice_model):
-                # Generate speech
-                cmd = f'echo "{data.text}" | piper --model {voice_model} --output-raw | aplay -r 22050 -f S16_LE'
-                subprocess.Popen(cmd, shell=True)
+                # Generate speech using piped commands safely
+                echo_proc = subprocess.Popen(
+                    ["echo", data.text],
+                    stdout=subprocess.PIPE
+                )
+                piper_proc = subprocess.Popen(
+                    ["piper", "--model", voice_model, "--output-raw"],
+                    stdin=echo_proc.stdout,
+                    stdout=subprocess.PIPE
+                )
+                subprocess.Popen(
+                    ["aplay", "-r", "22050", "-f", "S16_LE"],
+                    stdin=piper_proc.stdout
+                )
+                echo_proc.stdout.close()
+                piper_proc.stdout.close()
                 return {"success": True}
         
-        # Fallback to espeak
+        # Fallback to espeak (already safe with list)
         subprocess.Popen(["espeak", "-v", "es", data.text])
         return {"success": True, "fallback": "espeak"}
     except Exception as e:
@@ -446,6 +462,84 @@ async def update_settings(settings: dict):
         save_config(settings)
         return {"success": True}
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============= NETWORK MANAGEMENT =============
+
+@app.get("/api/network/status")
+async def network_status():
+    """Get current network status"""
+    try:
+        # Check if connected to WiFi
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,STATE,CONNECTION", "dev", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        lines = result.stdout.strip().split('\n')
+        connected = False
+        ssid = None
+        ip = None
+        
+        for line in lines:
+            parts = line.split(':')
+            if len(parts) >= 3 and parts[1] == 'connected':
+                connected = True
+                ssid = parts[2] if parts[2] else None
+                
+                # Get IP address
+                try:
+                    ip_result = subprocess.run(
+                        ["ip", "-4", "addr", "show", parts[0]],
+                        capture_output=True,
+                        text=True,
+                        timeout=3
+                    )
+                    for ip_line in ip_result.stdout.split('\n'):
+                        if 'inet ' in ip_line:
+                            ip = ip_line.strip().split()[1].split('/')[0]
+                            break
+                except:
+                    pass
+                break
+        
+        return {
+            "connected": connected,
+            "ssid": ssid,
+            "ip": ip
+        }
+    except Exception as e:
+        print(f"Error getting network status: {e}")
+        return {"connected": False}
+
+@app.post("/api/network/enable-ap")
+async def enable_ap_mode():
+    """Enable Access Point mode"""
+    try:
+        # Start hostapd and dnsmasq
+        subprocess.run(["sudo", "systemctl", "start", "hostapd"], check=True)
+        subprocess.run(["sudo", "systemctl", "start", "dnsmasq"], check=True)
+        
+        print("📡 AP mode enabled")
+        return {"success": True}
+    except Exception as e:
+        print(f"Error enabling AP mode: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/network/disable-ap")
+async def disable_ap_mode():
+    """Disable Access Point mode"""
+    try:
+        # Stop hostapd and dnsmasq
+        subprocess.run(["sudo", "systemctl", "stop", "hostapd"])
+        subprocess.run(["sudo", "systemctl", "stop", "dnsmasq"])
+        
+        print("📡 AP mode disabled")
+        return {"success": True}
+    except Exception as e:
+        print(f"Error disabling AP mode: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ============= OTA UPDATES =============
