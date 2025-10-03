@@ -106,6 +106,30 @@ class ApiService {
     return apiWrapper.get<FoodAnalysis>(`/api/scanner/barcode/${barcode}`);
   }
 
+  async analyzeFoodPhoto(imageBase64: string): Promise<{ 
+    name: string; 
+    carbsPer100g: number; 
+    proteinsPer100g?: number;
+    fatsPer100g?: number;
+    kcalPer100g?: number; 
+    confidence: number 
+  } | null> {
+    try {
+      const response = await apiWrapper.post<any>('/api/scanner/analyze-photo', { 
+        image: imageBase64 
+      });
+      
+      if (response.confidence < 0.7) {
+        return null;
+      }
+      
+      return response;
+    } catch (error) {
+      logger.error('Photo analysis failed:', error);
+      return null;
+    }
+  }
+
   // Timer endpoints
   async startTimer(seconds: number): Promise<void> {
     await apiWrapper.post('/api/timer/start', { seconds });

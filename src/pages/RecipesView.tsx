@@ -32,7 +32,7 @@ const mapIngredients = (recipe: GeneratedRecipe | null): IngredientDisplay[] => 
     name: ingredient.name,
     quantity: ingredient.quantity,
     unit: ingredient.unit,
-    needsScale: Boolean((ingredient as any).needs_scale ?? ingredient.needs_scale ?? ingredient.needsScale),
+    needsScale: Boolean(ingredient.needs_scale),
   }));
 };
 

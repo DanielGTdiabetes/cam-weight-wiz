@@ -206,6 +206,82 @@ class StorageService {
     }
   }
 
+  // Scanner history management
+  getScannerHistory(): any[] {
+    try {
+      const stored = localStorage.getItem('scanner_history');
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (error) {
+      console.error('Error loading scanner history:', error);
+    }
+    return [];
+  }
+
+  saveScannerHistory(history: any[]): void {
+    try {
+      localStorage.setItem('scanner_history', JSON.stringify(history));
+    } catch (error) {
+      console.error('Error saving scanner history:', error);
+    }
+  }
+
+  addScannerRecord(record: any): void {
+    try {
+      const history = this.getScannerHistory();
+      history.unshift({ ...record, timestamp: Date.now() });
+      const trimmed = history.slice(0, MAX_HISTORY_ITEMS);
+      this.saveScannerHistory(trimmed);
+    } catch (error) {
+      console.error('Error adding scanner record:', error);
+    }
+  }
+
+  // Offline queue management
+  getScannerQueue(): any[] {
+    try {
+      const stored = localStorage.getItem('scanner_history_queue');
+      if (stored) {
+        return JSON.parse(stored);
+      }
+    } catch (error) {
+      console.error('Error loading scanner queue:', error);
+    }
+    return [];
+  }
+
+  enqueueScannerAction(action: any): void {
+    try {
+      const queue = this.getScannerQueue();
+      queue.push({ ...action, queuedAt: Date.now() });
+      localStorage.setItem('scanner_history_queue', JSON.stringify(queue));
+    } catch (error) {
+      console.error('Error enqueuing scanner action:', error);
+    }
+  }
+
+  dequeueScannerAction(): any | null {
+    try {
+      const queue = this.getScannerQueue();
+      if (queue.length === 0) return null;
+      const action = queue.shift();
+      localStorage.setItem('scanner_history_queue', JSON.stringify(queue));
+      return action;
+    } catch (error) {
+      console.error('Error dequeuing scanner action:', error);
+      return null;
+    }
+  }
+
+  clearScannerQueue(): void {
+    try {
+      localStorage.removeItem('scanner_history_queue');
+    } catch (error) {
+      console.error('Error clearing scanner queue:', error);
+    }
+  }
+
   // Export/Import data
   exportData(): string {
     const data = {
