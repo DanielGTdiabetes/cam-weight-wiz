@@ -65,6 +65,38 @@ ensure_user_in_group() {
   fi
 }
 
+ensure_enable_uart() {
+  local conf_file="$1"
+  if [[ ${SKIP_HARDWARE_CONFIG:-0} == 1 ]]; then
+    warn "SKIP_HARDWARE_CONFIG=1, omitiendo forzar enable_uart"
+    return
+  fi
+  if [[ ! -f "${conf_file}" ]]; then
+    warn "No se encontró ${conf_file}; creando archivo para habilitar UART"
+    if ! touch "${conf_file}"; then
+      warn "No se pudo crear ${conf_file}; UART no configurado"
+      return
+    fi
+  fi
+  if grep -qE '^\s*enable_uart=1\b' "${conf_file}"; then
+    log "UART ya habilitado en ${conf_file}"
+    return
+  fi
+  if grep -qE '^\s*enable_uart=' "${conf_file}"; then
+    if sed -i 's/^\s*enable_uart=.*/enable_uart=1/' "${conf_file}"; then
+      log "Actualizado enable_uart=1 en ${conf_file}"
+    else
+      warn "No se pudo actualizar enable_uart en ${conf_file}"
+    fi
+  else
+    {
+      printf '\n# Habilitado por instalador de Báscula\n'
+      printf 'enable_uart=1\n'
+    } >>"${conf_file}" || warn "No se pudo escribir enable_uart en ${conf_file}"
+    log "Añadido enable_uart=1 a ${conf_file}"
+  fi
+}
+
 # --- Require root privileges ---
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   err "Ejecuta con sudo: sudo ./install-all.sh"
@@ -201,8 +233,10 @@ if [[ "${NET_OK}" -eq 1 ]]; then
     ensure_pkg xinit
     ensure_pkg openbox
     ensure_pkg unclutter
+    ensure_pkg python3-serial
 else
     warn "Sin red: omitiendo la instalación de dependencias base"
+    warn "Instala manualmente python3-serial para el backend UART"
 fi
 
 CHROME_PKG=""
@@ -375,6 +409,9 @@ for grp in "${HARDWARE_GROUPS[@]}"; do
 done
 log "✓ Usuario ${TARGET_USER} añadido a grupos disponibles"
 
+# Garantiza acceso a UART para usuario pi
+ensure_user_in_group "pi" "dialout"
+
 # Configure boot config
 log "[7/20] Configurando boot/config.txt..."
 
@@ -428,6 +465,8 @@ EOF
   warn "Hardware específico (cámara, audio I2S, HDMI custom) comentado por seguridad"
   warn "Edita ${CONF} para habilitar después del primer arranque exitoso"
 fi
+
+ensure_enable_uart "${CONF}"
 
 # Disable Bluetooth UART
 systemctl_safe disable --now hciuart
@@ -1332,6 +1371,7 @@ echo "  say.sh 'Hola'    # probar voz"
 echo "  x735off          # apagar el sistema de forma segura"
 echo ""
 log "Instalación finalizada"
+log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
 systemctl_safe status bascula-miniweb --no-pager -l
 if command -v ss >/dev/null 2>&1; then
   ss -ltnp | grep 8080 || true
