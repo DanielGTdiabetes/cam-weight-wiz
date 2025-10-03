@@ -11,6 +11,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Deque, Dict, Optional
 
+try:  # pragma: no cover - optional dependency
+    import lgpio  # type: ignore
+except ImportError:  # pragma: no cover - handled dynamically
+    lgpio = None  # type: ignore
+
 LOG_DIR = Path("/var/log/bascula")
 STATE_PATH = Path(os.getenv("BASCULA_SCALE_STATE", "/var/lib/bascula/scale.json"))
 DEFAULT_CALIBRATION = 1.0
@@ -38,6 +43,82 @@ class HX711Error(Exception):
 
 class HX711ReadTimeout(HX711Error):
     """Raised when waiting for HX711 data ready times out."""
+
+
+class _LGPIODriver:
+    """Low level HX711 reader backed by lgpio."""
+
+    def __init__(self, dt_pin: int, sck_pin: int) -> None:
+        if lgpio is None:  # pragma: no cover - hardware specific
+            raise ImportError("lgpio module not available")
+
+        self._lgpio = lgpio
+        try:
+            self._lgpio.exceptions = True  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - best effort
+            pass
+
+        self._chip = self._lgpio.gpiochip_open(0)
+        self._dt_pin = dt_pin
+        self._sck_pin = sck_pin
+
+        try:
+            pull_up_flag = getattr(self._lgpio, "SET_PULL_UP", None)
+            if pull_up_flag is not None:
+                try:
+                    self._lgpio.gpio_claim_input(self._chip, self._dt_pin, pull_up_flag)
+                except Exception:
+                    self._lgpio.gpio_claim_input(self._chip, self._dt_pin)
+            else:
+                self._lgpio.gpio_claim_input(self._chip, self._dt_pin)
+
+            self._lgpio.gpio_claim_output(self._chip, self._sck_pin, 0)
+        except Exception:
+            self.cleanup()
+            raise
+
+    def wait_ready(self, timeout: float = 0.5) -> None:
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout:
+            if self._lgpio.gpio_read(self._chip, self._dt_pin) == 0:
+                return
+            time.sleep(0.0002)
+        raise HX711ReadTimeout("HX711 ready timeout")
+
+    def read_raw(self) -> float:
+        self.wait_ready()
+        value = 0
+        for _ in range(24):
+            self._lgpio.gpio_write(self._chip, self._sck_pin, 1)
+            value = (value << 1) | self._lgpio.gpio_read(self._chip, self._dt_pin)
+            self._lgpio.gpio_write(self._chip, self._sck_pin, 0)
+        self._lgpio.gpio_write(self._chip, self._sck_pin, 1)
+        self._lgpio.gpio_write(self._chip, self._sck_pin, 0)
+
+        if value & 0x800000:
+            value -= 1 << 24
+        return float(value)
+
+    def cleanup(self) -> None:
+        if getattr(self, "_chip", None) is None:
+            return
+        try:
+            self._lgpio.gpio_write(self._chip, self._sck_pin, 0)
+        except Exception:  # pragma: no cover - best effort
+            pass
+        try:
+            self._lgpio.gpio_free(self._chip, self._dt_pin)
+        except Exception:  # pragma: no cover - best effort
+            pass
+        try:
+            self._lgpio.gpio_free(self._chip, self._sck_pin)
+        except Exception:  # pragma: no cover - best effort
+            pass
+        try:
+            self._lgpio.gpiochip_close(self._chip)
+        except Exception:  # pragma: no cover - best effort
+            pass
+        self._chip = None
 
 
 class _PigpioDriver:
@@ -170,7 +251,7 @@ class HX711Service:
 
         self._driver: Optional[object] = None
         self._driver_name: Optional[str] = None
-        self._driver_retry_at: Dict[str, float] = {"pigpio": 0.0, "RPi.GPIO": 0.0}
+        self._driver_retry_at: Dict[str, float] = {"lgpio": 0.0, "pigpio": 0.0, "RPi.GPIO": 0.0}
         self._driver_errors: Dict[str, str] = {}
         self._last_driver_error: Optional[str] = None
 
@@ -289,6 +370,8 @@ class HX711Service:
             time.sleep(interval)
 
     def _create_driver(self, kind: str):
+        if kind == "lgpio":
+            return _LGPIODriver(self._dt_pin, self._sck_pin)
         if kind == "pigpio":
             return _PigpioDriver(self._dt_pin, self._sck_pin)
         if kind == "RPi.GPIO":
@@ -301,7 +384,7 @@ class HX711Service:
 
         now = time.time()
         reasons = []
-        for kind in ("pigpio", "RPi.GPIO"):
+        for kind in ("lgpio", "pigpio", "RPi.GPIO"):
             retry_at = self._driver_retry_at.get(kind, 0.0)
             if now < retry_at:
                 if kind in self._driver_errors:
