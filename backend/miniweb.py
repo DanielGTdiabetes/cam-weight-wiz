@@ -9,7 +9,7 @@ import ipaddress
 import random
 import string
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.scale_service import HX711Service
+from backend.serial_scale_service import SerialScaleService
 
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -34,6 +35,8 @@ DEFAULT_SCK_PIN = 6
 DEFAULT_SAMPLE_RATE = 20.0
 DEFAULT_FILTER_WINDOW = 12
 DEFAULT_CALIBRATION_FACTOR = 1.0
+DEFAULT_SERIAL_DEVICE = "/dev/serial0"
+DEFAULT_SERIAL_BAUD = 115200
 
 LOG_SCALE = logging.getLogger("bascula.scale")
 
@@ -48,7 +51,8 @@ WIFI_INTERFACE = "wlan0"
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Estado global ----------
-scale_service: Optional[HX711Service] = None
+ScaleServiceType = Union[HX711Service, SerialScaleService]
+scale_service: Optional[ScaleServiceType] = None
 
 # ---------- Modelos ----------
 class CalibrationPayload(BaseModel):
@@ -65,7 +69,52 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _save_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _default_config() -> Dict[str, Any]:
+    return {
+        "scale_backend": "uart",
+        "serial_device": DEFAULT_SERIAL_DEVICE,
+        "serial_baud": DEFAULT_SERIAL_BAUD,
+        "scale": {
+            "dt": DEFAULT_DT_PIN,
+            "sck": DEFAULT_SCK_PIN,
+            "calibration_factor": DEFAULT_CALIBRATION_FACTOR,
+            "sample_rate_hz": DEFAULT_SAMPLE_RATE,
+            "filter_window": DEFAULT_FILTER_WINDOW,
+        },
+    }
+
+
+def _load_config() -> Dict[str, Any]:
+    config = _load_json(CONFIG_PATH)
+    if not isinstance(config, dict):
+        config = {}
+
+    defaults = _default_config()
+    changed = False
+
+    for key, value in defaults.items():
+        if key == "scale":
+            scale_cfg = config.get("scale")
+            if not isinstance(scale_cfg, dict):
+                config["scale"] = value.copy()
+                changed = True
+            else:
+                for scale_key, scale_value in value.items():
+                    if scale_key not in scale_cfg:
+                        scale_cfg[scale_key] = scale_value
+                        changed = True
+        else:
+            if key not in config:
+                config[key] = value
+                changed = True
+
+    if changed:
+        _save_json(CONFIG_PATH, config)
+    return config
 
 
 def _gen_pin() -> str:
@@ -101,46 +150,76 @@ def _get_or_create_pin() -> str:
     return pin
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
+def _coerce_int(value: Any, default: int, label: str) -> int:
     try:
         return int(value)
-    except ValueError:
-        LOG_SCALE.warning("Invalid integer for %s: %s", name, value)
+    except (TypeError, ValueError):
+        LOG_SCALE.warning("Invalid %s value %s; using %s", label, value, default)
         return default
 
 
-def _env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
+def _coerce_float(value: Any, default: float, label: str) -> float:
     try:
         return float(value)
-    except ValueError:
-        LOG_SCALE.warning("Invalid float for %s: %s", name, value)
+    except (TypeError, ValueError):
+        LOG_SCALE.warning("Invalid %s value %s; using %s", label, value, default)
         return default
 
 
-def _get_scale_service() -> Optional[HX711Service]:
+def _get_scale_service() -> Optional[ScaleServiceType]:
     return scale_service
 
 
-def _init_scale_service() -> HX711Service:
-    dt_pin = _env_int("HX711_DT", DEFAULT_DT_PIN)
-    sck_pin = _env_int("HX711_SCK", DEFAULT_SCK_PIN)
-    sample_rate = _env_float("SAMPLE_RATE_HZ", DEFAULT_SAMPLE_RATE)
-    filter_window = _env_int("SCALE_FILTER_WINDOW", DEFAULT_FILTER_WINDOW)
-    calibration_factor = _env_float("CALIBRATION_FACTOR", DEFAULT_CALIBRATION_FACTOR)
+def _init_scale_service() -> ScaleServiceType:
+    config = _load_config()
+    backend = str(config.get("scale_backend", "uart")).strip().lower()
+    if backend not in {"gpio", "uart"}:
+        LOG_SCALE.warning("Backend de báscula desconocido '%s'; usando UART", backend)
+        backend = "uart"
 
-    service = HX711Service(
-        dt_pin=dt_pin,
-        sck_pin=sck_pin,
-        sample_rate_hz=sample_rate,
-        filter_window=filter_window,
-        calibration_factor=calibration_factor,
+    if backend == "gpio":
+        scale_cfg_raw = config.get("scale")
+        scale_cfg = scale_cfg_raw if isinstance(scale_cfg_raw, dict) else {}
+        dt_pin = _coerce_int(scale_cfg.get("dt", DEFAULT_DT_PIN), DEFAULT_DT_PIN, "scale.dt")
+        sck_pin = _coerce_int(scale_cfg.get("sck", DEFAULT_SCK_PIN), DEFAULT_SCK_PIN, "scale.sck")
+        sample_rate = _coerce_float(
+            scale_cfg.get("sample_rate_hz", DEFAULT_SAMPLE_RATE), DEFAULT_SAMPLE_RATE, "scale.sample_rate_hz"
+        )
+        filter_window = _coerce_int(
+            scale_cfg.get("filter_window", DEFAULT_FILTER_WINDOW), DEFAULT_FILTER_WINDOW, "scale.filter_window"
+        )
+        calibration_factor = _coerce_float(
+            scale_cfg.get("calibration_factor", DEFAULT_CALIBRATION_FACTOR),
+            DEFAULT_CALIBRATION_FACTOR,
+            "scale.calibration_factor",
+        )
+
+        LOG_SCALE.info(
+            "Inicializando báscula con backend GPIO (dt=%s, sck=%s, sample_rate=%.2f)",
+            dt_pin,
+            sck_pin,
+            sample_rate,
+        )
+        service = HX711Service(
+            dt_pin=dt_pin,
+            sck_pin=sck_pin,
+            sample_rate_hz=sample_rate,
+            filter_window=filter_window,
+            calibration_factor=calibration_factor,
+        )
+        service.start()
+        return service
+
+    device = str(config.get("serial_device", DEFAULT_SERIAL_DEVICE) or DEFAULT_SERIAL_DEVICE)
+    baud_value = config.get("serial_baud", DEFAULT_SERIAL_BAUD)
+    baud = _coerce_int(baud_value, DEFAULT_SERIAL_BAUD, "serial_baud")
+
+    LOG_SCALE.info(
+        "Inicializando báscula con backend UART (device=%s, baud=%s)",
+        device,
+        baud,
     )
+    service = SerialScaleService(device=device, baud=baud)
     service.start()
     return service
 
@@ -660,7 +739,7 @@ async def init_scale() -> None:
     try:
         scale_service = _init_scale_service()
     except Exception as exc:
-        LOG_SCALE.error("Failed to start HX711 service: %s", exc)
+        LOG_SCALE.error("Failed to start scale service: %s", exc)
         scale_service = None
 
 
@@ -671,7 +750,7 @@ async def close_scale() -> None:
     try:
         scale_service.stop()
     except Exception as exc:
-        LOG_SCALE.error("Failed to stop HX711 service: %s", exc)
+        LOG_SCALE.error("Failed to stop scale service: %s", exc)
     finally:
         scale_service = None
 
@@ -696,8 +775,15 @@ app.add_middleware(
 async def api_scale_status():
     service = _get_scale_service()
     if service is None:
-        return {"ok": False, "reason": "service_not_initialized"}
-    return service.get_status()
+        config = _load_config()
+        backend = str(config.get("scale_backend", "uart")).strip().lower()
+        if backend not in {"gpio", "uart"}:
+            backend = "uart"
+        return {"ok": False, "backend": backend, "reason": "service_not_initialized"}
+    status = dict(service.get_status())
+    if "backend" not in status:
+        status["backend"] = "gpio" if isinstance(service, HX711Service) else "uart"
+    return status
 
 
 @app.get("/api/scale/read")

@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 import asyncio
 import json
 import logging
@@ -28,6 +28,7 @@ import httpx
 import re
 
 from scale_service import HX711Service
+from serial_scale_service import SerialScaleService
 
 
 CHATGPT_MODELS = [
@@ -222,52 +223,91 @@ DEFAULT_SCK_PIN = 6
 DEFAULT_SAMPLE_RATE = 20.0
 DEFAULT_FILTER_WINDOW = 12
 DEFAULT_CALIBRATION_FACTOR = 1.0
+DEFAULT_SERIAL_DEVICE = "/dev/serial0"
+DEFAULT_SERIAL_BAUD = 115200
 
 LOG_SCALE = logging.getLogger("bascula.scale")
 
 # Global state
-scale_service: Optional[HX711Service] = None
+ScaleServiceType = Union[HX711Service, SerialScaleService]
+scale_service: Optional[ScaleServiceType] = None
 active_websockets: list[WebSocket] = []
 timer_task: Optional[asyncio.Task] = None
 timer_state = {"running": False, "remaining": 0, "total": 0}
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value is None:
-        return default
+def _coerce_int(value: Any, default: int, label: str) -> int:
     try:
         return int(value)
-    except ValueError:
-        LOG_SCALE.warning("Invalid integer for %s: %s", name, value)
+    except (TypeError, ValueError):
+        LOG_SCALE.warning("Invalid %s value %s; using %s", label, value, default)
         return default
 
 
-def _env_float(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value is None:
-        return default
+def _coerce_float(value: Any, default: float, label: str) -> float:
     try:
         return float(value)
-    except ValueError:
-        LOG_SCALE.warning("Invalid float for %s: %s", name, value)
+    except (TypeError, ValueError):
+        LOG_SCALE.warning("Invalid %s value %s; using %s", label, value, default)
         return default
 
 
-def _create_scale_service() -> HX711Service:
-    dt_pin = _env_int("HX711_DT", DEFAULT_DT_PIN)
-    sck_pin = _env_int("HX711_SCK", DEFAULT_SCK_PIN)
-    sample_rate = _env_float("SAMPLE_RATE_HZ", DEFAULT_SAMPLE_RATE)
-    filter_window = _env_int("SCALE_FILTER_WINDOW", DEFAULT_FILTER_WINDOW)
-    calibration_factor = _env_float("CALIBRATION_FACTOR", DEFAULT_CALIBRATION_FACTOR)
+def _create_scale_service() -> ScaleServiceType:
+    config = load_config()
+    backend = str(config.get("scale_backend", "uart")).strip().lower()
+    if backend not in {"gpio", "uart"}:
+        LOG_SCALE.warning("Backend de báscula desconocido '%s'; usando UART", backend)
+        backend = "uart"
 
-    service = HX711Service(
-        dt_pin=dt_pin,
-        sck_pin=sck_pin,
-        sample_rate_hz=sample_rate,
-        filter_window=filter_window,
-        calibration_factor=calibration_factor,
+    if backend == "gpio":
+        scale_cfg_raw = config.get("scale")
+        scale_cfg = scale_cfg_raw if isinstance(scale_cfg_raw, dict) else {}
+        dt_pin = _coerce_int(scale_cfg.get("dt", DEFAULT_DT_PIN), DEFAULT_DT_PIN, "scale.dt")
+        sck_pin = _coerce_int(scale_cfg.get("sck", DEFAULT_SCK_PIN), DEFAULT_SCK_PIN, "scale.sck")
+        sample_rate = _coerce_float(
+            scale_cfg.get("sample_rate_hz", DEFAULT_SAMPLE_RATE),
+            DEFAULT_SAMPLE_RATE,
+            "scale.sample_rate_hz",
+        )
+        filter_window = _coerce_int(
+            scale_cfg.get("filter_window", DEFAULT_FILTER_WINDOW),
+            DEFAULT_FILTER_WINDOW,
+            "scale.filter_window",
+        )
+        calibration_factor = _coerce_float(
+            scale_cfg.get("calibration_factor", DEFAULT_CALIBRATION_FACTOR),
+            DEFAULT_CALIBRATION_FACTOR,
+            "scale.calibration_factor",
+        )
+
+        LOG_SCALE.info(
+            "Inicializando báscula con backend GPIO (dt=%s, sck=%s, sample_rate=%.2f)",
+            dt_pin,
+            sck_pin,
+            sample_rate,
+        )
+
+        service = HX711Service(
+            dt_pin=dt_pin,
+            sck_pin=sck_pin,
+            sample_rate_hz=sample_rate,
+            filter_window=filter_window,
+            calibration_factor=calibration_factor,
+        )
+        service.start()
+        return service
+
+    device = str(config.get("serial_device", DEFAULT_SERIAL_DEVICE) or DEFAULT_SERIAL_DEVICE)
+    baud_value = config.get("serial_baud", DEFAULT_SERIAL_BAUD)
+    baud = _coerce_int(baud_value, DEFAULT_SERIAL_BAUD, "serial_baud")
+
+    LOG_SCALE.info(
+        "Inicializando báscula con backend UART (device=%s, baud=%s)",
+        device,
+        baud,
     )
+
+    service = SerialScaleService(device=device, baud=baud)
     service.start()
     return service
 
@@ -415,14 +455,8 @@ class RecipeNext(BaseModel):
 
 # ============= CONFIG HELPERS =============
 
-def load_config():
-    """Load configuration from JSON file"""
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"Error loading config: {e}")
+
+def _default_config() -> Dict[str, Any]:
     return {
         "general": {"sound_enabled": True, "volume": 70, "tts_enabled": True},
         "scale": {
@@ -430,40 +464,81 @@ def load_config():
             "sck": DEFAULT_SCK_PIN,
             "calibration_factor": DEFAULT_CALIBRATION_FACTOR,
             "sample_rate_hz": DEFAULT_SAMPLE_RATE,
+            "filter_window": DEFAULT_FILTER_WINDOW,
         },
+        "scale_backend": "uart",
+        "serial_device": DEFAULT_SERIAL_DEVICE,
+        "serial_baud": DEFAULT_SERIAL_BAUD,
         "network": {"miniweb_enabled": True, "miniweb_port": 8080},
         "diabetes": {"diabetes_enabled": False, "ns_url": "", "ns_token": ""},
     }
 
-def save_config(config: dict):
-    """Save configuration to JSON file"""
+
+def load_config() -> Dict[str, Any]:
+    """Load configuration ensuring required keys exist."""
+    config: Dict[str, Any] = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    config = loaded
+        except Exception as exc:
+            LOG_SCALE.warning("Error loading config: %s", exc)
+
+    defaults = _default_config()
+    changed = False
+
+    for key, value in defaults.items():
+        if key == "scale":
+            current = config.get("scale")
+            if not isinstance(current, dict):
+                config["scale"] = value.copy()
+                changed = True
+            else:
+                for sub_key, sub_value in value.items():
+                    if sub_key not in current:
+                        current[sub_key] = sub_value
+                        changed = True
+        else:
+            if key not in config:
+                config[key] = value
+                changed = True
+
+    if changed:
+        save_config(config)
+    return config
+
+
+def save_config(config: Dict[str, Any]) -> None:
+    """Save configuration to JSON file."""
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, 'w') as f:
-        json.dump(config, f, indent=2)
+    with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
+        json.dump(config, handle, indent=2)
 
 # ============= SERIAL/SCALE =============
 
 async def init_scale() -> None:
-    """Initialize HX711 service."""
+    """Initialize scale service."""
     global scale_service
     if scale_service is not None:
         return
     try:
         scale_service = _create_scale_service()
     except Exception as exc:
-        LOG_SCALE.error("Failed to start HX711 service: %s", exc)
+        LOG_SCALE.error("Failed to start scale service: %s", exc)
         scale_service = None
 
 
 async def close_scale() -> None:
-    """Stop HX711 service."""
+    """Stop scale service."""
     global scale_service
     if scale_service is None:
         return
     try:
         scale_service.stop()
     except Exception as exc:
-        LOG_SCALE.error("Failed to stop HX711 service: %s", exc)
+        LOG_SCALE.error("Failed to stop scale service: %s", exc)
     finally:
         scale_service = None
 
@@ -507,9 +582,12 @@ async def websocket_scale(websocket: WebSocket):
             if data.get("ok"):
                 grams = data.get("grams")
                 instant = data.get("instant")
-                stable = False
-                if grams is not None and instant is not None:
-                    stable = abs(instant - grams) <= 1.0
+                if instant is None and grams is not None:
+                    instant = grams
+                stable_value = data.get("stable")
+                if stable_value is None and grams is not None and instant is not None:
+                    stable_value = abs(instant - grams) <= 1.0
+                stable = bool(stable_value) if stable_value is not None else False
                 payload = {
                     **data,
                     "weight": grams if grams is not None else 0.0,
@@ -520,7 +598,10 @@ async def websocket_scale(websocket: WebSocket):
             else:
                 await websocket.send_json(data)
 
-            interval = max(0.05, 1.0 / service.sample_rate_hz)
+            if isinstance(service, HX711Service):
+                interval = max(0.05, 1.0 / service.sample_rate_hz)
+            else:
+                interval = 0.1
             await asyncio.sleep(interval)
 
     except WebSocketDisconnect:
@@ -534,8 +615,14 @@ async def websocket_scale(websocket: WebSocket):
 async def scale_status():
     service = scale_service
     if service is None:
-        return {"ok": False, "reason": "service_not_initialized"}
-    status = service.get_status()
+        config = load_config()
+        backend = str(config.get("scale_backend", "uart")).strip().lower()
+        if backend not in {"gpio", "uart"}:
+            backend = "uart"
+        return {"ok": False, "backend": backend, "reason": "service_not_initialized", "success": False}
+    status = dict(service.get_status())
+    if "backend" not in status:
+        status["backend"] = "gpio" if isinstance(service, HX711Service) else "uart"
     status["success"] = status.get("ok", False)
     return status
 

@@ -462,6 +462,7 @@ class HX711Service:
         with self._lock:
             status = {
                 "ok": self._status_ok,
+                "backend": "gpio",
                 "sampling_hz": self._sample_rate_hz,
                 "calibration_factor": self._calibration_factor,
                 "tare_offset": self._tare_offset,
