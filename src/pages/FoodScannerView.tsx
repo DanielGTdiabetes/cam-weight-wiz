@@ -15,7 +15,7 @@ import {
   createScannerSnapshot,
   scaleNutritionByFactor,
   toFoodItem,
-  type BarcodeScannerSnapshot,
+  type FoodScannerConfirmedPayload,
   type FoodItem,
 } from "@/features/food-scanner/foodItem";
 
@@ -161,8 +161,8 @@ export const FoodScannerView = () => {
     }
   };
 
-  const appendBarcodeSnapshot = (snapshot: BarcodeScannerSnapshot) => {
-    const item = toFoodItem(snapshot, "barcode");
+  const handleFoodConfirmed = (payload: FoodScannerConfirmedPayload) => {
+    const item = toFoodItem(payload, "barcode");
     appendFood(item);
   };
 
@@ -226,7 +226,7 @@ export const FoodScannerView = () => {
       const factor = validWeight / 100;
       const normalized = scaleNutritionByFactor(analysis, factor);
       const snapshot = createScannerSnapshot(normalized, validWeight);
-      appendBarcodeSnapshot(snapshot);
+      handleFoodConfirmed(snapshot);
     } catch (error) {
       logger.error("Barcode lookup failed", { error });
       if (error instanceof ApiError) {

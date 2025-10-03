@@ -39,28 +39,31 @@ Quiero que actualices la vista de la báscula para que utilice el hook de WebSoc
 
 ##### Contrato del modal de códigos de barras
 
-El modal que encapsule la lectura de códigos (`BarcodeScannerModal`) debe aceptar un callback `appendFood` que reciba todos los macronutrientes necesarios para poblar la vista sin cálculos adicionales. El contrato compartido está disponible en `@/features/food-scanner/foodItem`:
+El modal que encapsule la lectura de códigos (`BarcodeScannerModal`) debe aceptar un callback `onFoodConfirmed` que reciba el mismo payload que consume la vista. El contrato compartido está disponible en `@/features/food-scanner/foodItem` y luce así:
 
 ```ts
-export interface BarcodeScannerSnapshot {
+export interface FoodScannerConfirmedPayload {
   name: string;
   weight: number;
   carbs: number;
   proteins: number;
   fats: number;
   glycemicIndex: number;
+  kcal?: number;
   confidence?: number;
   avgColor?: { r: number; g: number; b: number };
 }
 
+export type BarcodeScannerSnapshot = FoodScannerConfirmedPayload;
+
 export interface BarcodeScannerModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  appendFood: (food: BarcodeScannerSnapshot) => void;
+  onFoodConfirmed: (food: FoodScannerConfirmedPayload) => void;
 }
 ```
 
-Si el backend entrega los macronutrientes normalizados a 100 g, crea primero un `BarcodeScannerSnapshot` ajustando `proteins`, `fats` y `glycemicIndex` antes de invocar `appendFood`. Puedes utilizar los helpers `scaleNutritionByFactor`, `createScannerSnapshot` y `toFoodItem` para mantener el contrato sincronizado con la vista.
+Tanto la vista `FoodScannerView` como el modal trabajan con `FoodScannerConfirmedPayload`, de modo que no haya discrepancias de campos al registrar un alimento. Si el backend entrega los macronutrientes normalizados a 100 g, crea primero un `FoodScannerConfirmedPayload` ajustando `proteins`, `fats`, `glycemicIndex` y, si procede, calcula `kcal` antes de invocar `onFoodConfirmed`. Puedes utilizar los helpers `scaleNutritionByFactor`, `createScannerSnapshot` y `toFoodItem` para mantener el contrato sincronizado con la vista.
 
 ### Notas sobre FatSecret
 
