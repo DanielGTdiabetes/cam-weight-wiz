@@ -381,11 +381,26 @@ log "✓ Xorg configurado para DRM card1"
 log "[9/20] Configurando Polkit..."
 install -d -m 0755 /etc/polkit-1/rules.d
 
+if id -u pi >/dev/null 2>&1; then
+  if id -nG pi | grep -qw netdev; then
+    log "Usuario pi ya pertenece al grupo netdev"
+  else
+    if usermod -aG netdev pi; then
+      log "Añadido usuario pi al grupo netdev"
+    else
+      warn "No se pudo añadir pi al grupo netdev"
+    fi
+  fi
+else
+  warn "Usuario pi no existe; omitiendo adición a netdev"
+fi
+
 POLKIT_RULE_SRC="${PROJECT_ROOT}/packaging/polkit/49-nmcli.rules"
 if [[ -f "${POLKIT_RULE_SRC}" ]]; then
   install -m 0644 "${POLKIT_RULE_SRC}" /etc/polkit-1/rules.d/49-nmcli.rules
 else
   warn "No se encontró ${POLKIT_RULE_SRC}; creando regla básica"
+  install -m 0644 /dev/null /etc/polkit-1/rules.d/49-nmcli.rules
   cat > /etc/polkit-1/rules.d/49-nmcli.rules <<'EOF'
 polkit.addRule(function(action, subject) {
   if (subject.isInGroup("netdev") || subject.user == "pi") {
@@ -399,6 +414,9 @@ polkit.addRule(function(action, subject) {
       return polkit.Result.YES;
     }
     if (action.id == "org.freedesktop.NetworkManager.wifi.scan") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.enable-disable-wifi") {
       return polkit.Result.YES;
     }
     if (action.id == "org.freedesktop.NetworkManager.wifi.share.protected") {
@@ -429,11 +447,64 @@ polkit.addRule(function(action, subject) {
   }
 });
 EOF
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  systemctl restart polkit 2>/dev/null || systemctl restart polkitd 2>/dev/null || warn "No se pudo reiniciar polkit"
-else
-  warn "systemd no disponible: omitiendo reinicio de polkit"
+
+if id -u pi >/dev/null 2>&1; then
+  if id -nG pi | grep -qw netdev; then
+    log "Verificación: pi ∈ netdev"
+  else
+    fail "pi no pertenece a netdev tras la instalación"
+  fi
 fi
+
+if [[ -f /etc/polkit-1/rules.d/49-nmcli.rules ]]; then
+  log "Regla Polkit 49-nmcli.rules instalada"
+else
+  fail "No se encontró /etc/polkit-1/rules.d/49-nmcli.rules"
+fi
+
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if ! systemctl restart polkit; then
+    systemctl restart polkitd || true
+  fi
+  systemctl restart NetworkManager || true
+else
+  warn "systemd no disponible: omitiendo reinicio de polkit/NetworkManager"
+fi
+
+if ! nmcli general status >/dev/null 2>&1; then
+  err "ERR: nmcli no responde"
+  exit 1
+fi
+
+log "Chequeos rápidos de nmcli (PolicyKit)..."
+set +e
+__nmcli_wifi_status_output="$(nmcli -t -f WIFI general status 2>&1)"
+__nmcli_wifi_status_rc=$?
+set -e
+if [[ ${__nmcli_wifi_status_rc} -ne 0 ]]; then
+  if printf '%s' "${__nmcli_wifi_status_output}" | grep -qiE "(not authorized|access denied|permission denied)"; then
+    fail "PolicyKit denegó 'nmcli -t -f WIFI general status': ${__nmcli_wifi_status_output}"
+  else
+    warn "nmcli WIFI status devolvió código ${__nmcli_wifi_status_rc}: ${__nmcli_wifi_status_output}"
+  fi
+else
+  log "nmcli WIFI status: ${__nmcli_wifi_status_output}"
+fi
+
+set +e
+__nmcli_wifi_list_output="$(nmcli -t -f SSID,SECURITY,SIGNAL device wifi list ifname wlan0 --rescan yes 2>&1)"
+__nmcli_wifi_list_rc=$?
+set -e
+if [[ ${__nmcli_wifi_list_rc} -ne 0 ]]; then
+  if printf '%s' "${__nmcli_wifi_list_output}" | grep -qiE "(not authorized|access denied|permission denied)"; then
+    fail "PolicyKit denegó 'nmcli device wifi list': ${__nmcli_wifi_list_output}"
+  else
+    warn "nmcli device wifi list devolvió código ${__nmcli_wifi_list_rc}: ${__nmcli_wifi_list_output}"
+  fi
+else
+  log "Listado Wi-Fi detectado correctamente"
+fi
+
 log "✓ Polkit configurado"
 
 # Create config.json
