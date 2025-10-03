@@ -191,7 +191,7 @@ export const MiniWebConfig = () => {
                 <Lock className="h-16 w-16 text-primary" />
               </div>
             </div>
-            <h1 className="text-3xl font-bold mb-2">Báscula Inteligente</h1>
+            <h1 className="text-3xl font-bold mb-2">Asistente de configuración</h1>
             <p className="text-muted-foreground">
               Configuración WiFi - Modo AP
             </p>

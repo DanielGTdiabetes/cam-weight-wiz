@@ -99,6 +99,8 @@ apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
 log "✓ Dependencias base instaladas"
 
 # Ensure NetworkManager service is enabled and running
+log "[3a/20] Reinstalando NetworkManager..."
+apt-get install -y network-manager
 systemctl enable NetworkManager --now || true
 
 # Install camera dependencies
@@ -117,7 +119,7 @@ log "✓ Node.js $(node --version) instalado"
 
 # Configure hardware permissions
 log "[6/20] Configurando permisos de hardware..."
-usermod -aG video,render,input,dialout,i2c,gpio,audio "${TARGET_USER}"
+usermod -aG video,render,input,dialout,i2c,gpio,audio,netdev "${TARGET_USER}"
 log "✓ Usuario ${TARGET_USER} añadido a grupos necesarios"
 
 # Configure boot config
@@ -237,15 +239,28 @@ log "✓ Xorg configurado para DRM card1"
 # Configure Polkit rules
 log "[9/20] Configurando Polkit..."
 install -d -m 0755 /etc/polkit-1/rules.d
-cat > /etc/polkit-1/rules.d/10-bascula-nmcli.rules <<'EOF'
-// 10-bascula-nmcli.rules
+
+POLKIT_RULE_SRC="${PROJECT_ROOT}/packaging/polkit/49-nmcli.rules"
+if [[ -f "${POLKIT_RULE_SRC}" ]]; then
+  install -m 0644 "${POLKIT_RULE_SRC}" /etc/polkit-1/rules.d/49-nmcli.rules
+else
+  warn "No se encontró ${POLKIT_RULE_SRC}; creando regla básica"
+  cat > /etc/polkit-1/rules.d/49-nmcli.rules <<'EOF'
 polkit.addRule(function(action, subject) {
-  if ((subject.isInGroup("pi") || subject.user === "pi")
-      && action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
-    return polkit.Result.YES;
+  if (subject.isInGroup("netdev") || subject.user == "pi") {
+    if (action.id == "org.freedesktop.NetworkManager.settings.modify.system") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.network-control") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.wifi.scan") {
+      return polkit.Result.YES;
+    }
   }
 });
 EOF
+fi
 
 cat > /etc/polkit-1/rules.d/51-bascula-systemd.rules <<EOF
 polkit.addRule(function(action, subject) {
@@ -264,7 +279,7 @@ polkit.addRule(function(action, subject) {
   }
 });
 EOF
-sudo systemctl restart polkit || sudo systemctl restart polkitd || true
+systemctl restart polkit || systemctl restart polkitd || true
 log "✓ Polkit configurado"
 
 # Create config.json
@@ -634,21 +649,13 @@ log "✓ Nginx configurado"
 log "[17/20] Configurando servicio mini-web..."
 install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${CFG_DIR}"
 
-POLKIT_DST="/etc/polkit-1/localauthority/50-local.d"
-if [[ -d "${BASCULA_CURRENT_LINK}/scripts/polkit" ]]; then
-  install -d -m 0755 "${POLKIT_DST}"
-  for pkla in "${BASCULA_CURRENT_LINK}"/scripts/polkit/*.pkla; do
-    [[ -f "${pkla}" ]] || continue
-    install -m 0644 "${pkla}" "${POLKIT_DST}/$(basename "${pkla}")"
-  done
-  if ! systemctl restart polkit; then
-    systemctl restart polkitd || true
-  fi
-else
-  warn "Archivos de PolicyKit no encontrados en ${BASCULA_CURRENT_LINK}/scripts/polkit"
+SYSTEMD_SRC="${PROJECT_ROOT}/packaging/systemd/bascula-miniweb.service"
+if [[ ! -f "${SYSTEMD_SRC}" ]]; then
+  err "No se encontró ${SYSTEMD_SRC}"
+  exit 1
 fi
 
-install -m 0644 "${BASCULA_CURRENT_LINK}/systemd/bascula-miniweb.service" /etc/systemd/system/bascula-miniweb.service
+install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
 systemctl daemon-reload
 systemctl enable --now bascula-miniweb.service
 log "✓ Mini-web backend configurado"
@@ -684,7 +691,7 @@ chromium \
   --overscroll-history-navigation=0 \
   --disable-pinch \
   --check-for-update-interval=31536000 \
-  http://localhost:80
+  http://localhost:8080
 EOF
   chmod +x "${TARGET_HOME}/.xinitrc"
   chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.xinitrc"
@@ -791,3 +798,5 @@ echo "  say.sh 'Hola'    # probar voz"
 echo "  x735off          # apagar el sistema de forma segura"
 echo ""
 log "Instalación finalizada"
+systemctl status bascula-miniweb --no-pager -l || true
+ss -ltnp | grep 8080 || true

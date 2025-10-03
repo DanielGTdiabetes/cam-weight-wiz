@@ -1,0 +1,13 @@
+polkit.addRule(function(action, subject) {
+  if (subject.isInGroup("netdev") || subject.user == "pi") {
+    if (action.id == "org.freedesktop.NetworkManager.settings.modify.system") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.network-control") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.wifi.scan") {
+      return polkit.Result.YES;
+    }
+  }
+});

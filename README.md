@@ -87,39 +87,43 @@ El script aplica la nueva versión de `backend/miniweb.py`, instala la regla de 
 
 ```bash
 # Healthcheck
-curl -s http://localhost:8080/health
+curl -s http://127.0.0.1:8080/health
+
+# OpenAPI debe responder 200
+curl -s http://127.0.0.1:8080/openapi.json | jq '.info.title'
 
 # SPA principal (debe devolver HTML, no una página en blanco)
-curl -s http://localhost:8080/ | head
+curl -s http://127.0.0.1:8080/ | head
 
-# Leer PIN (solo visible en modo AP o si BASCULA_ALLOW_PIN_READ=1)
-curl -s http://localhost:8080/api/miniweb/pin
+# Leer PIN (200 desde 127.0.0.1 o si BASCULA_ALLOW_PIN_READ=1 / modo AP)
+curl -s http://127.0.0.1:8080/api/miniweb/pin
 
-# Verificar PIN persistente
-curl -s -X POST http://localhost:8080/api/miniweb/verify-pin \
+# Verificar PIN persistente (200 si coincide, 403 si no)
+curl -s -X POST http://127.0.0.1:8080/api/miniweb/verify-pin \
   -H 'Content-Type: application/json' \
   -d '{"pin":"NNNN"}'
 
 # Escanear redes Wi-Fi (403 si falta PolicyKit, 503 si no existe /usr/bin/nmcli)
-curl -s http://localhost:8080/api/miniweb/scan-networks
+curl -s http://127.0.0.1:8080/api/miniweb/scan-networks
 
-# Iniciar conexión Wi-Fi (genera perfil .nmconnection con PSK)
-curl -s -X POST http://localhost:8080/api/miniweb/connect-wifi \
+# Iniciar conexión Wi-Fi (crea perfil WPA-PSK y agenda reinicio)
+curl -s -X POST http://127.0.0.1:8080/api/miniweb/connect-wifi \
   -H 'Content-Type: application/json' \
   -d '{"ssid":"MiRed","password":"secreto"}'
 
 # Estado de red actual
-curl -s http://localhost:8080/api/network/status
+curl -s http://127.0.0.1:8080/api/network/status
 
 # Activar / desactivar modo AP gestionado por NetworkManager
-curl -s -X POST http://localhost:8080/api/network/enable-ap
-curl -s -X POST http://localhost:8080/api/network/disable-ap
+curl -s -X POST http://127.0.0.1:8080/api/network/enable-ap
+curl -s -X POST http://127.0.0.1:8080/api/network/disable-ap
 ```
 
 Expectativas clave:
 
-- `/api/miniweb/pin` → `200` solo en modo AP (`wlan0` = `192.168.4.1/24`), bandera `BASCULA_ALLOW_PIN_READ=1` o cabecera `X-Force-Pin: 1` desde `127.0.0.1`; en STA responde `403`.
+- `/api/miniweb/pin` → `200` solo desde `127.0.0.1`/`::1`, con `BASCULA_ALLOW_PIN_READ=1` o si el dispositivo está en modo AP; en STA responde `403`.
 - El PIN permanece tras reinicios gracias a `/var/lib/bascula/miniweb_state.json`.
 - `POST /api/miniweb/verify-pin` permite 10 intentos por IP cada 10 minutos (luego `429`).
 - `GET /api/miniweb/scan-networks` funciona sin `sudo`; si PolicyKit no está aplicado devuelve `403 {"code":"NMCLI_NOT_AUTHORIZED"}`.
-- `POST /api/miniweb/connect-wifi` conecta con NetworkManager, desactiva el AP y programa un reinicio.
+- `POST /api/miniweb/connect-wifi` conecta con NetworkManager, desactiva el AP y programa `shutdown -r +1`.
+- El kiosk Chromium debe abrir `http://localhost:8080/config`, solicitar PIN, listar redes, conectar y tras éxito reiniciar.

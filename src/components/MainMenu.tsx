@@ -75,10 +75,10 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
       <div className="w-full max-w-5xl">
         <div className="mb-6 text-center">
           <h1 className="mb-3 text-6xl font-bold text-primary text-glow-cyan">
-            Báscula Inteligente
+            Panel del dispositivo
           </h1>
           <p className="text-2xl text-muted-foreground">
-            Sistema de Nutrición y Diabetes
+            Gestiona la báscula y su entorno conectado
           </p>
         </div>
 

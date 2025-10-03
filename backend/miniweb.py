@@ -147,7 +147,9 @@ def _is_ap_active() -> bool:
     return _is_ap_mode_legacy()
 
 
-def _allow_pin_disclosure() -> bool:
+def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
+    if client_host in {"127.0.0.1", "::1"}:
+        return True
     if os.getenv("BASCULA_ALLOW_PIN_READ", "0") == "1":
         return True
     return _is_ap_active()
@@ -208,6 +210,32 @@ def _list_networks() -> List[Dict[str, Any]]:
 def _ssid_to_slug(ssid: str) -> str:
     safe = "".join(c for c in ssid if c.isalnum() or c in ("-", "_", "."))
     return safe or "wifi"
+
+
+def _remove_profiles_for_ssid(ssid: str) -> None:
+    if not NM_CONNECTIONS_DIR.exists():
+        return
+    for profile_path in NM_CONNECTIONS_DIR.glob("*.nmconnection"):
+        try:
+            content = profile_path.read_text()
+        except Exception:
+            continue
+        if f"ssid={ssid}" not in content:
+            continue
+        connection_id: Optional[str] = None
+        for line in content.splitlines():
+            if line.startswith("id="):
+                connection_id = line.split("=", 1)[1].strip()
+                break
+        if connection_id:
+            try:
+                _remove_connection(connection_id)
+            except Exception:
+                pass
+        try:
+            profile_path.unlink()
+        except Exception:
+            pass
 
 
 def _write_nm_profile(ssid: str, password: str, ifname: str = WIFI_INTERFACE) -> Path:
@@ -306,6 +334,7 @@ def _connect_wifi(ssid: str, password: str) -> None:
 
     _disconnect_connection(AP_CONNECTION_ID)
     _remove_connection(HOME_CONNECTION_ID)
+    _remove_profiles_for_ssid(ssid)
 
     profile_path = _write_nm_profile(ssid, password)
 
@@ -327,6 +356,25 @@ def _connect_wifi(ssid: str, password: str) -> None:
         os.chmod(profile_path, 0o600)
     except Exception:
         pass
+
+
+def _schedule_reboot(delay_minutes: int = 1) -> None:
+    try:
+        subprocess.Popen(["/sbin/shutdown", "-r", f"+{delay_minutes}"])
+        return
+    except FileNotFoundError:
+        try:
+            subprocess.Popen(["shutdown", "-r", f"+{delay_minutes}"])
+            return
+        except FileNotFoundError:
+            pass
+    except Exception as exc:
+        print(f"⚠️ No se pudo programar el reinicio: {exc}")
+
+    try:
+        subprocess.Popen(["/usr/sbin/shutdown", "-r", f"+{delay_minutes}"])
+    except Exception as exc:
+        print(f"⚠️ No se pudo ejecutar shutdown: {exc}")
 
 
 def _load_config() -> dict:
@@ -454,10 +502,11 @@ async def health():
 
 
 @app.get("/api/miniweb/pin")
-async def get_pin():
-    if not _allow_pin_disclosure():
-        raise HTTPException(status_code=403, detail="PIN not available in this mode")
-    return {"pin": CURRENT_PIN}
+async def get_pin(request: Request):
+    client_host = request.client.host if request.client else ""
+    if _allow_pin_disclosure(client_host):
+        return {"pin": CURRENT_PIN}
+    raise HTTPException(status_code=403, detail="Not allowed")
 
 
 @app.post("/api/miniweb/verify-pin")
@@ -490,7 +539,11 @@ async def scan_networks():
 async def connect_wifi(credentials: WifiCredentials):
     try:
         _connect_wifi(credentials.ssid.strip(), credentials.password.strip())
-        return {"success": True, "message": "Conexión iniciada"}
+        _schedule_reboot()
+        return {
+            "success": True,
+            "message": "Conexión iniciada. El dispositivo se reiniciará en 1 minuto para aplicar la red.",
+        }
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PermissionError as exc:
