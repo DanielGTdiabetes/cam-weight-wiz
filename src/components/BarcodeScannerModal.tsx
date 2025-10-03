@@ -391,6 +391,10 @@ export function BarcodeScannerModal({
 
   useEffect(() => cleanup, [cleanup]);
 
+  const resetCooldown = useCallback(() => {
+    setCooldownUntil(null);
+  }, []);
+
   const ensureCooldown = useCallback(() => {
     const now = Date.now();
     if (cooldownUntil && now < cooldownUntil) {
@@ -521,6 +525,7 @@ export function BarcodeScannerModal({
         });
         cleanup();
         setScanMode('barcode');
+        resetCooldown();
         startBarcodeScanning();
         return;
       }
@@ -565,7 +570,7 @@ export function BarcodeScannerModal({
     } finally {
       setLoading(false);
     }
-  }, [toast, cleanup, startBarcodeScanning]);
+  }, [toast, cleanup, startBarcodeScanning, resetCooldown]);
 
   const startAIScanning = useCallback(async () => {
     if (attemptCount >= MAX_ATTEMPTS) {
@@ -574,6 +579,7 @@ export function BarcodeScannerModal({
         description: 'Probando escaneo de código de barras',
       });
       setScanMode('barcode');
+      resetCooldown();
       startBarcodeScanning();
       return;
     }
@@ -607,11 +613,19 @@ export function BarcodeScannerModal({
         description: 'Probando escaneo de código de barras',
       });
       setScanMode('barcode');
+      resetCooldown();
       startBarcodeScanning();
     } finally {
       setLoading(false);
     }
-  }, [attemptCount, ensureCooldown, toast, startBarcodeScanning, captureAndAnalyze]);
+  }, [
+    attemptCount,
+    ensureCooldown,
+    toast,
+    startBarcodeScanning,
+    captureAndAnalyze,
+    resetCooldown,
+  ]);
 
   const handleStartWeighing = useCallback(() => {
     if (!productData.name || productData.carbsPer100g <= 0) {
