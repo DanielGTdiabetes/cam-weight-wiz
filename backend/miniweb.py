@@ -1066,18 +1066,30 @@ async def ws_scale(websocket: WebSocket):
             data = svc.get_reading() if hasattr(svc, "get_reading") else {}
             if data.get("ok"):
                 grams = data.get("grams")
-                instant = data.get("instant", grams)
-                stable_value = data.get("stable")
-                if stable_value is None and grams is not None and instant is not None:
-                    try:
-                        stable_value = abs(float(instant) - float(grams)) <= 1.0
-                    except Exception:
+
+                # NO asumir instant = grams; solo usarlo si el backend lo proporciona
+                instant = data.get("instant", None)
+
+                # Priorizar valor del backend si viene
+                stable_value = data.get("stable", None)
+
+                # Fallback conservador: solo calcular si hay 'instant' distinto y 'grams'
+                if stable_value is None:
+                    if instant is not None and grams is not None:
+                        try:
+                            # Umbral conservador; ajustable vía config si se desea
+                            stable_value = abs(float(instant) - float(grams)) <= 1.0
+                        except Exception:
+                            stable_value = False
+                    else:
+                        # Sin datos suficientes, no afirmar estabilidad
                         stable_value = False
+
                 payload = {
                     "ok": True,
                     "weight": float(grams) if grams is not None else 0.0,
                     "unit": "g",
-                    "stable": bool(stable_value) if stable_value is not None else False,
+                    "stable": bool(stable_value),
                     "ts": data.get("ts", time.time()),
                 }
                 await websocket.send_json(payload)
