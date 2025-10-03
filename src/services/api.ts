@@ -1,6 +1,6 @@
 // API Service for FastAPI Backend Integration
 import { apiWrapper, ApiError } from './apiWrapper';
-import { storage } from './storage';
+import { storage, type AppSettings } from './storage';
 import { logger } from './logger';
 
 export const setApiBaseUrl = (baseUrl: string) => {
@@ -106,23 +106,32 @@ class ApiService {
     return apiWrapper.get<FoodAnalysis>(`/api/scanner/barcode/${barcode}`);
   }
 
-  async analyzeFoodPhoto(imageBase64: string): Promise<{ 
-    name: string; 
-    carbsPer100g: number; 
+  async analyzeFoodPhoto(imageBase64: string): Promise<{
+    name: string;
+    carbsPer100g: number;
     proteinsPer100g?: number;
     fatsPer100g?: number;
-    kcalPer100g?: number; 
-    confidence: number 
+    kcalPer100g?: number;
+    glycemicIndex?: number;
+    confidence: number;
   } | null> {
     try {
-      const response = await apiWrapper.post<any>('/api/scanner/analyze-photo', { 
-        image: imageBase64 
+      const response = await apiWrapper.post<{
+        name: string;
+        carbsPer100g: number;
+        proteinsPer100g?: number;
+        fatsPer100g?: number;
+        kcalPer100g?: number;
+        glycemicIndex?: number;
+        confidence: number;
+      }>('/api/scanner/analyze-photo', {
+        image: imageBase64,
       });
-      
+
       if (response.confidence < 0.7) {
         return null;
       }
-      
+
       return response;
     } catch (error) {
       logger.error('Photo analysis failed:', error);
@@ -184,11 +193,11 @@ class ApiService {
   }
 
   // Settings endpoints
-  async getSettings(): Promise<Record<string, any>> {
-    return apiWrapper.get<Record<string, any>>('/api/settings');
+  async getSettings(): Promise<AppSettings> {
+    return apiWrapper.get<AppSettings>('/api/settings');
   }
 
-  async updateSettings(settings: Record<string, any>): Promise<void> {
+  async updateSettings(settings: Partial<AppSettings>): Promise<void> {
     await apiWrapper.put('/api/settings', settings);
   }
 

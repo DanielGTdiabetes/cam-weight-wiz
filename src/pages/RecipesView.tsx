@@ -10,12 +10,16 @@ import { ApiError } from "@/services/apiWrapper";
 
 declare global {
   interface Window {
-    webkitSpeechRecognition?: any;
-    SpeechRecognition?: any;
+    webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    SpeechRecognition?: SpeechRecognitionConstructor;
   }
 }
 
-type SpeechRecognitionInstance = any;
+type SpeechRecognitionInstance = SpeechRecognition;
+
+interface SpeechRecognitionConstructor {
+  new (): SpeechRecognition;
+}
 
 interface IngredientDisplay {
   name: string;
@@ -73,7 +77,11 @@ export const RecipesView = () => {
     if (typeof window === "undefined") {
       return null;
     }
-    const RecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    const globalWindow = window as Window & {
+      SpeechRecognition?: SpeechRecognitionConstructor;
+      webkitSpeechRecognition?: SpeechRecognitionConstructor;
+    };
+    const RecognitionClass = globalWindow.SpeechRecognition || globalWindow.webkitSpeechRecognition;
     if (!RecognitionClass) {
       return null;
     }
@@ -101,7 +109,7 @@ export const RecipesView = () => {
     }
 
     recognitionRef.current = recognition;
-    recognition.onresult = (event: any) => {
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
       const transcript = Array.from(event.results)
         .map((result) => result[0].transcript)
         .join(" ")
@@ -118,7 +126,7 @@ export const RecipesView = () => {
       }
     };
 
-    recognition.onerror = (event: any) => {
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
       console.error("Speech recognition error", event);
       toast({ title: "Error de micrófono", description: "Intenta nuevamente" });
       setIsListening(false);

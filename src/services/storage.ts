@@ -6,6 +6,19 @@
 const STORAGE_VERSION = 2;
 const VERSION_KEY = 'storage_version';
 
+const parseJson = <T>(value: string | null): T | undefined => {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch (error) {
+    console.error('Failed to parse JSON from storage:', error);
+    return undefined;
+  }
+};
+
 export interface AppSettings {
   // Scale settings
   calibrationFactor: number;
@@ -42,6 +55,80 @@ export interface WeightRecord {
   note?: string;
 }
 
+export type ScannerSource = 'barcode' | 'ai' | 'manual';
+
+export interface ScannerHistoryEntry {
+  name: string;
+  weight: number;
+  carbs: number;
+  proteins: number;
+  fats: number;
+  glycemicIndex: number;
+  carbsPer100g: number;
+  proteinsPer100g: number;
+  fatsPer100g: number;
+  kcalPer100g: number;
+  kcal?: number;
+  confidence?: number;
+  source: ScannerSource;
+  portionWeight?: number;
+  photo?: string;
+  timestamp: string;
+}
+
+export type ScannerRecordInput = Omit<ScannerHistoryEntry, 'timestamp'> & {
+  timestamp?: string | Date;
+};
+
+export interface ScannerQueueAction {
+  type: 'exportBolus';
+  carbs: number;
+  insulin?: number;
+  timestamp: string | Date;
+}
+
+interface QueuedScannerAction extends ScannerQueueAction {
+  queuedAt: number;
+}
+
+interface StorageMigrationData {
+  settings?: Partial<AppSettings>;
+  history?: WeightRecord[];
+}
+
+const isScannerHistoryEntry = (value: unknown): value is ScannerHistoryEntry => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const entry = value as Record<string, unknown>;
+  return (
+    typeof entry.name === 'string' &&
+    typeof entry.timestamp === 'string' &&
+    typeof entry.carbs === 'number' &&
+    typeof entry.weight === 'number' &&
+    typeof entry.carbsPer100g === 'number' &&
+    typeof entry.proteinsPer100g === 'number' &&
+    typeof entry.fatsPer100g === 'number' &&
+    typeof entry.kcalPer100g === 'number' &&
+    typeof entry.source === 'string'
+  );
+};
+
+const isQueuedScannerAction = (value: unknown): value is QueuedScannerAction => {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const action = value as Record<string, unknown>;
+  return (
+    action.type === 'exportBolus' &&
+    typeof action.carbs === 'number' &&
+    typeof action.timestamp === 'string' &&
+    typeof action.queuedAt === 'number'
+  );
+};
+
 const SETTINGS_KEY = 'bascula_settings';
 const HISTORY_KEY = 'bascula_history';
 const MAX_HISTORY_ITEMS = 100;
@@ -66,13 +153,9 @@ const DEFAULT_SETTINGS: AppSettings = {
 };
 
 // Migration functions for each version
-const migrations: Record<number, (data: any) => any> = {
-  1: (data) => {
-    // v0 -> v1: Initial version
-    return data;
-  },
+const migrations: Record<number, (data: StorageMigrationData) => StorageMigrationData> = {
+  1: (data) => data,
   2: (data) => {
-    // v1 -> v2: Ensure all new fields exist
     if (data.settings) {
       data.settings = { ...DEFAULT_SETTINGS, ...data.settings };
     }
@@ -90,9 +173,9 @@ function migrateStorage() {
 
     console.log(`🔄 Migrating storage from v${currentVersion} to v${STORAGE_VERSION}`);
 
-    let data = {
-      settings: JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'),
-      history: JSON.parse(localStorage.getItem(HISTORY_KEY) || '[]'),
+    let data: StorageMigrationData = {
+      settings: parseJson<Partial<AppSettings>>(localStorage.getItem(SETTINGS_KEY)) ?? {},
+      history: parseJson<WeightRecord[]>(localStorage.getItem(HISTORY_KEY)) ?? [],
     };
 
     // Apply migrations sequentially
@@ -104,8 +187,8 @@ function migrateStorage() {
     }
 
     // Save migrated data
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(data.settings));
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(data.history));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(data.settings ?? {}));
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(Array.isArray(data.history) ? data.history : []));
     localStorage.setItem(VERSION_KEY, STORAGE_VERSION.toString());
 
     console.log(`✅ Migration complete to v${STORAGE_VERSION}`);
@@ -207,11 +290,11 @@ class StorageService {
   }
 
   // Scanner history management
-  getScannerHistory(): any[] {
+  getScannerHistory(): ScannerHistoryEntry[] {
     try {
-      const stored = localStorage.getItem('scanner_history');
-      if (stored) {
-        return JSON.parse(stored);
+      const stored = parseJson<unknown[]>(localStorage.getItem('scanner_history'));
+      if (Array.isArray(stored)) {
+        return stored.filter(isScannerHistoryEntry);
       }
     } catch (error) {
       console.error('Error loading scanner history:', error);
@@ -219,7 +302,7 @@ class StorageService {
     return [];
   }
 
-  saveScannerHistory(history: any[]): void {
+  saveScannerHistory(history: ScannerHistoryEntry[]): void {
     try {
       localStorage.setItem('scanner_history', JSON.stringify(history));
     } catch (error) {
@@ -227,7 +310,7 @@ class StorageService {
     }
   }
 
-  addScannerRecord(record: any): void {
+  addScannerRecord(record: ScannerRecordInput): void {
     try {
       const history = this.getScannerHistory();
       const timestamp =
@@ -243,11 +326,11 @@ class StorageService {
   }
 
   // Offline queue management
-  getScannerQueue(): any[] {
+  getScannerQueue(): QueuedScannerAction[] {
     try {
-      const stored = localStorage.getItem('scanner_history_queue');
-      if (stored) {
-        return JSON.parse(stored);
+      const stored = parseJson<unknown[]>(localStorage.getItem('scanner_history_queue'));
+      if (Array.isArray(stored)) {
+        return stored.filter(isQueuedScannerAction);
       }
     } catch (error) {
       console.error('Error loading scanner queue:', error);
@@ -255,7 +338,7 @@ class StorageService {
     return [];
   }
 
-  enqueueScannerAction(action: any): void {
+  enqueueScannerAction(action: ScannerQueueAction): void {
     try {
       const queue = this.getScannerQueue();
       const timestamp =
@@ -269,13 +352,22 @@ class StorageService {
     }
   }
 
-  dequeueScannerAction(): any | null {
+  dequeueScannerAction(): ScannerQueueAction | null {
     try {
       const queue = this.getScannerQueue();
       if (queue.length === 0) return null;
       const action = queue.shift();
       localStorage.setItem('scanner_history_queue', JSON.stringify(queue));
-      return action;
+      if (!action) {
+        return null;
+      }
+
+      return {
+        type: action.type,
+        carbs: action.carbs,
+        insulin: action.insulin,
+        timestamp: action.timestamp,
+      };
     } catch (error) {
       console.error('Error dequeuing scanner action:', error);
       return null;
@@ -302,16 +394,21 @@ class StorageService {
 
   importData(jsonString: string): boolean {
     try {
-      const data = JSON.parse(jsonString);
-      
-      if (data.settings) {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify(data.settings));
+      const parsed = JSON.parse(jsonString) as unknown;
+      if (!parsed || typeof parsed !== 'object') {
+        return false;
       }
-      
-      if (data.history) {
+
+      const data = parsed as Partial<StorageMigrationData>;
+
+      if (data.settings && typeof data.settings === 'object') {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...data.settings }));
+      }
+
+      if (Array.isArray(data.history)) {
         localStorage.setItem(HISTORY_KEY, JSON.stringify(data.history));
       }
-      
+
       return true;
     } catch (error) {
       console.error('Error importing data:', error);

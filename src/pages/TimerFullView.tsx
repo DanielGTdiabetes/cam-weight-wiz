@@ -88,7 +88,7 @@ export const TimerFullView = () => {
       }, 1000);
     }
     return () => clearInterval(interval);
-  }, [isRunning, seconds]);
+  }, [isRunning, seconds, triggerCompletionFeedback]);
 
   const handleStart = (mins?: number) => {
     completionTriggeredRef.current = false;

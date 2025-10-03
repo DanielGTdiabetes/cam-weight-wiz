@@ -49,6 +49,7 @@ export const SettingsView = () => {
     field: string;
     min?: number;
     max?: number;
+    allowEmpty?: boolean;
   }>({ title: "", type: "text", field: "" });
   
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
@@ -78,14 +79,15 @@ export const SettingsView = () => {
   }, [diabetesMode]);
 
   const openKeyboard = (
-    title: string, 
-    type: "numeric" | "text" | "password" | "url" | "apikey", 
-    field: string, 
+    title: string,
+    type: "numeric" | "text" | "password" | "url" | "apikey",
+    field: string,
     showDecimal = false,
     min?: number,
-    max?: number
+    max?: number,
+    allowEmpty = false
   ) => {
-    setKeyboardConfig({ title, type, field, showDecimal, min, max });
+    setKeyboardConfig({ title, type, field, showDecimal, min, max, allowEmpty });
     const currentValue = getCurrentValue(field);
     setTempValue(currentValue);
     setKeyboardOpen(true);
@@ -473,7 +475,9 @@ export const SettingsView = () => {
                   type="password"
                   value={chatGptKey}
                   readOnly
-                  onClick={() => openKeyboard("API Key de ChatGPT", "apikey", "chatGptKey")}
+                  onClick={() =>
+                    openKeyboard("API Key de ChatGPT", "apikey", "chatGptKey", false, undefined, undefined, true)
+                  }
                   placeholder="sk-..."
                   className="text-lg cursor-pointer"
                 />
@@ -548,7 +552,9 @@ export const SettingsView = () => {
                       <Input
                         value={nightscoutUrl}
                         readOnly
-                        onClick={() => openKeyboard("URL Nightscout", "url", "nightscoutUrl")}
+                        onClick={() =>
+                          openKeyboard("URL Nightscout", "url", "nightscoutUrl", false, undefined, undefined, true)
+                        }
                         placeholder="https://mi-nightscout.herokuapp.com"
                         className="cursor-pointer"
                       />
@@ -560,7 +566,9 @@ export const SettingsView = () => {
                         type="password"
                         value={nightscoutToken}
                         readOnly
-                        onClick={() => openKeyboard("API Token", "password", "nightscoutToken")}
+                        onClick={() =>
+                          openKeyboard("API Token", "password", "nightscoutToken", false, undefined, undefined, true)
+                        }
                         placeholder="Token de acceso"
                         className="cursor-pointer"
                       />
@@ -693,6 +701,7 @@ export const SettingsView = () => {
         showDecimal={keyboardConfig.showDecimal}
         min={keyboardConfig.min}
         max={keyboardConfig.max}
+        allowEmpty={keyboardConfig.allowEmpty}
       />
 
       <CalibrationWizard

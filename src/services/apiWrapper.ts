@@ -17,7 +17,7 @@ export class ApiError extends Error {
 
 interface RequestConfig {
   method?: string;
-  body?: any;
+  body?: unknown;
   headers?: Record<string, string>;
   skipQueue?: boolean;
   timeout?: number;
@@ -96,7 +96,7 @@ class ApiWrapper {
         {
           method,
           headers: requestHeaders,
-          body: body ? JSON.stringify(body) : undefined,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
         },
         timeout
       );
@@ -161,11 +161,11 @@ class ApiWrapper {
     return this.request<T>(endpoint);
   }
 
-  post<T>(endpoint: string, body?: any): Promise<T> {
+  post<T>(endpoint: string, body?: unknown): Promise<T> {
     return this.request<T>(endpoint, { method: 'POST', body });
   }
 
-  put<T>(endpoint: string, body?: any): Promise<T> {
+  put<T>(endpoint: string, body?: unknown): Promise<T> {
     return this.request<T>(endpoint, { method: 'PUT', body });
   }
 

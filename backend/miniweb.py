@@ -212,6 +212,12 @@ def _ssid_to_slug(ssid: str) -> str:
     return safe or "wifi"
 
 
+def _escape_nm_value(value: str) -> str:
+    sanitized = value.replace("\x00", "").replace("\r", "").replace("\n", "")
+    sanitized = sanitized.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{sanitized}"'
+
+
 def _remove_profiles_for_ssid(ssid: str) -> None:
     if not NM_CONNECTIONS_DIR.exists():
         return
@@ -238,35 +244,61 @@ def _remove_profiles_for_ssid(ssid: str) -> None:
             pass
 
 
-def _write_nm_profile(ssid: str, password: str, ifname: str = WIFI_INTERFACE) -> Path:
+def _write_nm_profile(ssid: str, password: Optional[str], secured: bool, ifname: str = WIFI_INTERFACE) -> Path:
     slug = _ssid_to_slug(ssid.lower())
     profile_path = NM_CONNECTIONS_DIR / f"{slug}.nmconnection"
-    content = f"""[connection]
-id={HOME_CONNECTION_ID}
-uuid={uuid.uuid4()}
-type=wifi
-interface-name={ifname}
-autoconnect=true
-autoconnect-priority=100
 
-[wifi]
-ssid={ssid}
-mode=infrastructure
+    quoted_ssid = _escape_nm_value(ssid)
+    content_lines = [
+        "[connection]",
+        f"id={HOME_CONNECTION_ID}",
+        f"uuid={uuid.uuid4()}",
+        "type=wifi",
+        f"interface-name={ifname}",
+        "autoconnect=true",
+        "autoconnect-priority=100",
+        "",
+        "[wifi]",
+        f"ssid={quoted_ssid}",
+        "mode=infrastructure",
+        "",
+    ]
 
-[wifi-security]
-key-mgmt=wpa-psk
-psk={password}
-auth-alg=open
-proto=rsn
+    if secured:
+        quoted_password = _escape_nm_value(password or "")
+        content_lines.extend(
+            [
+                "[wifi-security]",
+                "key-mgmt=wpa-psk",
+                f"psk={quoted_password}",
+                "auth-alg=open",
+                "proto=rsn",
+                "",
+            ]
+        )
+    else:
+        content_lines.extend(
+            [
+                "[wifi-security]",
+                "key-mgmt=none",
+                "",
+            ]
+        )
 
-[ipv4]
-method=auto
+    content_lines.extend(
+        [
+            "[ipv4]",
+            "method=auto",
+            "",
+            "[ipv6]",
+            "method=ignore",
+            "",
+        ]
+    )
 
-[ipv6]
-method=ignore
-"""
+    content = "\n".join(content_lines)
     NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(content)
+    profile_path.write_text(content, encoding="utf-8")
     os.chmod(profile_path, 0o600)
     return profile_path
 
@@ -323,11 +355,22 @@ method=ignore
     os.chmod(ap_profile, 0o600)
 
 
-def _connect_wifi(ssid: str, password: str) -> None:
+def _connect_wifi(ssid: str, password: Optional[str], secured: bool) -> None:
+    ssid = ssid.strip()
     if not ssid:
         raise ValueError("SSID is required")
-    if not password:
-        raise ValueError("Password is required")
+
+    if len(ssid.encode("utf-8")) > 32:
+        raise ValueError("SSID demasiado largo")
+
+    if secured:
+        if not password or not password.strip():
+            raise ValueError("Password is required")
+        if len(password) > 63:
+            raise ValueError("Password demasiado larga")
+        sanitized_password = password.strip().replace("\x00", "").replace("\r", "").replace("\n", "")
+    else:
+        sanitized_password = None
 
     if not _nmcli_available():
         raise PermissionError("NMCLI_NOT_AVAILABLE")
@@ -336,7 +379,7 @@ def _connect_wifi(ssid: str, password: str) -> None:
     _remove_connection(HOME_CONNECTION_ID)
     _remove_profiles_for_ssid(ssid)
 
-    profile_path = _write_nm_profile(ssid, password)
+    profile_path = _write_nm_profile(ssid, sanitized_password, secured)
 
     reload_res = _nmcli(["con", "reload"], timeout=5)
     if reload_res.returncode != 0:
@@ -471,7 +514,8 @@ class PinVerification(BaseModel):
 
 class WifiCredentials(BaseModel):
     ssid: str
-    password: str
+    password: Optional[str] = None
+    secured: bool = True
 
 
 # ---------- PIN persistente ----------
@@ -538,7 +582,8 @@ async def scan_networks():
 @app.post("/api/miniweb/connect-wifi")
 async def connect_wifi(credentials: WifiCredentials):
     try:
-        _connect_wifi(credentials.ssid.strip(), credentials.password.strip())
+        password = credentials.password.strip() if credentials.password else None
+        _connect_wifi(credentials.ssid, password, credentials.secured)
         _schedule_reboot()
         return {
             "success": True,

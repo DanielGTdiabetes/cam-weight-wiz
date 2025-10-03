@@ -1153,9 +1153,31 @@ async def check_updates():
     except Exception as e:
         return {"available": False, "error": str(e)}
 
+def _safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+    """Safely extract a tar archive preventing path traversal and symlinks."""
+
+    destination = destination.resolve()
+    members: List[tarfile.TarInfo] = []
+
+    for member in archive.getmembers():
+        if member.issym() or member.islnk():
+            raise HTTPException(status_code=400, detail="El paquete contiene enlaces inseguros")
+
+        member_path = (destination / member.name).resolve()
+        try:
+            member_path.relative_to(destination)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="El paquete intenta escribir fuera del directorio destino") from exc
+
+        members.append(member)
+
+    archive.extractall(destination, members=members)
+
+
 @app.post("/api/updates/install")
 async def install_update():
     """Download and unpack the latest release from GitHub"""
+    download_path: Optional[Path] = None
     try:
         DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
         RELEASES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1180,7 +1202,7 @@ async def install_update():
 
         with tempfile.TemporaryDirectory() as temp_dir:
             with tarfile.open(download_path, "r:gz") as archive:
-                archive.extractall(temp_dir)
+                _safe_extract_tar(archive, Path(temp_dir))
 
             temp_path = Path(temp_dir)
             extracted_dirs = [item for item in temp_path.iterdir() if item.is_dir()]
@@ -1219,6 +1241,12 @@ async def install_update():
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Instalación falló: {exc}")
+    finally:
+        if download_path and download_path.exists():
+            try:
+                download_path.unlink()
+            except OSError:
+                pass
 
 # ============= HEALTH CHECK =============
 

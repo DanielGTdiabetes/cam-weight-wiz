@@ -6,7 +6,7 @@ interface LogEntry {
   level: LogLevel;
   message: string;
   timestamp: string;
-  context?: Record<string, any>;
+  context?: Record<string, unknown>;
 }
 
 class Logger {
@@ -26,7 +26,7 @@ class Logger {
     return levels.indexOf(level) >= levels.indexOf(this.minLevel);
   }
 
-  private log(level: LogLevel, message: string, context?: Record<string, any>) {
+  private log(level: LogLevel, message: string, context?: Record<string, unknown>) {
     if (!this.shouldLog(level)) return;
 
     const entry: LogEntry = {
@@ -60,7 +60,7 @@ class Logger {
     console.log(
       `%c${emoji[level]} [${level.toUpperCase()}] ${message}`,
       styles[level],
-      context || ''
+      context ?? ''
     );
 
     // Store critical errors in localStorage for debugging
@@ -77,19 +77,19 @@ class Logger {
     }
   }
 
-  debug(message: string, context?: Record<string, any>) {
+  debug(message: string, context?: Record<string, unknown>) {
     this.log('debug', message, context);
   }
 
-  info(message: string, context?: Record<string, any>) {
+  info(message: string, context?: Record<string, unknown>) {
     this.log('info', message, context);
   }
 
-  warn(message: string, context?: Record<string, any>) {
+  warn(message: string, context?: Record<string, unknown>) {
     this.log('warn', message, context);
   }
 
-  error(message: string, context?: Record<string, any>) {
+  error(message: string, context?: Record<string, unknown>) {
     this.log('error', message, context);
   }
 
