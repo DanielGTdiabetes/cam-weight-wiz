@@ -486,52 +486,6 @@ export function BarcodeScannerModal({
     }
   }, [attemptCount, ensureCooldown, toast, cleanup, handleBarcodeScanned]);
 
-  const startAIScanning = useCallback(async () => {
-    if (attemptCount >= MAX_ATTEMPTS) {
-      toast({
-        title: 'Límite de intentos alcanzado',
-        description: 'Probando escaneo de código de barras',
-      });
-      setScanMode('barcode');
-      startBarcodeScanning();
-      return;
-    }
-
-    if (!ensureCooldown()) {
-      return;
-    }
-
-    setScanMode('ai');
-    setPhase('scanning');
-    setLoading(true);
-    setStatusMessage('Activando cámara para analizar el alimento');
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-      });
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      setTimeout(() => {
-        captureAndAnalyze();
-      }, 5000);
-    } catch (error) {
-      logger.error('Camera access error:', error);
-      toast({
-        title: 'Error al acceder a la cámara',
-        description: 'Probando escaneo de código de barras',
-      });
-      setScanMode('barcode');
-      startBarcodeScanning();
-    } finally {
-      setLoading(false);
-    }
-  }, [attemptCount, ensureCooldown, toast, startBarcodeScanning, captureAndAnalyze]);
-
   const captureAndAnalyze = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current) return;
 
@@ -601,6 +555,52 @@ export function BarcodeScannerModal({
       setLoading(false);
     }
   }, [toast, cleanup, startBarcodeScanning]);
+
+  const startAIScanning = useCallback(async () => {
+    if (attemptCount >= MAX_ATTEMPTS) {
+      toast({
+        title: 'Límite de intentos alcanzado',
+        description: 'Probando escaneo de código de barras',
+      });
+      setScanMode('barcode');
+      startBarcodeScanning();
+      return;
+    }
+
+    if (!ensureCooldown()) {
+      return;
+    }
+
+    setScanMode('ai');
+    setPhase('scanning');
+    setLoading(true);
+    setStatusMessage('Activando cámara para analizar el alimento');
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+      });
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+
+      setTimeout(() => {
+        captureAndAnalyze();
+      }, 5000);
+    } catch (error) {
+      logger.error('Camera access error:', error);
+      toast({
+        title: 'Error al acceder a la cámara',
+        description: 'Probando escaneo de código de barras',
+      });
+      setScanMode('barcode');
+      startBarcodeScanning();
+    } finally {
+      setLoading(false);
+    }
+  }, [attemptCount, ensureCooldown, toast, startBarcodeScanning, captureAndAnalyze]);
 
   const handleStartWeighing = useCallback(() => {
     if (!productData.name || productData.carbsPer100g <= 0) {
