@@ -1,4 +1,5 @@
-import { Wifi, QrCode, Settings } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Wifi, QrCode, Settings, KeyRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -6,6 +7,51 @@ export const APModeScreen = () => {
   const apSSID = "Bascula-AP";
   const apPassword = "bascula2025";
   const miniWebURL = "http://192.168.4.1:8080";
+  const [miniWebPin, setMiniWebPin] = useState<string | null>(null);
+  const [pinMessage, setPinMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    const fetchPin = async () => {
+      try {
+        const response = await fetch("/api/miniweb/pin");
+
+        if (response.ok) {
+          const data = await response.json();
+          if (!isMounted) return;
+
+          if (data?.pin) {
+            setMiniWebPin(data.pin);
+            setPinMessage(null);
+          } else {
+            setMiniWebPin(null);
+            setPinMessage("PIN no disponible en este momento");
+          }
+        } else if (response.status === 403) {
+          if (!isMounted) return;
+          setMiniWebPin(null);
+          setPinMessage("El PIN se muestra directamente en la pantalla del dispositivo");
+        } else {
+          if (!isMounted) return;
+          setMiniWebPin(null);
+          setPinMessage("No se pudo obtener el PIN. Verifica la conexión.");
+        }
+      } catch (error) {
+        if (!isMounted) return;
+        setMiniWebPin(null);
+        setPinMessage("No se pudo obtener el PIN. Verifica la conexión.");
+      }
+    };
+
+    fetchPin();
+    const interval = window.setInterval(fetchPin, 10000);
+
+    return () => {
+      isMounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-8">
@@ -34,6 +80,24 @@ export const APModeScreen = () => {
               <div>
                 <p className="text-sm text-muted-foreground">Contraseña:</p>
                 <p className="text-2xl font-bold">{apPassword}</p>
+              </div>
+              <div className="flex items-start gap-3">
+                <div className="mt-1 rounded-full bg-primary/10 p-2">
+                  <KeyRound className="h-5 w-5 text-primary" />
+                </div>
+                <div>
+                  <p className="text-sm text-muted-foreground">PIN de la mini-web:</p>
+                  <p
+                    className={`text-2xl font-bold ${
+                      miniWebPin ? "text-primary" : pinMessage ? "text-destructive" : ""
+                    }`}
+                  >
+                    {miniWebPin ?? (pinMessage ? "PIN no disponible" : "Cargando...")}
+                  </p>
+                  {pinMessage && !miniWebPin && (
+                    <p className="text-sm text-destructive">{pinMessage}</p>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -64,7 +128,10 @@ export const APModeScreen = () => {
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   4
                 </span>
-                <p>Configura tu red WiFi desde la mini-web</p>
+                <p>
+                  Introduce el PIN <strong>{miniWebPin ?? "mostrado en esta pantalla"}</strong> y
+                  configura tu red WiFi desde la mini-web
+                </p>
               </li>
             </ol>
           </div>
