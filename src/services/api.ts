@@ -3,6 +3,10 @@ import { apiWrapper, ApiError } from './apiWrapper';
 import { storage } from './storage';
 import { logger } from './logger';
 
+export const setApiBaseUrl = (baseUrl: string) => {
+  apiWrapper.updateBaseUrl(baseUrl);
+};
+
 export interface WeightData {
   weight: number;
   stable: boolean;
@@ -65,7 +69,7 @@ class ApiService {
   constructor() {
     // Update API base URL from settings
     const settings = storage.getSettings();
-    apiWrapper.updateBaseUrl(settings.apiUrl);
+    setApiBaseUrl(settings.apiUrl);
   }
 
   // Scale endpoints

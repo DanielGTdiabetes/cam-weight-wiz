@@ -12,7 +12,7 @@ import { storage } from "@/services/storage";
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { cn } from "@/lib/utils";
-import { api } from "@/services/api";
+import { api, setApiBaseUrl } from "@/services/api";
 
 export const SettingsView = () => {
   const { toast } = useToast();
@@ -149,6 +149,7 @@ export const SettingsView = () => {
         storage.saveSettings({ hyperAlarm: parseFloat(tempValue) || 180 });
       } else if (field === 'apiUrl') {
         storage.saveSettings({ apiUrl: tempValue });
+        setApiBaseUrl(tempValue);
       } else if (field === 'wsUrl') {
         storage.saveSettings({ wsUrl: tempValue });
       }
