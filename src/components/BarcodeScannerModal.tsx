@@ -288,6 +288,7 @@ export function BarcodeScannerModal({
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const countdownRef = useRef<TimerRef | null>(null);
   const initialFocusRef = useRef<HTMLButtonElement>(null);
+  const previousWeightRef = useRef<number | null>(null);
 
   const isClient = typeof window !== 'undefined';
   const speechRecognitionClass: SpeechRecognitionConstructor | null = isClient
@@ -397,6 +398,7 @@ export function BarcodeScannerModal({
 
     if (!safeWeight) {
       previousEntryModeRef.current = previewEntryMode;
+      previousWeightRef.current = null;
       return;
     }
 
@@ -426,6 +428,7 @@ export function BarcodeScannerModal({
         shouldDirty: true,
         shouldValidate: true,
       });
+      previousWeightRef.current = safeWeight;
     } else if (previousMode === 'perTotal' && previewEntryMode === 'per100g') {
       const factor = 100 / safeWeight;
       previewForm.setValue('carbs', roundMacro(safeValue(currentCarbs) * factor), {
@@ -444,10 +447,55 @@ export function BarcodeScannerModal({
         shouldDirty: true,
         shouldValidate: true,
       });
+      previousWeightRef.current = safeWeight;
     }
 
     previousEntryModeRef.current = previewEntryMode;
   }, [previewEntryMode, previewForm]);
+
+  useEffect(() => {
+    const weightValue = previewForm.getValues('weight');
+    const safeWeight =
+      typeof weightValue === 'number' && Number.isFinite(weightValue) && weightValue > 0 ? weightValue : undefined;
+
+    if (previewEntryMode !== 'perTotal') {
+      previousWeightRef.current = safeWeight ?? null;
+      return;
+    }
+
+    const previousWeight = previousWeightRef.current;
+    previousWeightRef.current = safeWeight ?? null;
+
+    if (!safeWeight || !previousWeight || !Number.isFinite(previousWeight) || safeWeight === previousWeight) {
+      return;
+    }
+
+    const ratio = safeWeight / previousWeight;
+
+    if (!Number.isFinite(ratio) || ratio <= 0) {
+      return;
+    }
+
+    const safeValue = (value: number | undefined) =>
+      typeof value === 'number' && Number.isFinite(value) ? value : 0;
+
+    previewForm.setValue('carbs', roundMacro(safeValue(previewForm.getValues('carbs')) * ratio), {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    previewForm.setValue('proteins', roundMacro(safeValue(previewForm.getValues('proteins')) * ratio), {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    previewForm.setValue('fats', roundMacro(safeValue(previewForm.getValues('fats')) * ratio), {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+    previewForm.setValue('kcal', Math.round(safeValue(previewForm.getValues('kcal')) * ratio), {
+      shouldDirty: true,
+      shouldValidate: true,
+    });
+  }, [previewEntryMode, previewForm, previewWeight]);
 
   const cleanup = useCallback(() => {
     if (scannerRef.current) {
