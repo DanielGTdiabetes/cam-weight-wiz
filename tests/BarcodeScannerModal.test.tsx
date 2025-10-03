@@ -444,10 +444,86 @@ describe('BarcodeScannerModal', () => {
     await user.click(screen.getByRole('button', { name: /capturar ahora/i }));
 
     await waitFor(() => expect(apiMocks.analyzeFoodPhoto).toHaveBeenCalled());
+    expect(toastMock).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Detección IA incierta, probando barcode' })
+    );
     await waitFor(() => expect(html5ConstructorMock).toHaveBeenCalled());
 
     expect(await screen.findByText(/apunta la cámara al código de barras/i)).toBeInTheDocument();
 
     dateSpy.mockRestore();
+  });
+
+  it('cambia a código de barras cuando la confianza de la IA es baja', async () => {
+    const COOLDOWN_MS = 15_000;
+    let currentTime = Date.now();
+    const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
+
+    apiMocks.analyzeFoodPhoto.mockResolvedValue({
+      name: 'Yogur natural',
+      carbsPer100g: 5,
+      proteinsPer100g: 4,
+      fatsPer100g: 3,
+      confidence: 0.6,
+    });
+
+    const user = userEvent.setup();
+    renderModal();
+
+    await user.click(screen.getByRole('button', { name: /foto ia/i }));
+
+    currentTime += COOLDOWN_MS + 1000;
+
+    expect(await screen.findByText(/apunta al alimento y espera/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /capturar ahora/i }));
+
+    await waitFor(() => expect(apiMocks.analyzeFoodPhoto).toHaveBeenCalled());
+    expect(toastMock).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Detección IA incierta, probando barcode' })
+    );
+    await waitFor(() => expect(html5ConstructorMock).toHaveBeenCalled());
+
+    expect(await screen.findByText(/apunta la cámara al código de barras/i)).toBeInTheDocument();
+
+    dateSpy.mockRestore();
+  });
+
+  it('muestra la entrada por voz cuando expira el temporizador de la IA', async () => {
+    vi.useFakeTimers();
+    let resolveAnalysis: ((value: unknown) => void) | undefined;
+    apiMocks.analyzeFoodPhoto.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveAnalysis = resolve;
+        })
+    );
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderModal();
+
+    await user.click(screen.getByRole('button', { name: /foto ia/i }));
+
+    await waitFor(() =>
+      expect(navigator.mediaDevices.getUserMedia as unknown as vi.Mock).toHaveBeenCalled()
+    );
+
+    expect(await screen.findByText(/apunta al alimento y espera/i)).toBeInTheDocument();
+
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+    await waitFor(() =>
+      expect(toastMock).toHaveBeenCalledWith(expect.objectContaining({ title: 'Tiempo agotado' }))
+    );
+
+    expect(await screen.findByText(/dicta el alimento y sus datos/i)).toBeInTheDocument();
+
+    await waitFor(() => expect(apiMocks.analyzeFoodPhoto).toHaveBeenCalled());
+
+    await act(async () => {
+      resolveAnalysis?.(null);
+    });
   });
 });
