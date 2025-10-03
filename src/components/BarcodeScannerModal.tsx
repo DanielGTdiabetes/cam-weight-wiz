@@ -20,6 +20,7 @@ import { Progress } from '@/components/ui/progress';
 import { Slider } from '@/components/ui/slider';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/hooks/use-toast';
 import { useScaleWebSocket } from '@/hooks/useScaleWebSocket';
 import { storage } from '@/services/storage';
@@ -89,10 +90,63 @@ const SCAN_COOLDOWN_MS = 15_000;
 
 type ManualFormValues = z.infer<typeof manualSchema>;
 
+const previewSchema = z
+  .object({
+    entryMode: z.enum(['per100g', 'perTotal']),
+    name: z.string().min(2, 'Ingresa al menos 2 caracteres'),
+    carbs: z
+      .number({ invalid_type_error: 'Ingresa un número' })
+      .positive('Debe ser mayor a 0'),
+    proteins: z
+      .number({ invalid_type_error: 'Ingresa un número' })
+      .min(0, 'Debe ser ≥ 0'),
+    fats: z
+      .number({ invalid_type_error: 'Ingresa un número' })
+      .min(0, 'Debe ser ≥ 0'),
+    kcal: z
+      .number({ invalid_type_error: 'Ingresa un número' })
+      .min(0, 'Debe ser ≥ 0'),
+    weight: z
+      .union([
+        z
+          .number({ invalid_type_error: 'Ingresa un número' })
+          .positive('Debe ser mayor a 0'),
+        z.nan(),
+        z.undefined(),
+      ])
+      .transform((value) => (typeof value === 'number' && !Number.isNaN(value) ? value : undefined)),
+    glycemicIndex: z
+      .number({ invalid_type_error: 'Ingresa un número' })
+      .min(0, 'Debe ser ≥ 0')
+      .max(150, 'Valor fuera de rango'),
+    confirmEstimatedCarbs: z.boolean().optional(),
+    requiresConfirmation: z.boolean().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.entryMode === 'perTotal' && (!data.weight || data.weight <= 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['weight'],
+        message: 'Ingresa un peso para convertir por total',
+      });
+    }
+
+    if (data.requiresConfirmation && !data.confirmEstimatedCarbs) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['confirmEstimatedCarbs'],
+        message: 'Confirma carbs estimados',
+      });
+    }
+  });
+
+type PreviewFormValues = z.infer<typeof previewSchema>;
+
 interface ProductData extends ManualFormValues {
   confidence: number;
   source: 'barcode' | 'ai' | 'manual';
   photo?: string;
+  portionWeight?: number;
 }
 
 interface ScannerHistoryItem {
@@ -175,6 +229,25 @@ export function BarcodeScannerModal({
   const [voiceStatus, setVoiceStatus] = useState<'idle' | 'listening' | 'processing' | 'error'>('idle');
   const [activeNumericField, setActiveNumericField] = useState<keyof ManualFormValues | null>(null);
 
+  const previewForm = useForm<PreviewFormValues>({
+    resolver: zodResolver(previewSchema),
+    mode: 'onChange',
+    defaultValues: {
+      entryMode: 'per100g',
+      name: '',
+      carbs: 0,
+      proteins: 0,
+      fats: 0,
+      kcal: 0,
+      weight: 100,
+      glycemicIndex: 50,
+      confirmEstimatedCarbs: false,
+      requiresConfirmation: false,
+    },
+  });
+
+  const previousEntryModeRef = useRef<'per100g' | 'perTotal'>('per100g');
+
   const [productData, setProductData] = useState<ProductData>({
     name: '',
     carbsPer100g: 0,
@@ -185,6 +258,29 @@ export function BarcodeScannerModal({
     confidence: 0,
     source: 'barcode',
   });
+
+  useEffect(() => {
+    previewForm.reset({
+      entryMode: 'per100g',
+      name: productData.name,
+      carbs: productData.carbsPer100g,
+      proteins: productData.proteinsPer100g ?? 0,
+      fats: productData.fatsPer100g ?? 0,
+      kcal: productData.kcalPer100g ?? 0,
+      weight: productData.portionWeight ?? 100,
+      glycemicIndex: productData.glycemicIndex,
+      confirmEstimatedCarbs: false,
+      requiresConfirmation: productData.source === 'ai',
+    });
+    previousEntryModeRef.current = 'per100g';
+    void previewForm.trigger();
+  }, [previewForm, productData]);
+
+  useEffect(() => {
+    previewForm.register('entryMode');
+    previewForm.register('requiresConfirmation');
+    previewForm.register('confirmEstimatedCarbs');
+  }, [previewForm]);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -226,6 +322,132 @@ export function BarcodeScannerModal({
       glycemicIndex: productData.glycemicIndex,
     });
   }, [productData, manualForm]);
+
+  const previewEntryMode = previewForm.watch('entryMode');
+  const previewCarbs = previewForm.watch('carbs');
+  const previewProteins = previewForm.watch('proteins');
+  const previewFats = previewForm.watch('fats');
+  const previewKcal = previewForm.watch('kcal');
+  const previewWeight = previewForm.watch('weight');
+  const previewConfirmEstimated = previewForm.watch('confirmEstimatedCarbs');
+
+  const previewDerivedMacros = useMemo(() => {
+    const weightValue =
+      typeof previewWeight === 'number' && Number.isFinite(previewWeight) && previewWeight > 0
+        ? previewWeight
+        : undefined;
+
+    const safeCarbs =
+      typeof previewCarbs === 'number' && Number.isFinite(previewCarbs) ? previewCarbs : 0;
+    const safeProteins =
+      typeof previewProteins === 'number' && Number.isFinite(previewProteins) ? previewProteins : 0;
+    const safeFats = typeof previewFats === 'number' && Number.isFinite(previewFats) ? previewFats : 0;
+    const safeKcal = typeof previewKcal === 'number' && Number.isFinite(previewKcal) ? previewKcal : 0;
+
+    if (previewEntryMode === 'perTotal') {
+      return {
+        weight: weightValue,
+        perTotal: {
+          carbs: roundMacro(safeCarbs),
+          proteins: roundMacro(safeProteins),
+          fats: roundMacro(safeFats),
+          kcal: Math.round(safeKcal),
+        },
+        per100g:
+          weightValue && weightValue > 0
+            ? {
+                carbs: roundMacro((safeCarbs / weightValue) * 100),
+                proteins: roundMacro((safeProteins / weightValue) * 100),
+                fats: roundMacro((safeFats / weightValue) * 100),
+                kcal: Math.round((safeKcal / weightValue) * 100),
+              }
+            : undefined,
+      } as const;
+    }
+
+    return {
+      weight: weightValue,
+      per100g: {
+        carbs: roundMacro(safeCarbs),
+        proteins: roundMacro(safeProteins),
+        fats: roundMacro(safeFats),
+        kcal: Math.round(safeKcal),
+      },
+      perTotal:
+        weightValue && weightValue > 0
+          ? {
+              carbs: roundMacro((safeCarbs * weightValue) / 100),
+              proteins: roundMacro((safeProteins * weightValue) / 100),
+              fats: roundMacro((safeFats * weightValue) / 100),
+              kcal: Math.round((safeKcal * weightValue) / 100),
+            }
+          : undefined,
+    } as const;
+  }, [previewEntryMode, previewCarbs, previewProteins, previewFats, previewKcal, previewWeight]);
+
+  useEffect(() => {
+    const previousMode = previousEntryModeRef.current;
+    if (previousMode === previewEntryMode) {
+      return;
+    }
+
+    const weightValue = previewForm.getValues('weight');
+    const safeWeight =
+      typeof weightValue === 'number' && Number.isFinite(weightValue) && weightValue > 0 ? weightValue : undefined;
+
+    if (!safeWeight) {
+      previousEntryModeRef.current = previewEntryMode;
+      return;
+    }
+
+    const currentCarbs = previewForm.getValues('carbs');
+    const currentProteins = previewForm.getValues('proteins');
+    const currentFats = previewForm.getValues('fats');
+    const currentKcal = previewForm.getValues('kcal');
+
+    const safeValue = (value: number | undefined) =>
+      typeof value === 'number' && Number.isFinite(value) ? value : 0;
+
+    if (previousMode === 'per100g' && previewEntryMode === 'perTotal') {
+      const factor = safeWeight / 100;
+      previewForm.setValue('carbs', roundMacro(safeValue(currentCarbs) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      previewForm.setValue('proteins', roundMacro(safeValue(currentProteins) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      previewForm.setValue('fats', roundMacro(safeValue(currentFats) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      previewForm.setValue('kcal', Math.round(safeValue(currentKcal) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+    } else if (previousMode === 'perTotal' && previewEntryMode === 'per100g') {
+      const factor = 100 / safeWeight;
+      previewForm.setValue('carbs', roundMacro(safeValue(currentCarbs) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      previewForm.setValue('proteins', roundMacro(safeValue(currentProteins) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      previewForm.setValue('fats', roundMacro(safeValue(currentFats) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+      previewForm.setValue('kcal', Math.round(safeValue(currentKcal) * factor), {
+        shouldDirty: true,
+        shouldValidate: true,
+      });
+    }
+
+    previousEntryModeRef.current = previewEntryMode;
+  }, [previewEntryMode, previewForm]);
 
   const cleanup = useCallback(() => {
     if (scannerRef.current) {
@@ -281,6 +503,7 @@ export function BarcodeScannerModal({
           confidence: result.confidence ?? 1,
           source: 'barcode',
           photo: capturedPhoto,
+          portionWeight: 100,
         };
 
         setProductData(product);
@@ -305,6 +528,7 @@ export function BarcodeScannerModal({
             confidence: match.confidence || 0,
             source: 'manual',
             photo: match.photo,
+            portionWeight: 100,
           });
           setPhase('preview');
           toast({
@@ -377,6 +601,7 @@ export function BarcodeScannerModal({
         glycemicIndex: 50,
         confidence: 0,
         source: 'barcode',
+        portionWeight: 100,
       });
       setCapturedPhoto(undefined);
       setVoiceTranscript('');
@@ -553,6 +778,7 @@ export function BarcodeScannerModal({
         confidence: result.confidence,
         source: 'ai',
         photo: imageBase64,
+        portionWeight: 100,
       };
 
       setProductData(aiProduct);
@@ -632,8 +858,24 @@ export function BarcodeScannerModal({
     resetCooldown,
   ]);
 
-  const handleStartWeighing = useCallback(() => {
-    if (!productData.name || productData.carbsPer100g <= 0) {
+  const handlePreviewSubmit = previewForm.handleSubmit((values) => {
+    const weight = values.weight;
+
+    const toPer100Factor = values.entryMode === 'perTotal' && weight ? 100 / weight : 1;
+
+    const updatedProduct: ProductData = {
+      ...productData,
+      name: values.name,
+      carbsPer100g: roundMacro(values.carbs * toPer100Factor),
+      proteinsPer100g: roundMacro(values.proteins * toPer100Factor),
+      fatsPer100g: roundMacro(values.fats * toPer100Factor),
+      kcalPer100g: Math.round(values.kcal * toPer100Factor),
+      glycemicIndex: values.glycemicIndex,
+      portionWeight: weight,
+      photo: capturedPhoto ?? productData.photo,
+    };
+
+    if (!updatedProduct.name || updatedProduct.carbsPer100g <= 0) {
       toast({
         title: 'Datos incompletos',
         description: 'Completa nombre y carbohidratos',
@@ -642,10 +884,11 @@ export function BarcodeScannerModal({
       return;
     }
 
+    setProductData(updatedProduct);
     setPhase('weighing');
     setLastStableWeight(pesoActual);
     setStatusMessage('Coloca el alimento sobre la báscula y espera estabilización');
-  }, [productData, pesoActual, toast]);
+  });
 
   const calculatedCarbs = useMemo(
     () => roundMacro((productData.carbsPer100g * pesoActual) / 100),
@@ -910,6 +1153,7 @@ export function BarcodeScannerModal({
       glycemicIndex: values.glycemicIndex,
       source: 'manual',
       photo: capturedPhoto,
+      portionWeight: productData.portionWeight ?? 100,
     };
 
     setProductData(updatedProduct);
@@ -1060,52 +1304,322 @@ export function BarcodeScannerModal({
         {phase === 'preview' && (
           <div className="space-y-4">
             <Card className="p-4 space-y-4" aria-live="polite">
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <h3 className="font-semibold text-lg">{productData.name}</h3>
-                  <Badge variant={productData.source === 'ai' ? 'secondary' : 'default'}>
-                    {productData.source === 'ai' ? 'IA' : productData.source === 'barcode' ? 'Código de barras' : 'Manual'}
-                  </Badge>
+              <form
+                onSubmit={handlePreviewSubmit}
+                className="space-y-4"
+                aria-label="Revisión del alimento detectado"
+              >
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="flex-1 space-y-2">
+                    <Label htmlFor="preview-name">Nombre del alimento</Label>
+                    <Input
+                      id="preview-name"
+                      placeholder="Ej: Manzana"
+                      {...previewForm.register('name')}
+                      aria-invalid={previewForm.formState.errors.name ? 'true' : 'false'}
+                    />
+                    {previewForm.formState.errors.name && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {previewForm.formState.errors.name.message}
+                      </p>
+                    )}
+                  </div>
+                  <div className="flex flex-col items-start gap-2 sm:items-end">
+                    <Badge variant={productData.source === 'ai' ? 'secondary' : 'default'}>
+                      {productData.source === 'ai'
+                        ? 'IA'
+                        : productData.source === 'barcode'
+                        ? 'Código de barras'
+                        : 'Manual'}
+                    </Badge>
+                    {productData.confidence > 0 && (
+                      <Badge variant="outline">Confianza {(productData.confidence * 100).toFixed(0)}%</Badge>
+                    )}
+                  </div>
                 </div>
-                {productData.confidence > 0 && (
-                  <Badge variant="outline">Confianza {(productData.confidence * 100).toFixed(0)}%</Badge>
+
+                <div>
+                  <Label className="text-sm font-medium">Modo de macros</Label>
+                  <div className="mt-2 flex flex-wrap gap-2" role="group" aria-label="Modo de edición de macros">
+                    <Button
+                      type="button"
+                      variant={previewEntryMode === 'per100g' ? 'default' : 'outline'}
+                      onClick={() =>
+                        previewForm.setValue('entryMode', 'per100g', {
+                          shouldDirty: true,
+                          shouldValidate: true,
+                        })
+                      }
+                    >
+                      Por 100 g
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={previewEntryMode === 'perTotal' ? 'default' : 'outline'}
+                      onClick={() =>
+                        previewForm.setValue('entryMode', 'perTotal', {
+                          shouldDirty: true,
+                          shouldValidate: true,
+                        })
+                      }
+                    >
+                      Por total
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="preview-carbs">
+                      Carbohidratos {previewEntryMode === 'per100g' ? '/ 100 g' : 'totales'}
+                    </Label>
+                    <Input
+                      id="preview-carbs"
+                      type="number"
+                      step="0.1"
+                      {...previewForm.register('carbs', { valueAsNumber: true })}
+                      aria-invalid={previewForm.formState.errors.carbs ? 'true' : 'false'}
+                    />
+                    {previewForm.formState.errors.carbs && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {previewForm.formState.errors.carbs.message}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="preview-proteins">
+                      Proteínas {previewEntryMode === 'per100g' ? '/ 100 g' : 'totales'}
+                    </Label>
+                    <Input
+                      id="preview-proteins"
+                      type="number"
+                      step="0.1"
+                      {...previewForm.register('proteins', { valueAsNumber: true })}
+                      aria-invalid={previewForm.formState.errors.proteins ? 'true' : 'false'}
+                    />
+                    {previewForm.formState.errors.proteins && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {previewForm.formState.errors.proteins.message}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="preview-fats">
+                      Grasas {previewEntryMode === 'per100g' ? '/ 100 g' : 'totales'}
+                    </Label>
+                    <Input
+                      id="preview-fats"
+                      type="number"
+                      step="0.1"
+                      {...previewForm.register('fats', { valueAsNumber: true })}
+                      aria-invalid={previewForm.formState.errors.fats ? 'true' : 'false'}
+                    />
+                    {previewForm.formState.errors.fats && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {previewForm.formState.errors.fats.message}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="preview-kcal">
+                      Calorías {previewEntryMode === 'per100g' ? '/ 100 g' : 'totales'}
+                    </Label>
+                    <Input
+                      id="preview-kcal"
+                      type="number"
+                      step="1"
+                      {...previewForm.register('kcal', { valueAsNumber: true })}
+                      aria-invalid={previewForm.formState.errors.kcal ? 'true' : 'false'}
+                    />
+                    {previewForm.formState.errors.kcal && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {previewForm.formState.errors.kcal.message}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="preview-weight">Peso de la porción (g, opcional)</Label>
+                    <Input
+                      id="preview-weight"
+                      type="number"
+                      step="1"
+                      {...previewForm.register('weight', { valueAsNumber: true })}
+                      aria-invalid={previewForm.formState.errors.weight ? 'true' : 'false'}
+                    />
+                    {previewForm.formState.errors.weight && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {previewForm.formState.errors.weight.message}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="preview-glycemic">Índice glucémico</Label>
+                    <Input
+                      id="preview-glycemic"
+                      type="number"
+                      step="1"
+                      {...previewForm.register('glycemicIndex', { valueAsNumber: true })}
+                      aria-invalid={previewForm.formState.errors.glycemicIndex ? 'true' : 'false'}
+                    />
+                    {previewForm.formState.errors.glycemicIndex && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {previewForm.formState.errors.glycemicIndex.message}
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                {productData.source === 'ai' && (
+                  <div className="flex items-start gap-2 rounded-md border p-3">
+                    <Checkbox
+                      id="confirm-carbs"
+                      checked={Boolean(previewConfirmEstimated)}
+                      onCheckedChange={(checked) =>
+                        previewForm.setValue('confirmEstimatedCarbs', checked === true, {
+                          shouldDirty: true,
+                          shouldValidate: true,
+                        })
+                      }
+                    />
+                    <div className="space-y-1 text-sm">
+                      <Label htmlFor="confirm-carbs">Confirma carbs estimados</Label>
+                      <p className="text-muted-foreground">
+                        Verifica manualmente los valores antes de continuar.
+                      </p>
+                      {previewForm.formState.errors.confirmEstimatedCarbs && (
+                        <p className="text-sm text-red-600" role="alert">
+                          {previewForm.formState.errors.confirmEstimatedCarbs.message}
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 )}
-              </div>
 
-              <div className="grid grid-cols-2 gap-4 text-sm sm:text-base">
-                <div>
-                  <p className="font-medium">Carbohidratos</p>
-                  <p>{productData.carbsPer100g} g / 100 g</p>
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                  <div className="rounded-lg border p-4">
+                    <h4 className="mb-2 font-semibold">Por 100 g</h4>
+                    {previewDerivedMacros.per100g ? (
+                      <dl className="space-y-1 text-sm sm:text-base">
+                        <div className="flex justify-between">
+                          <dt>Carbohidratos</dt>
+                          <dd>
+                            {previewDerivedMacros.per100g.carbs.toLocaleString('es-ES', {
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            g
+                          </dd>
+                        </div>
+                        <div className="flex justify-between">
+                          <dt>Proteínas</dt>
+                          <dd>
+                            {previewDerivedMacros.per100g.proteins.toLocaleString('es-ES', {
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            g
+                          </dd>
+                        </div>
+                        <div className="flex justify-between">
+                          <dt>Grasas</dt>
+                          <dd>
+                            {previewDerivedMacros.per100g.fats.toLocaleString('es-ES', {
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            g
+                          </dd>
+                        </div>
+                        <div className="flex justify-between">
+                          <dt>Calorías</dt>
+                          <dd>
+                            {previewDerivedMacros.per100g.kcal.toLocaleString('es-ES', {
+                              maximumFractionDigits: 0,
+                            })}{' '}
+                            kcal
+                          </dd>
+                        </div>
+                      </dl>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Agrega un peso para convertir a 100 g.
+                      </p>
+                    )}
+                  </div>
+                  <div className="rounded-lg border p-4">
+                    <h4 className="mb-2 font-semibold">
+                      Porción total
+                      {previewDerivedMacros.weight ? ` (${previewDerivedMacros.weight} g)` : ''}
+                    </h4>
+                    {previewDerivedMacros.perTotal ? (
+                      <dl className="space-y-1 text-sm sm:text-base">
+                        <div className="flex justify-between">
+                          <dt>Carbohidratos</dt>
+                          <dd>
+                            {previewDerivedMacros.perTotal.carbs.toLocaleString('es-ES', {
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            g
+                          </dd>
+                        </div>
+                        <div className="flex justify-between">
+                          <dt>Proteínas</dt>
+                          <dd>
+                            {previewDerivedMacros.perTotal.proteins.toLocaleString('es-ES', {
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            g
+                          </dd>
+                        </div>
+                        <div className="flex justify-between">
+                          <dt>Grasas</dt>
+                          <dd>
+                            {previewDerivedMacros.perTotal.fats.toLocaleString('es-ES', {
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            g
+                          </dd>
+                        </div>
+                        <div className="flex justify-between">
+                          <dt>Calorías</dt>
+                          <dd>
+                            {previewDerivedMacros.perTotal.kcal.toLocaleString('es-ES', {
+                              maximumFractionDigits: 0,
+                            })}{' '}
+                            kcal
+                          </dd>
+                        </div>
+                      </dl>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        Ingresa un peso para ver los totales.
+                      </p>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <p className="font-medium">Proteínas</p>
-                  <p>{productData.proteinsPer100g} g / 100 g</p>
-                </div>
-                <div>
-                  <p className="font-medium">Grasas</p>
-                  <p>{productData.fatsPer100g} g / 100 g</p>
-                </div>
-                <div>
-                  <p className="font-medium">Calorías</p>
-                  <p>{productData.kcalPer100g} kcal / 100 g</p>
-                </div>
-                <div>
-                  <p className="font-medium">Índice glucémico</p>
-                  <p>{productData.glycemicIndex}</p>
-                </div>
-              </div>
 
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={handleStartWeighing} className="flex-1 min-w-[150px]">
-                  Continuar a pesar
-                </Button>
-                <Button variant="outline" onClick={() => setPhase('mode-select')} className="min-w-[150px]">
-                  Escanear de nuevo
-                </Button>
-                <Button variant="outline" onClick={() => setPhase('fallback')} className="min-w-[150px]">
-                  Ajustar manualmente
-                </Button>
-              </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="submit" className="flex-1 min-w-[150px]" disabled={!previewForm.formState.isValid}>
+                    Continuar a pesar
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setPhase('mode-select')}
+                    className="min-w-[150px]"
+                  >
+                    Escanear de nuevo
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setPhase('fallback')}
+                    className="min-w-[150px]"
+                  >
+                    Ajustar manualmente
+                  </Button>
+                </div>
+              </form>
             </Card>
           </div>
         )}
