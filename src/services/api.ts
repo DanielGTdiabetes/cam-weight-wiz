@@ -11,7 +11,12 @@ export interface WeightData {
 
 export interface FoodAnalysis {
   name: string;
-  confidence: number;
+  confidence?: number;
+  avg_color?: {
+    r: number;
+    g: number;
+    b: number;
+  };
   nutrition: {
     carbs: number;
     proteins: number;
@@ -20,6 +25,36 @@ export interface FoodAnalysis {
   };
 }
 
+export interface RecipeIngredient {
+  name: string;
+  quantity: number | null;
+  unit: string;
+  needs_scale?: boolean;
+}
+
+export interface RecipeStep {
+  index: number;
+  instruction: string;
+  needsScale: boolean;
+  expectedWeight?: number;
+  tip?: string;
+  timer?: number;
+}
+
+export interface GeneratedRecipe {
+  id: string;
+  title: string;
+  servings: number;
+  ingredients: RecipeIngredient[];
+  steps: RecipeStep[];
+  estimatedTime?: number | null;
+}
+
+export interface NextRecipeStepResponse {
+  step?: RecipeStep;
+  isLast: boolean;
+  assistantMessage?: string;
+}
 export interface GlucoseData {
   glucose: number;
   trend: "up" | "down" | "stable";
@@ -104,18 +139,20 @@ class ApiService {
   }
 
   // Recipe endpoints
-  async getRecipe(prompt: string): Promise<{ steps: string[] }> {
-    return apiWrapper.post<{ steps: string[] }>('/api/recipes/generate', { prompt });
+  async getRecipe(prompt: string, servings?: number): Promise<GeneratedRecipe> {
+    return apiWrapper.post<GeneratedRecipe>('/api/recipes/generate', { prompt, servings });
   }
 
   async nextRecipeStep(
+    recipeId: string,
     currentStep: number,
     userResponse?: string
-  ): Promise<{ step: string; needsScale: boolean }> {
-    return apiWrapper.post<{ step: string; needsScale: boolean }>(
-      '/api/recipes/next',
-      { currentStep, userResponse }
-    );
+  ): Promise<NextRecipeStepResponse> {
+    return apiWrapper.post<NextRecipeStepResponse>('/api/recipes/next', {
+      recipeId,
+      currentStep,
+      userResponse,
+    });
   }
 
   // Settings endpoints

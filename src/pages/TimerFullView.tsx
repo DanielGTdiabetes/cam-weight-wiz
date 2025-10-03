@@ -1,14 +1,77 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Play, Pause, RotateCcw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { api } from "@/services/api";
+
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext;
+  }
+}
 
 export const TimerFullView = () => {
   const [seconds, setSeconds] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [inputMinutes, setInputMinutes] = useState(5);
   const [showPresets, setShowPresets] = useState(true);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const completionTriggeredRef = useRef(false);
+
+  useEffect(() => () => {
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+      } catch (error) {
+        console.error("Error closing audio context", error);
+      }
+    }
+  }, []);
+
+  const playAlarm = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
+    if (!AudioContextClass) {
+      return;
+    }
+    if (!audioContextRef.current || audioContextRef.current.state === "closed") {
+      audioContextRef.current = new AudioContextClass();
+    }
+    const context = audioContextRef.current;
+    if (!context) {
+      return;
+    }
+    if (context.state === "suspended") {
+      void context.resume().catch(() => undefined);
+    }
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+
+    oscillator.type = "sine";
+    oscillator.frequency.setValueAtTime(880, context.currentTime);
+    gain.gain.setValueAtTime(0.0001, context.currentTime);
+
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+
+    oscillator.start();
+    gain.gain.exponentialRampToValueAtTime(0.25, context.currentTime + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 1.4);
+    oscillator.stop(context.currentTime + 1.5);
+  }, []);
+
+  const triggerCompletionFeedback = useCallback(() => {
+    if (completionTriggeredRef.current) {
+      return;
+    }
+    completionTriggeredRef.current = true;
+    playAlarm();
+    void api.speak("Temporizador finalizado").catch(() => undefined);
+  }, [playAlarm]);
+
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -17,7 +80,7 @@ export const TimerFullView = () => {
         setSeconds((s) => {
           if (s <= 1) {
             setIsRunning(false);
-            // TODO: Play alarm sound + voice if enabled
+            triggerCompletionFeedback();
             return 0;
           }
           return s - 1;
@@ -28,6 +91,7 @@ export const TimerFullView = () => {
   }, [isRunning, seconds]);
 
   const handleStart = (mins?: number) => {
+    completionTriggeredRef.current = false;
     if (mins !== undefined) {
       setSeconds(mins * 60);
       setInputMinutes(mins);
@@ -43,7 +107,14 @@ export const TimerFullView = () => {
     setIsRunning(!isRunning);
   };
 
+  useEffect(() => {
+    if (!isRunning && seconds === 0) {
+      completionTriggeredRef.current = false;
+    }
+  }, [isRunning, seconds]);
+
   const handleReset = () => {
+    completionTriggeredRef.current = false;
     setSeconds(0);
     setIsRunning(false);
     setShowPresets(true);

@@ -8,15 +8,24 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-from typing import Optional
+from copy import deepcopy
+from typing import Optional, Dict, Any, List
 import asyncio
 import serial
 import json
 import os
 import subprocess
 import time
+import tarfile
+import tempfile
+import shutil
+from io import BytesIO
+from pathlib import Path
+import math
+from uuid import uuid4
 from datetime import datetime
 import httpx
+import re
 
 # Configuration
 CONFIG_PATH = os.path.expanduser("~/.bascula/config.json")
@@ -28,6 +37,121 @@ scale_serial: Optional[serial.Serial] = None
 active_websockets: list[WebSocket] = []
 timer_task: Optional[asyncio.Task] = None
 timer_state = {"running": False, "remaining": 0, "total": 0}
+
+# Recipe knowledge base for deterministic guidance
+RECIPE_DATABASE: List[Dict[str, Any]] = [
+    {
+        "id": "pasta_tomate",
+        "title": "Pasta con salsa de tomate",
+        "keywords": ["pasta", "espagueti", "tomate", "spaghetti", "macarrón"],
+        "default_servings": 2,
+        "ingredients": [
+            {"name": "Pasta seca", "quantity": 200, "unit": "g", "needs_scale": True},
+            {"name": "Tomate triturado", "quantity": 300, "unit": "g", "needs_scale": False},
+            {"name": "Aceite de oliva", "quantity": 15, "unit": "ml", "needs_scale": False},
+            {"name": "Albahaca fresca", "quantity": 10, "unit": "g", "needs_scale": False},
+        ],
+        "steps": [
+            {
+                "instruction": "Llena una olla grande con 2 litros de agua, añade una cucharada de sal y ponla a hervir.",
+                "tip": "Si pones la tapa, el agua hervirá más rápido.",
+            },
+            {
+                "instruction": "Pesa 100 g de pasta por ración en la báscula y agrégala al agua hirviendo.",
+                "needs_scale": True,
+                "expected_weight": 100,
+                "tip": "Remueve al principio para que no se pegue.",
+            },
+            {
+                "instruction": "Cocina la pasta siguiendo el tiempo del paquete (normalmente 8-10 minutos).", 
+                "timer": 600,
+                "tip": "Prueba la pasta un minuto antes para lograr el punto al dente.",
+            },
+            {
+                "instruction": "Calienta el tomate triturado con una pizca de sal, pimienta y un chorrito de aceite.",
+                "tip": "Añade hojas de albahaca al final para mantener su aroma.",
+            },
+            {
+                "instruction": "Escurre la pasta, mezcla con la salsa y sirve inmediatamente.",
+            },
+        ],
+    },
+    {
+        "id": "ensalada_quinoa",
+        "title": "Ensalada templada de quinoa",
+        "keywords": ["quinoa", "ensalada", "vegetariana"],
+        "default_servings": 2,
+        "ingredients": [
+            {"name": "Quinoa", "quantity": 160, "unit": "g", "needs_scale": True},
+            {"name": "Caldo de verduras", "quantity": 320, "unit": "ml", "needs_scale": False},
+            {"name": "Garbanzos cocidos", "quantity": 200, "unit": "g", "needs_scale": True},
+            {"name": "Pimiento rojo", "quantity": 80, "unit": "g", "needs_scale": True},
+            {"name": "Pepino", "quantity": 80, "unit": "g", "needs_scale": True},
+        ],
+        "steps": [
+            {
+                "instruction": "Enjuaga la quinoa bajo el grifo hasta que el agua salga limpia.",
+            },
+            {
+                "instruction": "Pesa 80 g de quinoa por ración y cuécela en el caldo durante 12 minutos.",
+                "needs_scale": True,
+                "expected_weight": 80,
+                "tip": "La quinoa está lista cuando los granos se ven translúcidos.",
+                "timer": 720,
+            },
+            {
+                "instruction": "Corta el pimiento y el pepino en dados pequeños (aprox. 1 cm).",
+            },
+            {
+                "instruction": "Mezcla la quinoa con los garbanzos, el pimiento, el pepino y aliña al gusto.",
+            },
+        ],
+    },
+    {
+        "id": "pollo_asado",
+        "title": "Pechuga de pollo marinada al horno",
+        "keywords": ["pollo", "horno", "pechuga"],
+        "default_servings": 2,
+        "ingredients": [
+            {"name": "Pechuga de pollo", "quantity": 300, "unit": "g", "needs_scale": True},
+            {"name": "Zumo de limón", "quantity": 30, "unit": "ml", "needs_scale": False},
+            {"name": "Aceite de oliva", "quantity": 15, "unit": "ml", "needs_scale": False},
+            {"name": "Ajo picado", "quantity": 5, "unit": "g", "needs_scale": False},
+        ],
+        "steps": [
+            {
+                "instruction": "Precalienta el horno a 200 °C calor arriba y abajo.",
+                "timer": 600,
+            },
+            {
+                "instruction": "Pesa 150 g de pechuga por ración y marínala con aceite, limón, ajo, sal y pimienta.",
+                "needs_scale": True,
+                "expected_weight": 150,
+                "tip": "Deja reposar la marinada al menos 15 minutos.",
+                "timer": 900,
+            },
+            {
+                "instruction": "Coloca el pollo en una bandeja y hornea durante 18-20 minutos.",
+                "timer": 1200,
+                "tip": "El jugo debe salir transparente cuando pinches el pollo.",
+            },
+            {
+                "instruction": "Deja reposar el pollo 5 minutos antes de cortarlo.",
+                "timer": 300,
+            },
+        ],
+    },
+]
+
+active_recipes: Dict[str, Dict[str, Any]] = {}
+
+
+GITHUB_REPO = "DanielGTdiabetes/bascula-ui"
+RELEASES_DIR = Path(os.getenv("BASCULA_RELEASES_DIR", Path.home() / ".bascula" / "releases"))
+DOWNLOADS_DIR = Path(os.getenv("BASCULA_DOWNLOADS_DIR", Path.home() / ".bascula" / "downloads"))
+CURRENT_SYMLINK = RELEASES_DIR / "current"
+VERSION_FILE = Path(os.getenv("BASCULA_VERSION_FILE", Path.home() / ".bascula" / "VERSION"))
+
 
 # ============= MODELS =============
 
@@ -54,8 +178,11 @@ class SpeakRequest(BaseModel):
 
 class RecipeRequest(BaseModel):
     prompt: str
+    servings: Optional[int] = None
+
 
 class RecipeNext(BaseModel):
+    recipeId: str
     currentStep: int
     userResponse: Optional[str] = None
 
@@ -170,7 +297,8 @@ async def scale_tare():
     """Send tare command to scale"""
     if scale_serial and scale_serial.is_open:
         try:
-            scale_serial.write(b"TARE\n")
+            scale_serial.write(b"TARE
+")
             return {"success": True, "message": "Tare command sent"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -182,7 +310,8 @@ async def scale_zero():
     """Send zero/calibrate command to scale"""
     if scale_serial and scale_serial.is_open:
         try:
-            scale_serial.write(b"ZERO\n")
+            scale_serial.write(b"ZERO
+")
             return {"success": True, "message": "Zero command sent"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -211,39 +340,114 @@ async def scale_status():
 
 # ============= FOOD SCANNER =============
 
+
 @app.post("/api/scanner/analyze")
 async def analyze_food(image: UploadFile = File(...), weight: float = Form(...)):
-    """Analyze food from camera image using AI/OCR"""
+    """Analyze food from camera image using a lightweight color heuristic"""
+    if weight <= 0:
+        raise HTTPException(status_code=400, detail="El peso debe ser mayor que cero")
+
+    raw_bytes = await image.read()
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="No se recibió imagen para analizar")
+
     try:
-        # TODO: Implement real AI analysis with TFLite or external API
-        # For now, return mock data
-        
-        # Save image temporarily
-        img_path = f"/tmp/food_{int(time.time())}.jpg"
-        with open(img_path, "wb") as f:
-            f.write(await image.read())
-        
-        # Simulate AI processing
-        await asyncio.sleep(1)
-        
-        # Mock response
-        return {
-            "name": "Alimento detectado",
-            "confidence": 0.85,
-            "nutrition": {
-                "carbs": round(weight * 0.15),
-                "proteins": round(weight * 0.03),
-                "fats": round(weight * 0.01),
-                "glycemic_index": 55
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(img_path):
-            os.remove(img_path)
+        from PIL import Image  # type: ignore
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Pillow no está instalado en el backend. Instala 'pillow' para habilitar el análisis de imágenes."
+        ) from exc
+
+    try:
+        img = Image.open(BytesIO(raw_bytes)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Imagen inválida: {exc}") from exc
+
+    pixels = list(img.getdata())
+    if not pixels:
+        raise HTTPException(status_code=400, detail="No se pudieron leer los píxeles de la imagen")
+
+    max_samples = 50000
+    step = max(len(pixels) // max_samples, 1)
+    sampled = pixels[::step] or pixels
+
+    avg_r = sum(p[0] for p in sampled) / len(sampled)
+    avg_g = sum(p[1] for p in sampled) / len(sampled)
+    avg_b = sum(p[2] for p in sampled) / len(sampled)
+
+    food_profiles = [
+        {
+            "name": "Manzana Roja",
+            "rgb": (180, 45, 40),
+            "glycemic_index": 40,
+            "macros_per_100": {"carbs": 14.0, "proteins": 0.3, "fats": 0.2},
+        },
+        {
+            "name": "Banana",
+            "rgb": (225, 205, 80),
+            "glycemic_index": 51,
+            "macros_per_100": {"carbs": 23.0, "proteins": 1.3, "fats": 0.3},
+        },
+        {
+            "name": "Tomate",
+            "rgb": (185, 60, 55),
+            "glycemic_index": 38,
+            "macros_per_100": {"carbs": 3.9, "proteins": 0.9, "fats": 0.2},
+        },
+        {
+            "name": "Brócoli",
+            "rgb": (95, 135, 75),
+            "glycemic_index": 15,
+            "macros_per_100": {"carbs": 7.0, "proteins": 2.8, "fats": 0.4},
+        },
+        {
+            "name": "Pollo Cocido",
+            "rgb": (200, 180, 150),
+            "glycemic_index": 0,
+            "macros_per_100": {"carbs": 0.0, "proteins": 31.0, "fats": 3.6},
+        },
+        {
+            "name": "Arroz Blanco",
+            "rgb": (220, 220, 200),
+            "glycemic_index": 73,
+            "macros_per_100": {"carbs": 28.0, "proteins": 2.7, "fats": 0.3},
+        },
+    ]
+
+    def color_distance(profile_rgb: tuple[int, int, int]) -> float:
+        pr, pg, pb = profile_rgb
+        return math.sqrt((pr - avg_r) ** 2 + (pg - avg_g) ** 2 + (pb - avg_b) ** 2)
+
+    ranked = sorted(food_profiles, key=lambda profile: color_distance(profile["rgb"]))
+    best_match = ranked[0]
+    max_distance = math.sqrt(3 * (255 ** 2))
+    distance = color_distance(best_match["rgb"])
+    confidence = max(0.1, 1 - (distance / max_distance))
+
+    macros = {
+        key: round(weight * value / 100, 2)
+        for key, value in best_match["macros_per_100"].items()
+    }
+
+    return {
+        "name": best_match["name"],
+        "confidence": round(confidence, 2),
+        "avg_color": {
+            "r": round(avg_r, 2),
+            "g": round(avg_g, 2),
+            "b": round(avg_b, 2),
+        },
+        "nutrition": {
+            "carbs": macros["carbs"],
+            "proteins": macros["proteins"],
+            "fats": macros["fats"],
+            "glycemic_index": best_match["glycemic_index"],
+        },
+    }
 
 @app.get("/api/scanner/barcode/{barcode}")
+
 async def scan_barcode(barcode: str):
     """Get food info from barcode using OpenFoodFacts API"""
     try:
@@ -424,29 +628,134 @@ async def speak_text(data: SpeakRequest):
 
 @app.post("/api/recipes/generate")
 async def generate_recipe(data: RecipeRequest):
-    """Generate recipe using ChatGPT API"""
-    config = load_config()
-    # TODO: Implement ChatGPT integration
-    # For now, return mock steps
-    
-    return {
-        "steps": [
-            f"Paso 1: Preparar los ingredientes para {data.prompt}",
-            "Paso 2: Precalentar el horno a 180°C",
-            "Paso 3: Mezclar ingredientes secos",
-            "Paso 4: Añadir ingredientes húmedos",
-            "Paso 5: Hornear durante 30 minutos"
-        ]
+    """Generate a deterministic recipe based on preset knowledge."""
+    prompt = data.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Debes indicar qué receta deseas preparar")
+
+    servings = data.servings or 2
+    prompt_lower = prompt.lower()
+
+    def pick_recipe() -> Dict[str, Any]:
+        for recipe in RECIPE_DATABASE:
+            if any(keyword in prompt_lower for keyword in recipe["keywords"]):
+                return deepcopy(recipe)
+        fallback = deepcopy(RECIPE_DATABASE[0])
+        fallback["title"] = f"Receta básica para {prompt}" if prompt else fallback["title"]
+        return fallback
+
+    recipe = pick_recipe()
+    recipe_id = str(uuid4())
+
+    default_servings = recipe.get("default_servings") or 2
+    scale_factor = servings / default_servings if default_servings else 1
+
+    scaled_ingredients = []
+    for ingredient in recipe.get("ingredients", []):
+        quantity = ingredient.get("quantity")
+        scaled_quantity = round(quantity * scale_factor, 2) if quantity is not None else None
+        scaled_ingredients.append({
+            **ingredient,
+            "quantity": scaled_quantity,
+        })
+
+    normalized_steps = []
+    total_timer = 0
+    for idx, raw_step in enumerate(recipe.get("steps", []), start=1):
+        expected_weight = raw_step.get("expected_weight")
+        scaled_weight = round(expected_weight * scale_factor, 2) if expected_weight else None
+        step_timer = raw_step.get("timer", 0)
+        total_timer += step_timer or 0
+
+        normalized_steps.append({
+            "index": idx,
+            "instruction": raw_step["instruction"],
+            "needsScale": raw_step.get("needs_scale", False),
+            "expectedWeight": scaled_weight,
+            "tip": raw_step.get("tip"),
+            "timer": step_timer,
+        })
+
+    active_recipes[recipe_id] = {
+        "id": recipe_id,
+        "title": recipe.get("title", "Receta"),
+        "servings": servings,
+        "steps": normalized_steps,
+        "raw_steps": recipe.get("steps", []),
     }
+
+    return {
+        "id": recipe_id,
+        "title": recipe.get("title", "Receta"),
+        "servings": servings,
+        "ingredients": scaled_ingredients,
+        "steps": normalized_steps,
+        "estimatedTime": math.ceil(total_timer / 60) if total_timer else None,
+    }
+
+
+def _extract_weight(response: str | None) -> float | None:
+    if not response:
+        return None
+    match = re.search(r"(\d+[\.,]?\d*)", response)
+    if not match:
+        return None
+    value = match.group(1).replace(',', '.')
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
 
 @app.post("/api/recipes/next")
 async def next_recipe_step(data: RecipeNext):
-    """Get next recipe step"""
-    # TODO: Implement conversational AI
+    """Return guidance for the next recipe step and evaluate user response."""
+    recipe = active_recipes.get(data.recipeId)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receta no encontrada o finalizada")
+
+    steps = recipe["steps"]
+    if data.currentStep >= len(steps):
+        active_recipes.pop(data.recipeId, None)
+        return {
+            "isLast": True,
+            "assistantMessage": "Receta finalizada. ¡Buen provecho!",
+        }
+
+    step = steps[data.currentStep]
+    expected_weight = step.get("expectedWeight")
+    measured_weight = _extract_weight(data.userResponse)
+
+    assistant_message = step.get("tip")
+    if step.get("needsScale") and expected_weight:
+        if measured_weight is None:
+            assistant_message = assistant_message or "Recuerda confirmar el peso en gramos para ajustar la receta."
+        else:
+            diff = abs(measured_weight - expected_weight)
+            tolerance = max(5, expected_weight * 0.1)
+            if diff <= tolerance:
+                assistant_message = "Peso correcto, podemos continuar con la receta."
+            elif measured_weight < expected_weight:
+                assistant_message = (
+                    f"Solo registraste {measured_weight:.0f} g. Añade {expected_weight - measured_weight:.0f} g para llegar a la cantidad recomendada."
+                )
+            else:
+                assistant_message = (
+                    f"Has sobrepasado el peso objetivo en {measured_weight - expected_weight:.0f} g. Ajusta o tenlo en cuenta para el resto de ingredientes."
+                )
+    elif data.userResponse and not assistant_message:
+        assistant_message = f"Anotado: {data.userResponse.strip()}"
+
+    is_last = data.currentStep == len(steps) - 1
+    if is_last:
+        active_recipes.pop(data.recipeId, None)
+
     return {
-        "step": f"Paso {data.currentStep + 1}: Continúa con el siguiente paso",
-        "needsScale": data.currentStep == 2  # Example
+        "step": step,
+        "isLast": is_last,
+        "assistantMessage": assistant_message,
     }
+
 
 # ============= SETTINGS =============
 
@@ -478,7 +787,7 @@ async def network_status():
             timeout=5
         )
         
-        lines = result.stdout.strip().split('\n')
+        lines = result.stdout.strip().splitlines()
         connected = False
         ssid = None
         ip = None
@@ -497,7 +806,7 @@ async def network_status():
                         text=True,
                         timeout=3
                     )
-                    for ip_line in ip_result.stdout.split('\n'):
+                    for ip_line in ip_result.stdout.splitlines():
                         if 'inet ' in ip_line:
                             ip = ip_line.strip().split()[1].split('/')[0]
                             break
@@ -549,10 +858,16 @@ async def check_updates():
     """Check for available updates from GitHub"""
     try:
         # Get current version
-        current_version = "v1"  # TODO: Read from version file
-        
+        current_version = "desconocido"
+        if VERSION_FILE.exists():
+            try:
+                current_version = VERSION_FILE.read_text(encoding="utf-8").strip() or "desconocido"
+            except Exception:
+                current_version = "desconocido"
+
         # Check GitHub for latest release
         async with httpx.AsyncClient() as client:
+
             response = await client.get("https://api.github.com/repos/DanielGTdiabetes/bascula-ui/releases/latest")
             if response.status_code == 200:
                 latest = response.json()
@@ -569,19 +884,73 @@ async def check_updates():
 
 @app.post("/api/updates/install")
 async def install_update():
-    """Install available update"""
+    """Download and unpack the latest release from GitHub"""
     try:
-        # TODO: Implement OTA update logic
-        # 1. Download new release
-        # 2. Extract to /opt/bascula/releases/vX
-        # 3. Update symlink
-        # 4. Restart services
-        
-        return {"success": True, "message": "Update scheduled"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            release_resp = await client.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
+            release_resp.raise_for_status()
+            release = release_resp.json()
+
+        tag = release.get("tag_name")
+        tarball_url = release.get("tarball_url")
+        if not tag or not tarball_url:
+            raise HTTPException(status_code=404, detail="No se encontró una release válida")
+
+        download_path = DOWNLOADS_DIR / f"{tag}.tar.gz"
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("GET", tarball_url) as download:
+                download.raise_for_status()
+                with open(download_path, "wb") as file_stream:
+                    async for chunk in download.aiter_bytes():
+                        file_stream.write(chunk)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with tarfile.open(download_path, "r:gz") as archive:
+                archive.extractall(temp_dir)
+
+            temp_path = Path(temp_dir)
+            extracted_dirs = [item for item in temp_path.iterdir() if item.is_dir()]
+            if not extracted_dirs:
+                raise HTTPException(status_code=500, detail="El paquete descargado está vacío")
+            extracted_root = extracted_dirs[0]
+
+            target_dir = RELEASES_DIR / tag
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            shutil.copytree(extracted_root, target_dir)
+
+        try:
+            VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            VERSION_FILE.write_text(tag, encoding="utf-8")
+        except Exception as exc:
+            print(f"No se pudo actualizar VERSION local: {exc}")
+
+        try:
+            if CURRENT_SYMLINK.is_symlink() or CURRENT_SYMLINK.exists():
+                CURRENT_SYMLINK.unlink()
+            CURRENT_SYMLINK.symlink_to(target_dir, target_is_directory=True)
+            symlink_message = "symlink actualizado"
+        except (OSError, NotImplementedError) as exc:
+            symlink_message = f"no se pudo crear symlink: {exc}"
+            pointer_file = RELEASES_DIR / "current_path.txt"
+            pointer_file.write_text(str(target_dir), encoding="utf-8")
+
+        return {
+            "success": True,
+            "version": tag,
+            "release_dir": str(target_dir),
+            "message": symlink_message,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Instalación falló: {exc}")
 
 # ============= HEALTH CHECK =============
+
 
 @app.get("/health")
 async def health_check():

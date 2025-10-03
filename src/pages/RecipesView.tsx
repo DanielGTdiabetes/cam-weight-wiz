@@ -1,76 +1,230 @@
-import { useState } from "react";
-import { Mic, MicOff, ChefHat, ArrowLeft, ArrowRight, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Mic, MicOff, ChefHat, ArrowLeft, ArrowRight, X, ListChecks } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
+import { api, type GeneratedRecipe, type RecipeStep } from "@/services/api";
+import { ApiError } from "@/services/apiWrapper";
 
-interface RecipeStep {
-  step: number;
-  instruction: string;
-  needsScale?: boolean;
-  expectedWeight?: number;
+declare global {
+  interface Window {
+    webkitSpeechRecognition?: any;
+    SpeechRecognition?: any;
+  }
 }
 
-export const RecipesView = () => {
-  const [isListening, setIsListening] = useState(false);
-  const [currentStep, setCurrentStep] = useState(0);
-  const [recipeStarted, setRecipeStarted] = useState(false);
-  const [userInput, setUserInput] = useState("");
+type SpeechRecognitionInstance = any;
 
-  // Simulated recipe steps
-  const recipeSteps: RecipeStep[] = [
-    {
-      step: 1,
-      instruction: "¿Qué receta te gustaría preparar hoy? Puedes decírmelo o escribirlo.",
-    },
-    {
-      step: 2,
-      instruction: "Vamos a hacer pasta con tomate. Primero, pesa 100g de pasta seca.",
-      needsScale: true,
-      expectedWeight: 100,
-    },
-    {
-      step: 3,
-      instruction: "Perfecto. Ahora pon agua a hervir en una olla grande con sal.",
-    },
-    {
-      step: 4,
-      instruction: "Mientras tanto, pesa 150g de tomate natural.",
-      needsScale: true,
-      expectedWeight: 150,
-    },
-  ];
+interface IngredientDisplay {
+  name: string;
+  quantity: number | null;
+  unit: string;
+  needsScale: boolean;
+}
+
+const mapIngredients = (recipe: GeneratedRecipe | null): IngredientDisplay[] => {
+  if (!recipe?.ingredients) {
+    return [];
+  }
+  return recipe.ingredients.map((ingredient) => ({
+    name: ingredient.name,
+    quantity: ingredient.quantity,
+    unit: ingredient.unit,
+    needsScale: Boolean((ingredient as any).needs_scale ?? ingredient.needs_scale ?? ingredient.needsScale),
+  }));
+};
+
+export const RecipesView = () => {
+  const [recipe, setRecipe] = useState<GeneratedRecipe | null>(null);
+  const [currentStepIndex, setCurrentStepIndex] = useState(0);
+  const [recipeStarted, setRecipeStarted] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isAdvancing, setIsAdvancing] = useState(false);
+  const [userPrompt, setUserPrompt] = useState("");
+  const [stepResponses, setStepResponses] = useState<Record<number, string>>({});
+  const [assistantMessage, setAssistantMessage] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const [recipeCompleted, setRecipeCompleted] = useState(false);
+
+  const { toast } = useToast();
+
+  const ingredients = useMemo(() => mapIngredients(recipe), [recipe]);
+  const currentStep: RecipeStep | undefined = recipe?.steps[currentStepIndex];
+  const currentResponse = stepResponses[currentStepIndex] ?? "";
+
+  const stopRecognition = useCallback(() => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch (error) {
+        console.warn("Speech recognition stop failed", error);
+      }
+      recognitionRef.current = null;
+    }
+    setIsListening(false);
+  }, []);
+
+  useEffect(() => () => stopRecognition(), [stopRecognition]);
+
+  const getRecognitionInstance = (): SpeechRecognitionInstance | null => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+    const RecognitionClass = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!RecognitionClass) {
+      return null;
+    }
+    const recognition: SpeechRecognitionInstance = new RecognitionClass();
+    recognition.lang = "es-ES";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    return recognition;
+  };
 
   const handleMicToggle = () => {
-    setIsListening(!isListening);
-    // TODO: Integrate with microphone API
+    if (isListening) {
+      stopRecognition();
+      return;
+    }
+
+    const recognition = getRecognitionInstance();
+    if (!recognition) {
+      toast({
+        title: "Micrófono no disponible",
+        description: "Este navegador no soporta reconocimiento de voz",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    recognitionRef.current = recognition;
+    recognition.onresult = (event: any) => {
+      const transcript = Array.from(event.results)
+        .map((result) => result[0].transcript)
+        .join(" ")
+        .trim();
+
+      if (!transcript) {
+        return;
+      }
+
+      if (!recipeStarted) {
+        setUserPrompt(transcript);
+      } else {
+        setStepResponses((prev) => ({ ...prev, [currentStepIndex]: transcript }));
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event);
+      toast({ title: "Error de micrófono", description: "Intenta nuevamente" });
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    try {
+      recognition.start();
+      setIsListening(true);
+    } catch (error) {
+      console.error("Speech recognition start failed", error);
+      toast({ title: "No se pudo iniciar el micrófono" });
+    }
   };
 
-  const handleStart = () => {
-    setRecipeStarted(true);
-    setCurrentStep(1);
-    // TODO: Send to ChatGPT/AI
+  const resetState = () => {
+    setRecipe(null);
+    setRecipeStarted(false);
+    setRecipeCompleted(false);
+    setCurrentStepIndex(0);
+    setAssistantMessage(null);
+    setStepResponses({});
+    setUserPrompt("");
+    stopRecognition();
   };
 
-  const handleNext = () => {
-    if (currentStep < recipeSteps.length - 1) {
-      setCurrentStep(currentStep + 1);
-      // TODO: Send step completion to AI
+  const handleStart = async () => {
+    const prompt = userPrompt.trim();
+    if (!prompt) {
+      toast({
+        title: "Describe la receta",
+        description: "Indica qué quieres preparar o usa el micrófono",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const generated = await api.getRecipe(prompt);
+      setRecipe(generated);
+      setRecipeStarted(true);
+      setRecipeCompleted(false);
+      setCurrentStepIndex(0);
+      setAssistantMessage(null);
+      setStepResponses({});
+    } catch (error) {
+      console.error("Failed to generate recipe", error);
+      if (error instanceof ApiError) {
+        toast({ title: "No se pudo generar la receta", description: error.message, variant: "destructive" });
+      } else {
+        toast({ title: "Error inesperado", description: "Intenta de nuevo" });
+      }
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const handlePrevious = () => {
-    if (currentStep > 0) {
-      setCurrentStep(currentStep - 1);
+    if (!recipe || currentStepIndex === 0) {
+      return;
+    }
+    setCurrentStepIndex((prev) => Math.max(prev - 1, 0));
+    setAssistantMessage(null);
+    setRecipeCompleted(false);
+  };
+
+  const handleNext = async () => {
+    if (!recipe || !currentStep || recipeCompleted) {
+      return;
+    }
+    setIsAdvancing(true);
+    try {
+      const response = currentResponse.trim();
+      const result = await api.nextRecipeStep(recipe.id, currentStepIndex, response || undefined);
+      setAssistantMessage(result.assistantMessage ?? null);
+
+      if (result.isLast) {
+        setRecipeCompleted(true);
+        toast({ title: "Receta completada", description: "¡Buen provecho!" });
+        return;
+      }
+
+      if (currentStepIndex < recipe.steps.length - 1) {
+        setCurrentStepIndex((prev) => prev + 1);
+      }
+    } catch (error) {
+      console.error("Failed to advance recipe", error);
+      if (error instanceof ApiError) {
+        toast({ title: "No se pudo avanzar", description: error.message, variant: "destructive" });
+      } else {
+        toast({ title: "Error", description: "No se pudo avanzar al siguiente paso" });
+      }
+    } finally {
+      setIsAdvancing(false);
     }
   };
 
   const handleCancel = () => {
-    setRecipeStarted(false);
-    setCurrentStep(0);
-    setUserInput("");
+    resetState();
   };
+
+  const currentProgress = recipe ? Math.min(((currentStepIndex + 1) / recipe.steps.length) * 100, 100) : 0;
 
   if (!recipeStarted) {
     return (
@@ -84,18 +238,18 @@ export const RecipesView = () => {
             </div>
             <h2 className="mb-4 text-4xl font-bold">Asistente de Recetas</h2>
             <p className="text-xl text-muted-foreground">
-              Tu chef personal con IA. Adapta las cantidades según lo que peses.
+              Describe qué quieres cocinar y te guiaremos paso a paso.
             </p>
           </div>
 
           <div className="space-y-4">
             <Textarea
-              placeholder="Escribe la receta que quieres preparar..."
-              value={userInput}
-              onChange={(e) => setUserInput(e.target.value)}
+              placeholder="Ejemplo: "Quiero preparar pasta con salsa de tomate""
+              value={userPrompt}
+              onChange={(event) => setUserPrompt(event.target.value)}
               className="min-h-32 text-lg"
             />
-            
+
             <div className="grid grid-cols-2 gap-4">
               <Button
                 onClick={handleMicToggle}
@@ -105,26 +259,23 @@ export const RecipesView = () => {
               >
                 {isListening ? (
                   <>
-                    <MicOff className="mr-2 h-6 w-6" />
-                    Detener
+                    <MicOff className="mr-2 h-6 w-6" /> Detener voz
                   </>
                 ) : (
                   <>
-                    <Mic className="mr-2 h-6 w-6" />
-                    Hablar
+                    <Mic className="mr-2 h-6 w-6" /> Hablar
                   </>
                 )}
               </Button>
-              
+
               <Button
                 onClick={handleStart}
-                disabled={!userInput && !isListening}
+                disabled={isLoading}
                 variant="glow"
                 size="xl"
                 className="h-20 text-xl"
               >
-                <ChefHat className="mr-2 h-6 w-6" />
-                Comenzar
+                {isLoading ? "Generando..." : (<><ChefHat className="mr-2 h-6 w-6" /> Comenzar</>)}
               </Button>
             </div>
           </div>
@@ -133,96 +284,153 @@ export const RecipesView = () => {
     );
   }
 
-  const step = recipeSteps[currentStep];
+  if (!recipe || !currentStep) {
+    return null;
+  }
 
   return (
-    <div className="flex h-full flex-col p-4">
-      {/* Progress */}
-      <div className="mb-4">
-        <div className="mb-2 flex items-center justify-between text-sm text-muted-foreground">
-          <span>Paso {currentStep + 1} de {recipeSteps.length}</span>
-          <span>{Math.round(((currentStep + 1) / recipeSteps.length) * 100)}%</span>
-        </div>
-        <div className="h-2 overflow-hidden rounded-full bg-muted">
-          <div
-            className="h-full bg-primary transition-all duration-300"
-            style={{ width: `${((currentStep + 1) / recipeSteps.length) * 100}%` }}
-          />
-        </div>
-      </div>
-
-      {/* Main Instruction */}
-      <Card className="mb-4 flex-1 border-primary/30 glow-cyan">
-        <div className="flex h-full flex-col p-8">
-          <div className="mb-4 flex items-center gap-3">
-            <ChefHat className="h-8 w-8 text-primary" />
-            <h3 className="text-2xl font-bold">Paso {step.step}</h3>
-          </div>
-          
-          <div className="flex-1 overflow-y-auto">
-            <p className="text-3xl leading-relaxed">{step.instruction}</p>
+    <div className="flex h-full flex-col gap-4 p-4">
+      <div className="grid gap-4 md:grid-cols-[1fr_1fr]">
+        <Card className="border-primary/30 p-6">
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h2 className="text-2xl font-bold">{recipe.title}</h2>
+              <p className="text-sm text-muted-foreground">Raciones sugeridas: {recipe.servings}</p>
+            </div>
+            <Button variant="outline" onClick={handleCancel}>
+              <X className="mr-2 h-4 w-4" /> Cancelar
+            </Button>
           </div>
 
-          {step.needsScale && (
-            <div className="mt-6 rounded-lg bg-primary/10 p-6 text-center">
-              <p className="mb-2 text-lg text-muted-foreground">Peso esperado:</p>
-              <p className="text-5xl font-bold text-primary">{step.expectedWeight}g</p>
+          {ingredients.length > 0 && (
+            <div className="mb-4">
+              <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+                <ListChecks className="h-4 w-4" /> Ingredientes preparados
+              </div>
+              <ul className="space-y-1 text-sm">
+                {ingredients.map((ingredient, index) => (
+                  <li key={`${ingredient.name}-${index}`} className="flex items-center justify-between">
+                    <span>{ingredient.name}</span>
+                    <span className="text-muted-foreground">
+                      {ingredient.quantity !== null ? `${ingredient.quantity}${ingredient.unit}` : ingredient.unit}
+                      {ingredient.needsScale && ' · Usa la báscula'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
-        </div>
-      </Card>
 
-      {/* Voice Feedback */}
-      {isListening && (
-        <Card className="mb-4 border-destructive/50 bg-destructive/5 p-4">
-          <div className="flex items-center gap-3">
-            <Mic className="h-6 w-6 animate-pulse text-destructive" />
-            <p className="text-lg">Escuchando tu respuesta...</p>
+          <div className="mb-3 flex items-center justify-between text-sm text-muted-foreground">
+            <span>Paso {currentStepIndex + 1} de {recipe.steps.length}</span>
+            <span>{currentProgress.toFixed(0)}%</span>
           </div>
-        </Card>
-      )}
+          <div className="mb-6 h-2 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full bg-primary transition-all duration-500"
+              style={{ width: `${currentProgress}%` }}
+            />
+          </div>
 
-      {/* Navigation */}
-      <div className="grid grid-cols-4 gap-3">
+          <Card className="border-primary/40 bg-primary/5 p-6">
+            <div className="mb-3 flex items-center gap-3">
+              <ChefHat className="h-6 w-6 text-primary" />
+              <h3 className="text-xl font-bold">Paso {currentStep.index}</h3>
+            </div>
+            <p className="text-2xl leading-relaxed">{currentStep.instruction}</p>
+
+            {currentStep.needsScale && currentStep.expectedWeight && (
+              <div className="mt-4 rounded-lg bg-primary/10 p-4 text-center text-primary">
+                <p className="text-sm">Peso objetivo</p>
+                <p className="text-4xl font-bold">{currentStep.expectedWeight} g</p>
+              </div>
+            )}
+          </Card>
+        </Card>
+
+        <Card className="border-primary/20 p-6">
+          <h3 className="mb-3 text-xl font-bold">Tu respuesta</h3>
+          <Textarea
+            value={currentResponse}
+            onChange={(event) => setStepResponses((prev) => ({ ...prev, [currentStepIndex]: event.target.value }))}
+            placeholder="Escribe observaciones, pesos medidos o dudas para el asistente"
+            className="min-h-32"
+          />
+
+          <div className="mt-3 flex gap-3">
+            <Button
+              onClick={handleMicToggle}
+              variant={isListening ? "destructive" : "outline"}
+              className="flex-1"
+            >
+              {isListening ? (
+                <>
+                  <MicOff className="mr-2 h-4 w-4" /> Detener voz
+                </>
+              ) : (
+                <>
+                  <Mic className="mr-2 h-4 w-4" /> Dictar
+                </>
+              )}
+            </Button>
+            <Button
+              onClick={() => setStepResponses((prev) => ({ ...prev, [currentStepIndex]: "" }))}
+              variant="outline"
+            >
+              Limpiar
+            </Button>
+          </div>
+
+          {assistantMessage && (
+            <div className="mt-4 rounded-lg border border-primary/30 bg-primary/10 p-4 text-sm">
+              <p className="font-semibold">Asistente:</p>
+              <p>{assistantMessage}</p>
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <div className="mt-auto grid grid-cols-4 gap-3">
         <Button
           onClick={handleCancel}
           variant="outline"
           size="xl"
-          className="h-20 text-xl"
+          className="h-16 text-xl"
         >
-          <X className="mr-2 h-6 w-6" />
-          Cancelar
+          <X className="mr-2 h-5 w-5" /> Cancelar
         </Button>
-        
         <Button
           onClick={handlePrevious}
-          disabled={currentStep === 0}
+          disabled={currentStepIndex === 0}
           variant="secondary"
           size="xl"
-          className="h-20 text-xl"
+          className="h-16 text-xl"
         >
-          <ArrowLeft className="mr-2 h-6 w-6" />
-          Anterior
+          <ArrowLeft className="mr-2 h-5 w-5" /> Anterior
         </Button>
-        
         <Button
           onClick={handleMicToggle}
           variant={isListening ? "destructive" : "outline"}
           size="xl"
-          className="col-span-1 h-20 text-xl"
+          className="h-16 text-xl"
         >
-          {isListening ? <MicOff className="h-6 w-6" /> : <Mic className="h-6 w-6" />}
+          {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
         </Button>
-        
         <Button
           onClick={handleNext}
-          disabled={currentStep === recipeSteps.length - 1}
+          disabled={isAdvancing || recipeCompleted}
           variant="glow"
           size="xl"
-          className="h-20 text-xl"
+          className="h-16 text-xl"
         >
-          Siguiente
-          <ArrowRight className="ml-2 h-6 w-6" />
+          {recipeCompleted ? (
+            "Completado"
+          ) : (
+            <>
+              Siguiente
+              <ArrowRight className="ml-2 h-5 w-5" />
+            </>
+          )}
         </Button>
       </div>
     </div>
