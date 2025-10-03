@@ -297,8 +297,8 @@ async def scale_tare():
     """Send tare command to scale"""
     if scale_serial and scale_serial.is_open:
         try:
-            scale_serial.write(b"TARE
-")
+            # La báscula basada en ESP32 espera comandos terminados en nueva línea
+            scale_serial.write(b"TARE\n")
             return {"success": True, "message": "Tare command sent"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -310,8 +310,7 @@ async def scale_zero():
     """Send zero/calibrate command to scale"""
     if scale_serial and scale_serial.is_open:
         try:
-            scale_serial.write(b"ZERO
-")
+            scale_serial.write(b"ZERO\n")
             return {"success": True, "message": "Zero command sent"}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -322,6 +321,7 @@ async def scale_zero():
 async def set_calibration(data: CalibrationData):
     """Update calibration factor"""
     config = load_config()
+    config.setdefault("scale", {})
     config["scale"]["calib_factor"] = data.factor
     save_config(config)
     return {"success": True, "factor": data.factor}
