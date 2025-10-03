@@ -13,6 +13,16 @@ interface WifiNetwork {
   secured: boolean;
 }
 
+interface ScanNetworksResponse {
+  networks?: WifiNetwork[];
+}
+
+interface ApiErrorResponse {
+  code?: string;
+  message?: string;
+  detail?: string | { code?: string; message?: string };
+}
+
 export const MiniWebConfig = () => {
   const [networks, setNetworks] = useState<WifiNetwork[]>([]);
   const [selectedSSID, setSelectedSSID] = useState("");
@@ -24,6 +34,9 @@ export const MiniWebConfig = () => {
   const [pinMessage, setPinMessage] = useState<string | null>(null);
   const [isPinValid, setIsPinValid] = useState(false);
   const { toast } = useToast();
+
+  const selectedNetwork = networks.find((network) => network.ssid === selectedSSID);
+  const requiresPassword = selectedNetwork?.secured ?? false;
 
   useEffect(() => {
     const fetchPin = async () => {
@@ -87,23 +100,23 @@ export const MiniWebConfig = () => {
     try {
       const response = await fetch('/api/miniweb/scan-networks');
       if (response.ok) {
-        const data = await response.json();
-        setNetworks(data.networks || []);
+        const data = (await response.json()) as ScanNetworksResponse;
+        setNetworks(Array.isArray(data.networks) ? data.networks : []);
       } else {
-        let errorBody: any = null;
-        try {
-          errorBody = await response.json();
-        } catch (error) {
-          logger.error('Failed to parse scan error', { error });
-        }
+        const errorBody = (await response.json().catch(() => null)) as ApiErrorResponse | null;
+        const errorDetail =
+          typeof errorBody?.detail === 'object' && errorBody.detail
+            ? errorBody.detail
+            : undefined;
+        const errorCode = errorBody?.code ?? errorDetail?.code;
 
-        if (response.status === 403 && errorBody?.code === 'NMCLI_NOT_AUTHORIZED') {
+        if (response.status === 403 && errorCode === 'NMCLI_NOT_AUTHORIZED') {
           toast({
             title: 'Permisos insuficientes',
             description: 'Permisos de Wi-Fi insuficientes. Reinicia el dispositivo o finaliza la instalación para aplicar permisos.',
             variant: 'destructive',
           });
-        } else if (response.status === 503 && errorBody?.code === 'NMCLI_NOT_AVAILABLE') {
+        } else if (response.status === 503 && errorCode === 'NMCLI_NOT_AVAILABLE') {
           toast({
             title: 'nmcli no disponible',
             description: 'nmcli no disponible. Instala NetworkManager.',
@@ -139,6 +152,15 @@ export const MiniWebConfig = () => {
       return;
     }
 
+    if (requiresPassword && password.trim().length === 0) {
+      toast({
+        title: 'Ingresa la contraseña',
+        description: 'La red seleccionada requiere contraseña.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setIsConnecting(true);
     try {
       const response = await fetch('/api/miniweb/connect-wifi', {
@@ -146,7 +168,8 @@ export const MiniWebConfig = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ssid: selectedSSID,
-          password,
+          password: requiresPassword ? password : '',
+          secured: requiresPassword,
         }),
       });
 
@@ -161,8 +184,11 @@ export const MiniWebConfig = () => {
           window.location.href = '/';
         }, 3000);
       } else {
-        const error = await response.json().catch(() => ({}));
-        const detail = error?.detail || error?.message;
+        const error = (await response.json().catch(() => ({}))) as ApiErrorResponse;
+        const detail =
+          typeof error.detail === 'string'
+            ? error.detail
+            : error.detail?.message ?? error.message;
         toast({
           title: "Error al conectar",
           description: detail || "Verifica la contraseña",
@@ -274,7 +300,12 @@ export const MiniWebConfig = () => {
                 networks.map((network) => (
                   <button
                     key={network.ssid}
-                    onClick={() => setSelectedSSID(network.ssid)}
+                    onClick={() => {
+                      setSelectedSSID(network.ssid);
+                      if (!network.secured) {
+                        setPassword('');
+                      }
+                    }}
                     className={`w-full p-4 rounded-lg border-2 text-left transition-smooth hover:bg-accent ${
                       selectedSSID === network.ssid
                         ? 'border-primary bg-primary/10'
@@ -304,17 +335,25 @@ export const MiniWebConfig = () => {
             </div>
 
             {/* Password Input */}
-            {selectedSSID && (
+            {selectedNetwork && (
               <div className="space-y-2 animate-fade-in">
-                <Label className="text-lg">Contraseña WiFi</Label>
-                <Input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Ingresa la contraseña"
-                  className="text-lg h-14"
-                  onKeyPress={(e) => e.key === 'Enter' && handleConnect()}
-                />
+                <Label className="text-lg">
+                  {selectedNetwork.secured ? 'Contraseña WiFi' : 'Red abierta'}
+                </Label>
+                {selectedNetwork.secured ? (
+                  <Input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Ingresa la contraseña"
+                    className="text-lg h-14"
+                    onKeyPress={(e) => e.key === 'Enter' && handleConnect()}
+                  />
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Esta red no requiere contraseña. Se conectará inmediatamente.
+                  </p>
+                )}
               </div>
             )}
 
@@ -324,7 +363,7 @@ export const MiniWebConfig = () => {
               variant="glow"
               size="xl"
               className="w-full text-xl"
-              disabled={!selectedSSID || isConnecting}
+              disabled={!selectedSSID || (requiresPassword && password.trim().length === 0) || isConnecting}
             >
               {isConnecting ? (
                 <>

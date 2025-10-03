@@ -2,6 +2,18 @@ import type { ComponentProps } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BarcodeScannerModal } from '@/components/BarcodeScannerModal';
+import type { AppSettings, ScannerHistoryEntry, ScannerQueueAction, ScannerRecordInput } from '@/services/storage';
+import type { FoodAnalysis } from '@/services/api';
+
+type AnalyzeFoodPhotoResult = {
+  name: string;
+  carbsPer100g: number;
+  proteinsPer100g?: number;
+  fatsPer100g?: number;
+  kcalPer100g?: number;
+  glycemicIndex?: number;
+  confidence: number;
+} | null;
 
 const toastMock = vi.hoisted(() => vi.fn());
 vi.mock('@/hooks/use-toast', () => ({
@@ -24,13 +36,13 @@ vi.mock('@/hooks/useScaleWebSocket', () => ({
 }));
 
 const storageMocks = vi.hoisted(() => ({
-  getScannerHistory: vi.fn<[], any[]>(),
-  addScannerRecord: vi.fn(),
-  getSettings: vi.fn<[], any>(),
-  enqueueScannerAction: vi.fn(),
-  dequeueScannerAction: vi.fn<[], any>(),
+  getScannerHistory: vi.fn<[], ScannerHistoryEntry[]>(),
+  addScannerRecord: vi.fn<[ScannerRecordInput]>(),
+  getSettings: vi.fn<[], AppSettings>(),
+  enqueueScannerAction: vi.fn<[ScannerQueueAction]>(),
+  dequeueScannerAction: vi.fn<[], ScannerQueueAction | null>(),
   clearScannerQueue: vi.fn(),
-  saveScannerHistory: vi.fn(),
+  saveScannerHistory: vi.fn<[ScannerHistoryEntry[]]>(),
 }));
 
 vi.mock('@/services/storage', () => ({
@@ -38,8 +50,8 @@ vi.mock('@/services/storage', () => ({
 }));
 
 const apiMocks = vi.hoisted(() => ({
-  scanBarcode: vi.fn<[_: string], Promise<any>>(),
-  analyzeFoodPhoto: vi.fn<[_: string], Promise<any>>(),
+  scanBarcode: vi.fn<[_: string], Promise<FoodAnalysis>>(),
+  analyzeFoodPhoto: vi.fn<[_: string], Promise<AnalyzeFoodPhotoResult>>(),
   exportBolus: vi.fn<[_: number, _: number, _: string], Promise<void>>(),
 }));
 
@@ -490,7 +502,6 @@ describe('BarcodeScannerModal', () => {
   });
 
   it('muestra la entrada por voz cuando expira el temporizador de la IA', async () => {
-    vi.useFakeTimers();
     let resolveAnalysis: ((value: unknown) => void) | undefined;
     apiMocks.analyzeFoodPhoto.mockImplementation(
       () =>
@@ -499,8 +510,8 @@ describe('BarcodeScannerModal', () => {
         })
     );
 
-    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-    renderModal();
+    const user = userEvent.setup();
+    renderModal({ aiTimeoutSeconds: 0.5, autoCaptureDelayMs: 50 });
 
     await user.click(screen.getByRole('button', { name: /foto ia/i }));
 
@@ -510,13 +521,13 @@ describe('BarcodeScannerModal', () => {
 
     expect(await screen.findByText(/apunta al alimento y espera/i)).toBeInTheDocument();
 
-    vi.advanceTimersByTime(10_000);
-
     await waitFor(() =>
       expect(toastMock).toHaveBeenCalledWith(expect.objectContaining({ title: 'Tiempo agotado' }))
     );
 
-    expect(await screen.findByText(/dicta el alimento y sus datos/i)).toBeInTheDocument();
+    expect(
+      await screen.findByText('Dicta el alimento y sus datos o ajusta la información manualmente.')
+    ).toBeInTheDocument();
 
     await waitFor(() => expect(apiMocks.analyzeFoodPhoto).toHaveBeenCalled());
 

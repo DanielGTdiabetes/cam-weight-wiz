@@ -8,17 +8,28 @@ export interface ValidationResult {
 }
 
 // URL validation
-export const validateUrl = (url: string): ValidationResult => {
-  if (!url || url.trim() === '') {
-    return { isValid: true }; // Empty is valid (optional field)
+interface ValidationOptions {
+  allowEmpty?: boolean;
+  emptyError?: string;
+}
+
+export const validateUrl = (url: string, options: ValidationOptions = {}): ValidationResult => {
+  const trimmed = url.trim();
+
+  if (trimmed === '') {
+    if (options.allowEmpty) {
+      return { isValid: true };
+    }
+
+    return { isValid: false, error: options.emptyError ?? 'URL requerida' };
   }
 
   try {
-    const urlObj = new URL(url);
+    const urlObj = new URL(trimmed);
     if (!['http:', 'https:', 'ws:', 'wss:'].includes(urlObj.protocol)) {
       return { isValid: false, error: 'URL debe usar http, https, ws o wss' };
     }
-    if (url.length > 500) {
+    if (trimmed.length > 500) {
       return { isValid: false, error: 'URL demasiado larga (máx 500 caracteres)' };
     }
     return { isValid: true };
@@ -76,12 +87,16 @@ export const validateText = (text: string, minLength?: number, maxLength?: numbe
 };
 
 // API Key validation (basic)
-export const validateApiKey = (key: string): ValidationResult => {
-  if (!key || key.trim() === '') {
-    return { isValid: true }; // Empty is valid (optional)
-  }
-
+export const validateApiKey = (key: string, options: ValidationOptions = {}): ValidationResult => {
   const trimmed = key.trim();
+
+  if (trimmed === '') {
+    if (options.allowEmpty) {
+      return { isValid: true };
+    }
+
+    return { isValid: false, error: options.emptyError ?? 'API key requerida' };
+  }
 
   if (trimmed.length < 10) {
     return { isValid: false, error: 'API key demasiado corta' };

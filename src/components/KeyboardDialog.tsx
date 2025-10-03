@@ -19,6 +19,7 @@ interface KeyboardDialogProps {
   min?: number;
   max?: number;
   maxLength?: number;
+  allowEmpty?: boolean;
 }
 
 export const KeyboardDialog = ({
@@ -33,6 +34,7 @@ export const KeyboardDialog = ({
   min,
   max,
   maxLength = 500,
+  allowEmpty = false,
 }: KeyboardDialogProps) => {
   const [validationError, setValidationError] = useState<string | null>(null);
   const isNumeric = type === "numeric";
@@ -43,9 +45,9 @@ export const KeyboardDialog = ({
       case "numeric":
         return validateNumber(input, min, max, showDecimal);
       case "url":
-        return validateUrl(input);
+        return validateUrl(input, { allowEmpty });
       case "apikey":
-        return validateApiKey(input);
+        return validateApiKey(input, { allowEmpty });
       case "text":
       case "password":
         return validateText(input, undefined, maxLength);

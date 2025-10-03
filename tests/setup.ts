@@ -21,8 +21,8 @@ class MockSpeechRecognition {
   lang = 'es-ES';
   interimResults = false;
   continuous = false;
-  onresult: ((event: any) => void) | null = null;
-  onerror: ((event: any) => void) | null = null;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null = null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null = null;
   onend: (() => void) | null = null;
 
   start() {
@@ -34,9 +34,14 @@ class MockSpeechRecognition {
   }
 }
 
+declare global {
+  // eslint-disable-next-line no-var
+  var __latestSpeechRecognition: MockSpeechRecognition | undefined;
+}
+
 Object.defineProperty(MockSpeechRecognition.prototype, 'start', {
   value: vi.fn(function (this: MockSpeechRecognition) {
-    (globalThis as any).__latestSpeechRecognition = this;
+    globalThis.__latestSpeechRecognition = this;
   }),
 });
 
@@ -47,8 +52,14 @@ Object.defineProperty(MockSpeechRecognition.prototype, 'stop', {
 });
 
 if (typeof window !== 'undefined') {
-  (window as any).SpeechRecognition = MockSpeechRecognition as any;
-  (window as any).webkitSpeechRecognition = MockSpeechRecognition as any;
+  Object.defineProperty(window, 'SpeechRecognition', {
+    value: MockSpeechRecognition as unknown,
+    configurable: true,
+  });
+  Object.defineProperty(window, 'webkitSpeechRecognition', {
+    value: MockSpeechRecognition as unknown,
+    configurable: true,
+  });
 }
 
 // Provide navigator APIs used by the component
@@ -126,6 +137,12 @@ if (typeof window !== 'undefined' && !('ResizeObserver' in window)) {
     }
   }
 
-  (window as any).ResizeObserver = ResizeObserver;
-  (globalThis as any).ResizeObserver = ResizeObserver;
+  Object.defineProperty(window, 'ResizeObserver', {
+    value: ResizeObserver,
+    configurable: true,
+  });
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    value: ResizeObserver,
+    configurable: true,
+  });
 }

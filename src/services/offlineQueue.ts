@@ -6,7 +6,7 @@ interface QueuedRequest {
   id: string;
   url: string;
   method: string;
-  body?: any;
+  body?: unknown;
   headers?: Record<string, string>;
   timestamp: number;
   retries: number;
@@ -53,7 +53,7 @@ class OfflineQueue {
   enqueue(
     url: string,
     method: string,
-    body?: any,
+    body?: unknown,
     headers?: Record<string, string>
   ): string {
     const id = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -95,7 +95,7 @@ class OfflineQueue {
         const response = await fetch(request.url, {
           method: request.method,
           headers: request.headers,
-          body: request.body ? JSON.stringify(request.body) : undefined,
+          body: request.body !== undefined ? JSON.stringify(request.body) : undefined,
         });
 
         if (response.ok) {
