@@ -86,6 +86,7 @@ const manualSchema = z.object({
 
 const MAX_ATTEMPTS = 3;
 const BARCODE_TIMEOUT_SECONDS = 10;
+const AI_TIMEOUT_SECONDS = 10;
 const SCAN_COOLDOWN_MS = 15_000;
 
 type ManualFormValues = z.infer<typeof manualSchema>;
@@ -287,6 +288,8 @@ export function BarcodeScannerModal({
   const scannerRef = useRef<Html5QrcodeScannerLike | null>(null);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const countdownRef = useRef<TimerRef | null>(null);
+  const autoCaptureTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const aiAbortRef = useRef(false);
   const initialFocusRef = useRef<HTMLButtonElement>(null);
   const previousWeightRef = useRef<number | null>(null);
 
@@ -512,6 +515,11 @@ export function BarcodeScannerModal({
       countdownRef.current = null;
     }
 
+    if (autoCaptureTimeoutRef.current) {
+      clearTimeout(autoCaptureTimeoutRef.current);
+      autoCaptureTimeoutRef.current = null;
+    }
+
     if (videoRef.current?.srcObject) {
       const stream = videoRef.current.srcObject as MediaStream;
       stream.getTracks().forEach((track) => track.stop());
@@ -688,14 +696,27 @@ export function BarcodeScannerModal({
     return true;
   }, [toast]);
 
+  const fallbackToAssistiveModes = useCallback(
+    (
+      status: string,
+      toastOptions: { title: string; description?: string; variant?: 'default' | 'destructive' }
+    ) => {
+      aiAbortRef.current = true;
+      cleanup();
+      setPhase('fallback');
+      setStatusMessage(status);
+      toast(toastOptions);
+    },
+    [cleanup, toast]
+  );
+
   const startBarcodeScanning = useCallback(async () => {
     if (attemptCount >= MAX_ATTEMPTS) {
-      toast({
+      fallbackToAssistiveModes('Límite de intentos alcanzado, usa voz o código de barras', {
         title: 'Límite de intentos',
-        description: 'Pasa a la entrada manual o por voz',
+        description: 'Prueba la voz o el código de barras',
         variant: 'destructive',
       });
-      setPhase('fallback');
       return;
     }
 
@@ -748,13 +769,10 @@ export function BarcodeScannerModal({
               countdownRef.current = null;
             }
             setAttemptCount((c) => c + 1);
-            setStatusMessage('Tiempo agotado, cambiando a alternativas');
-            toast({
+            fallbackToAssistiveModes('Tiempo agotado, usa voz o código de barras', {
               title: 'Tiempo agotado',
-              description: 'Intenta de nuevo o usa entrada manual/voz',
+              description: 'Intenta de nuevo o usa voz/código de barras',
             });
-            setPhase('fallback');
-            cleanup();
             return 0;
           }
           return prev - 100 / BARCODE_TIMEOUT_SECONDS;
@@ -762,19 +780,30 @@ export function BarcodeScannerModal({
       }, 1000);
     } catch (error) {
       logger.error('Barcode scanner error:', error);
-      toast({
+      fallbackToAssistiveModes('Error al iniciar escáner, usa voz o código de barras', {
         title: 'Error al iniciar escáner',
-        description: 'Usa la entrada manual o IA como respaldo',
+        description: 'Usa la voz o el código de barras como respaldo',
         variant: 'destructive',
       });
-      setPhase('fallback');
     } finally {
       setLoading(false);
     }
-  }, [attemptCount, ensureCooldown, toast, cleanup, handleBarcodeScanned]);
+  }, [
+    attemptCount,
+    ensureCooldown,
+    toast,
+    cleanup,
+    handleBarcodeScanned,
+    fallbackToAssistiveModes,
+  ]);
 
   const captureAndAnalyze = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (!videoRef.current || !canvasRef.current || aiAbortRef.current) return;
+
+    if (autoCaptureTimeoutRef.current) {
+      clearTimeout(autoCaptureTimeoutRef.current);
+      autoCaptureTimeoutRef.current = null;
+    }
 
     const canvas = canvasRef.current;
     const video = videoRef.current;
@@ -795,12 +824,32 @@ export function BarcodeScannerModal({
     try {
       const result = await api.analyzeFoodPhoto(imageBase64);
 
-      if (!result) {
-        setAttemptCount((c) => c + 1);
-        toast({
-          title: 'Detección incierta',
-          description: 'Probando código de barras',
+      if (aiAbortRef.current) {
+        return;
+      }
+
+      if (!result || result.confidence < 0.7) {
+        let attemptsAfterIncrement = 0;
+        setAttemptCount((c) => {
+          const next = c + 1;
+          attemptsAfterIncrement = next;
+          return next;
         });
+
+        if (attemptsAfterIncrement >= MAX_ATTEMPTS) {
+          fallbackToAssistiveModes('Detección IA incierta, usa voz o código de barras', {
+            title: 'Detección IA incierta',
+            description: 'Usa voz o código de barras para continuar',
+            variant: 'destructive',
+          });
+          return;
+        }
+
+        toast({
+          title: 'Detección IA incierta, probando barcode',
+          description: 'Intenta escanear el código de barras',
+        });
+        aiAbortRef.current = true;
         cleanup();
         setScanMode('barcode');
         resetCooldown();
@@ -838,28 +887,46 @@ export function BarcodeScannerModal({
       logger.info('AI analysis successful', { name: result.name, confidence: result.confidence });
     } catch (error) {
       logger.error('AI analysis failed:', error);
-      setAttemptCount((c) => c + 1);
-      toast({
-        title: 'Error en análisis IA',
-        description: 'Intenta de nuevo o usa código de barras',
-        variant: 'destructive',
+      let attemptsAfterIncrement = 0;
+      setAttemptCount((c) => {
+        const next = c + 1;
+        attemptsAfterIncrement = next;
+        return next;
       });
-      cleanup();
-      setPhase('fallback');
+      if (attemptsAfterIncrement >= MAX_ATTEMPTS) {
+        fallbackToAssistiveModes('Error en análisis IA, usa voz o código de barras', {
+          title: 'Error en análisis IA',
+          description: 'Usa voz o código de barras para continuar',
+          variant: 'destructive',
+        });
+      } else {
+        toast({
+          title: 'Error en análisis IA',
+          description: 'Intenta de nuevo o usa código de barras',
+          variant: 'destructive',
+        });
+        aiAbortRef.current = true;
+        cleanup();
+        setPhase('fallback');
+      }
     } finally {
       setLoading(false);
     }
-  }, [toast, cleanup, startBarcodeScanning, resetCooldown]);
+  }, [
+    toast,
+    cleanup,
+    startBarcodeScanning,
+    resetCooldown,
+    fallbackToAssistiveModes,
+  ]);
 
   const startAIScanning = useCallback(async () => {
     if (attemptCount >= MAX_ATTEMPTS) {
-      toast({
+      fallbackToAssistiveModes('Límite de intentos de IA, usa voz o código de barras', {
         title: 'Límite de intentos alcanzado',
-        description: 'Probando escaneo de código de barras',
+        description: 'Usa voz o código de barras para continuar',
+        variant: 'destructive',
       });
-      setScanMode('barcode');
-      resetCooldown();
-      startBarcodeScanning();
       return;
     }
 
@@ -867,10 +934,12 @@ export function BarcodeScannerModal({
       return;
     }
 
+    aiAbortRef.current = false;
     setScanMode('ai');
     setPhase('scanning');
     setLoading(true);
     setStatusMessage('Activando cámara para analizar el alimento');
+    setScanProgress(100);
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -882,18 +951,44 @@ export function BarcodeScannerModal({
         await videoRef.current.play();
       }
 
-      setTimeout(() => {
+      const aiStart = Date.now();
+      const timeoutMs = AI_TIMEOUT_SECONDS * 1000;
+
+      if (countdownRef.current) {
+        clearInterval(countdownRef.current);
+      }
+
+      countdownRef.current = setInterval(() => {
+        const elapsed = Date.now() - aiStart;
+        const remaining = Math.max(timeoutMs - elapsed, 0);
+        const progress = Math.max(0, Math.round((remaining / timeoutMs) * 100));
+        setScanProgress(progress);
+
+        if (remaining <= 0) {
+          if (countdownRef.current) {
+            clearInterval(countdownRef.current);
+            countdownRef.current = null;
+          }
+
+          setAttemptCount((c) => c + 1);
+
+          fallbackToAssistiveModes('Tiempo agotado en modo IA, usa voz o código de barras', {
+            title: 'Tiempo agotado',
+            description: 'Pasando a voz o código de barras',
+          });
+        }
+      }, 1000);
+
+      autoCaptureTimeoutRef.current = setTimeout(() => {
         captureAndAnalyze();
       }, 5000);
     } catch (error) {
       logger.error('Camera access error:', error);
-      toast({
+      fallbackToAssistiveModes('Error al acceder a la cámara, usa voz o código de barras', {
         title: 'Error al acceder a la cámara',
-        description: 'Probando escaneo de código de barras',
+        description: 'Usa voz o código de barras para continuar',
+        variant: 'destructive',
       });
-      setScanMode('barcode');
-      resetCooldown();
-      startBarcodeScanning();
     } finally {
       setLoading(false);
     }
@@ -904,6 +999,7 @@ export function BarcodeScannerModal({
     startBarcodeScanning,
     captureAndAnalyze,
     resetCooldown,
+    fallbackToAssistiveModes,
   ]);
 
   const handlePreviewSubmit = previewForm.handleSubmit((values) => {
@@ -1321,6 +1417,7 @@ export function BarcodeScannerModal({
               <>
                 <div className="bg-black/50 rounded-lg p-4 text-center text-white">
                   <p className="mb-2">Apunta al alimento y espera</p>
+                  <Progress value={scanProgress} className="h-2" aria-label="Progreso de escaneo IA" />
                   {loading && <Loader2 className="h-6 w-6 animate-spin mx-auto mt-2" aria-hidden="true" />}
                 </div>
                 <video
