@@ -25,9 +25,10 @@ export const BolusCalculator = ({ totalCarbs, currentGlucose, onClose }: BolusCa
   const targetGlucose = settings.targetGlucose || 100;
 
   const carbsInsulin = totalCarbs / carbRatio;
-  const correctionInsulin = currentGlucose 
-    ? Math.max(0, (currentGlucose - targetGlucose) / correctionFactor)
-    : 0;
+  const correctionInsulin =
+    typeof currentGlucose === "number"
+      ? Math.max(0, (currentGlucose - targetGlucose) / correctionFactor)
+      : 0;
   const totalInsulin = carbsInsulin + correctionInsulin;
 
   const getTimingRecommendation = () => {
@@ -119,7 +120,7 @@ export const BolusCalculator = ({ totalCarbs, currentGlucose, onClose }: BolusCa
               <p className="text-3xl font-bold text-warning">{totalCarbs.toFixed(1)}g</p>
             </div>
             
-            {currentGlucose && (
+            {currentGlucose !== undefined && (
               <div className="rounded-lg bg-muted/30 p-4">
                 <p className="mb-1 text-sm text-muted-foreground">Glucosa Actual</p>
                 <p className="text-3xl font-bold text-primary">{currentGlucose} mg/dl</p>
