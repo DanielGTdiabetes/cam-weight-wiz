@@ -1145,11 +1145,12 @@ if [[ -f "package.json" ]]; then
     cp -f .env.device .env
   fi
   npm install || warn "npm install falló, continuar con backend"
-  PKG_VERSION="$(jq -r '.version' package.json 2>/dev/null || echo 0.0.0)"
-  GIT_SHA="$(git rev-parse --short HEAD || echo nogit)"
-  CACHE_VER="v${PKG_VERSION}-${GIT_SHA}"
-  if [ -f public/service-worker.tmpl.js ]; then
-    sed "s#__CACHE_VERSION__#${CACHE_VER}#g" public/service-worker.tmpl.js > public/service-worker.js
+  if command -v node >/dev/null 2>&1; then
+    if ! node scripts/generate-service-worker.mjs; then
+      warn "No se pudo generar service worker"
+    fi
+  else
+    warn "Node.js no disponible para generar service worker"
   fi
   npm run build || warn "npm build falló"
   log "✓ Frontend compilado"
