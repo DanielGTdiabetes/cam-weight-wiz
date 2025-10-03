@@ -71,17 +71,8 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
   ];
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+    <div className="flex min-h-screen items-start justify-center bg-background p-6">
       <div className="w-full max-w-5xl">
-        <div className="mb-6 text-center">
-          <h1 className="mb-3 text-6xl font-bold text-primary text-glow-cyan">
-            Panel del dispositivo
-          </h1>
-          <p className="text-2xl text-muted-foreground">
-            Gestiona la báscula y su entorno conectado
-          </p>
-        </div>
-
         <div className="grid grid-cols-2 gap-5">
           {menuItems.map(({ id, icon: Icon, title, description, borderColor, hoverBorder, iconBg, iconHoverBg, glowClass }) => {
             const handleClick = (e: React.MouseEvent) => {
