@@ -1,4 +1,4 @@
-"""HX711 scale service using pigpio for stable timing."""
+"""HX711 scale service with pigpio/RPi.GPIO backends and moving average filter."""
 from __future__ import annotations
 
 import json
@@ -9,7 +9,7 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque, Optional
+from typing import Deque, Dict, Optional
 
 LOG_DIR = Path("/var/log/bascula")
 STATE_PATH = Path(os.getenv("BASCULA_SCALE_STATE", "/var/lib/bascula/scale.json"))
@@ -40,6 +40,114 @@ class HX711ReadTimeout(HX711Error):
     """Raised when waiting for HX711 data ready times out."""
 
 
+class _PigpioDriver:
+    """Low level HX711 reader backed by pigpio."""
+
+    def __init__(self, dt_pin: int, sck_pin: int) -> None:
+        try:
+            import pigpio  # type: ignore
+        except ImportError as exc:  # pragma: no cover - hardware specific
+            raise ImportError("pigpio module not available") from exc
+
+        self._pigpio = pigpio
+        self._pi = pigpio.pi()
+        if not self._pi.connected:
+            self._pi.stop()
+            raise RuntimeError("pigpiod daemon not reachable")
+
+        self._dt_pin = dt_pin
+        self._sck_pin = sck_pin
+        self._pi.set_mode(self._dt_pin, pigpio.INPUT)
+        self._pi.set_pull_up_down(self._dt_pin, pigpio.PUD_UP)
+        self._pi.set_mode(self._sck_pin, pigpio.OUTPUT)
+        self._pi.write(self._sck_pin, 0)
+
+    def wait_ready(self, timeout: float = 0.5) -> None:
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout:
+            if self._pi.read(self._dt_pin) == 0:  # type: ignore[union-attr]
+                return
+            time.sleep(0.0002)
+        raise HX711ReadTimeout("HX711 ready timeout")
+
+    def read_raw(self) -> float:
+        self.wait_ready()
+        value = 0
+        for _ in range(24):
+            self._pi.write(self._sck_pin, 1)  # type: ignore[union-attr]
+            value = (value << 1) | self._pi.read(self._dt_pin)  # type: ignore[union-attr]
+            self._pi.write(self._sck_pin, 0)  # type: ignore[union-attr]
+        self._pi.write(self._sck_pin, 1)  # type: ignore[union-attr]
+        self._pi.write(self._sck_pin, 0)  # type: ignore[union-attr]
+
+        if value & 0x800000:
+            value -= 1 << 24
+        return float(value)
+
+    def cleanup(self) -> None:
+        try:
+            self._pi.write(self._sck_pin, 0)
+        except Exception:  # pragma: no cover - best effort
+            pass
+        try:
+            self._pi.stop()
+        except Exception:  # pragma: no cover - best effort
+            pass
+
+
+class _RPiGPIODriver:
+    """Low level HX711 reader backed by RPi.GPIO."""
+
+    def __init__(self, dt_pin: int, sck_pin: int) -> None:
+        try:
+            import RPi.GPIO as GPIO  # type: ignore
+        except ImportError as exc:  # pragma: no cover - hardware specific
+            raise ImportError("RPi.GPIO module not available") from exc
+
+        self._GPIO = GPIO
+        self._GPIO.setwarnings(False)
+        self._GPIO.setmode(GPIO.BCM)
+
+        self._dt_pin = dt_pin
+        self._sck_pin = sck_pin
+
+        self._GPIO.setup(self._dt_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        self._GPIO.setup(self._sck_pin, GPIO.OUT)
+        self._GPIO.output(self._sck_pin, False)
+
+    def wait_ready(self, timeout: float = 0.5) -> None:
+        start = time.perf_counter()
+        while time.perf_counter() - start < timeout:
+            if self._GPIO.input(self._dt_pin) == 0:  # type: ignore[union-attr]
+                return
+            time.sleep(0.0005)
+        raise HX711ReadTimeout("HX711 ready timeout")
+
+    def read_raw(self) -> float:
+        self.wait_ready()
+        value = 0
+        for _ in range(24):
+            self._GPIO.output(self._sck_pin, True)  # type: ignore[union-attr]
+            value = (value << 1) | self._GPIO.input(self._dt_pin)  # type: ignore[union-attr]
+            self._GPIO.output(self._sck_pin, False)  # type: ignore[union-attr]
+        self._GPIO.output(self._sck_pin, True)  # type: ignore[union-attr]
+        self._GPIO.output(self._sck_pin, False)  # type: ignore[union-attr]
+
+        if value & 0x800000:
+            value -= 1 << 24
+        return float(value)
+
+    def cleanup(self) -> None:
+        try:
+            self._GPIO.output(self._sck_pin, False)
+        except Exception:  # pragma: no cover - best effort
+            pass
+        try:
+            self._GPIO.cleanup((self._dt_pin, self._sck_pin))
+        except Exception:  # pragma: no cover - best effort
+            pass
+
+
 class HX711Service:
     """Background service that reads HX711 data and exposes filtered readings."""
 
@@ -60,8 +168,11 @@ class HX711Service:
         self._filter_window = max(1, min(int(filter_window), 200))
         self._persist_path = persist_path
 
-        self._pigpio_module = None
-        self._pi = None
+        self._driver: Optional[object] = None
+        self._driver_name: Optional[str] = None
+        self._driver_retry_at: Dict[str, float] = {"pigpio": 0.0, "RPi.GPIO": 0.0}
+        self._driver_errors: Dict[str, str] = {}
+        self._last_driver_error: Optional[str] = None
 
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -140,91 +251,100 @@ class HX711Service:
         LOGGER.info("HX711 service stopped")
 
     def _disconnect(self) -> None:
-        if self._pi is not None:
+        if self._driver is not None:
             try:
-                self._pi.write(self._sck_pin, 0)
+                cleanup = getattr(self._driver, "cleanup")
+                cleanup()
             except Exception:  # pragma: no cover - best effort cleanup
                 pass
-            try:
-                self._pi.stop()
-            except Exception:
-                pass
-        self._pi = None
+        self._driver = None
+        self._driver_name = None
 
     # ------------------------------------------------------------------
     # Internal loop
     def _run_loop(self) -> None:
         interval = 1.0 / self._sample_rate_hz
         while not self._stop_event.is_set():
-            if not self._ensure_pigpio():
-                self._set_status(False, "pigpio not available")
+            if not self._ensure_driver():
                 time.sleep(2.0)
                 continue
             try:
-                raw = self._read_raw()
+                raw = self._read_from_driver()
             except HX711ReadTimeout:
-                self._set_status(False, "HX711 not ready")
+                self._last_driver_error = "hx711_timeout"
+                self._set_status(False, "hx711_timeout")
                 time.sleep(interval)
                 continue
             except Exception as exc:  # pragma: no cover - unexpected errors
                 LOGGER.error("Unexpected HX711 error: %s", exc)
-                self._set_status(False, f"HX711 error: {exc}")
+                self._last_driver_error = str(exc)
+                self._disconnect()
+                self._set_status(False, f"driver_error: {exc}")
                 time.sleep(interval)
                 continue
 
             self._record_sample(raw)
             self._set_status(True, None)
+            self._last_driver_error = None
             time.sleep(interval)
 
-    def _ensure_pigpio(self) -> bool:
-        if self._pigpio_module is None:
-            try:
-                import pigpio  # type: ignore
+    def _create_driver(self, kind: str):
+        if kind == "pigpio":
+            return _PigpioDriver(self._dt_pin, self._sck_pin)
+        if kind == "RPi.GPIO":
+            return _RPiGPIODriver(self._dt_pin, self._sck_pin)
+        raise ValueError(f"Unknown driver: {kind}")
 
-                self._pigpio_module = pigpio
+    def _ensure_driver(self) -> bool:
+        if self._driver is not None:
+            return True
+
+        now = time.time()
+        reasons = []
+        for kind in ("pigpio", "RPi.GPIO"):
+            retry_at = self._driver_retry_at.get(kind, 0.0)
+            if now < retry_at:
+                if kind in self._driver_errors:
+                    reasons.append(self._driver_errors[kind])
+                continue
+            try:
+                driver = self._create_driver(kind)
             except ImportError as exc:
-                LOGGER.error("pigpio module not found: %s", exc)
-                self._pigpio_module = None
-                return False
-        if self._pi is None:
-            try:
-                self._pi = self._pigpio_module.pi()  # type: ignore[union-attr]
-                if not self._pi.connected:
-                    LOGGER.error("pigpiod daemon not reachable")
-                    self._pi = None
-                    return False
-                self._pi.set_mode(self._dt_pin, self._pigpio_module.INPUT)  # type: ignore[union-attr]
-                self._pi.set_pull_up_down(self._dt_pin, self._pigpio_module.PUD_UP)  # type: ignore[union-attr]
-                self._pi.set_mode(self._sck_pin, self._pigpio_module.OUTPUT)  # type: ignore[union-attr]
-                self._pi.write(self._sck_pin, 0)
+                message = f"{kind} unavailable: {exc}"
+                LOGGER.error(message)
+                self._driver_errors[kind] = message
+                self._driver_retry_at[kind] = now + 60.0
+                reasons.append(message)
+                continue
             except Exception as exc:
-                LOGGER.error("Failed to initialize pigpio: %s", exc)
-                self._disconnect()
-                return False
-        return True
+                message = f"{kind} init failed: {exc}"
+                LOGGER.error(message)
+                self._driver_errors[kind] = message
+                self._driver_retry_at[kind] = now + 15.0
+                reasons.append(message)
+                continue
 
-    def _wait_ready(self, timeout: float = 0.5) -> None:
-        start = time.time()
-        while time.time() - start < timeout:
-            if self._pi.read(self._dt_pin) == 0:  # type: ignore[union-attr]
-                return
-            time.sleep(0.001)
-        raise HX711ReadTimeout("HX711 ready timeout")
+            self._driver = driver
+            self._driver_name = kind
+            self._driver_errors.pop(kind, None)
+            LOGGER.info("HX711 driver initialized using %s", kind)
+            self._last_driver_error = None
+            return True
 
-    def _read_raw(self) -> float:
-        self._wait_ready()
-        value = 0
-        for _ in range(24):
-            self._pi.write(self._sck_pin, 1)  # type: ignore[union-attr]
-            value = (value << 1) | self._pi.read(self._dt_pin)  # type: ignore[union-attr]
-            self._pi.write(self._sck_pin, 0)  # type: ignore[union-attr]
-        # Set channel A gain 128 (one extra pulse)
-        self._pi.write(self._sck_pin, 1)  # type: ignore[union-attr]
-        self._pi.write(self._sck_pin, 0)  # type: ignore[union-attr]
+        if reasons:
+            self._last_driver_error = "; ".join(reasons)
+            self._set_status(False, self._last_driver_error)
+        else:
+            self._set_status(False, "driver_unavailable")
+        return False
 
-        if value & 0x800000:
-            value = -((~value & 0xFFFFFF) + 1)
-        return float(value)
+    def _read_from_driver(self) -> float:
+        if self._driver is None:
+            raise HX711Error("driver_not_initialized")
+        read_raw = getattr(self._driver, "read_raw", None)
+        if read_raw is None:
+            raise HX711Error("driver_missing_read_raw")
+        return float(read_raw())
 
     def _record_sample(self, raw: float) -> None:
         with self._lock:
@@ -263,9 +383,12 @@ class HX711Service:
                 "calibration_factor": self._calibration_factor,
                 "tare_offset": self._tare_offset,
                 "pins": {"dt": self._dt_pin, "sck": self._sck_pin},
+                "driver": self._driver_name,
             }
             if not self._status_ok:
                 status["reason"] = self._status_reason or "not_ready"
+            if self._last_driver_error:
+                status["driver_error"] = self._last_driver_error
             return status
 
     def get_reading(self) -> dict:
@@ -285,6 +408,16 @@ class HX711Service:
                 "instant": self._last_instant_grams,
                 "ts": ts_iso,
             }
+
+    def read_raw(self) -> Optional[float]:
+        with self._lock:
+            return self._last_raw
+
+    def read_grams(self, *, instant: bool = False) -> Optional[float]:
+        with self._lock:
+            if instant:
+                return self._last_instant_grams
+            return self._last_grams
 
     def tare(self) -> dict:
         with self._lock:
