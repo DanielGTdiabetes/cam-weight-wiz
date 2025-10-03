@@ -45,6 +45,7 @@ describe("food scanner contract", () => {
       kcal: 53.21,
       confidence: 0.82,
       avgColor: { r: 120, g: 85, b: 60 },
+      timestamp: new Date("2024-01-01T00:00:00.000Z"),
     });
   });
 
@@ -58,6 +59,8 @@ describe("food scanner contract", () => {
       glycemicIndex: 30,
       confidence: 0.91,
       avgColor: { r: 200, g: 210, b: 220 },
+      timestamp: new Date("2024-01-01T00:00:00.000Z"),
+      photo: "data:image/png;base64,photo",
     };
 
     const item = toFoodItem(snapshot, "barcode");
@@ -74,6 +77,7 @@ describe("food scanner contract", () => {
       source: "barcode",
       capturedAt: 1704067200000,
       avgColor: { r: 200, g: 210, b: 220 },
+      photo: "data:image/png;base64,photo",
     });
   });
 

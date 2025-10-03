@@ -230,7 +230,11 @@ class StorageService {
   addScannerRecord(record: any): void {
     try {
       const history = this.getScannerHistory();
-      history.unshift({ ...record, timestamp: Date.now() });
+      const timestamp =
+        record.timestamp instanceof Date
+          ? record.timestamp.toISOString()
+          : record.timestamp ?? new Date().toISOString();
+      history.unshift({ ...record, timestamp });
       const trimmed = history.slice(0, MAX_HISTORY_ITEMS);
       this.saveScannerHistory(trimmed);
     } catch (error) {
@@ -254,7 +258,11 @@ class StorageService {
   enqueueScannerAction(action: any): void {
     try {
       const queue = this.getScannerQueue();
-      queue.push({ ...action, queuedAt: Date.now() });
+      const timestamp =
+        action.timestamp instanceof Date
+          ? action.timestamp.toISOString()
+          : action.timestamp;
+      queue.push({ ...action, timestamp, queuedAt: Date.now() });
       localStorage.setItem('scanner_history_queue', JSON.stringify(queue));
     } catch (error) {
       console.error('Error enqueuing scanner action:', error);

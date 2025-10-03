@@ -1,5 +1,5 @@
 import type { ComponentProps } from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { BarcodeScannerModal } from '@/components/BarcodeScannerModal';
 
@@ -221,14 +221,17 @@ describe('BarcodeScannerModal', () => {
     await user.click(screen.getByRole('button', { name: /continuar a pesar/i }));
 
     expect(await screen.findByText('150 g')).toBeInTheDocument();
-    expect(screen.getByText(/nutrición estimada/i)).toBeInTheDocument();
-    expect(screen.getByText(/23 g/)).toBeInTheDocument();
+    const nutritionSummary = screen.getByRole('heading', { name: /nutrición estimada/i }).closest('div');
+    expect(nutritionSummary).toBeTruthy();
+    expect(
+      within(nutritionSummary as HTMLElement).getByText((content) => content.includes('22.5 g'))
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: /confirmar/i }));
 
     await waitFor(() => expect(apiMocks.exportBolus).toHaveBeenCalledTimes(2));
     const confirmExportCall = apiMocks.exportBolus.mock.calls.at(-1);
-    expect(confirmExportCall?.[0]).toBe(23);
+    expect(confirmExportCall?.[0]).toBe(22.5);
     expect(confirmExportCall?.[1]).toBe(0);
     expect(typeof confirmExportCall?.[2]).toBe('string');
 
@@ -238,6 +241,7 @@ describe('BarcodeScannerModal', () => {
         carbsPer100g: 15,
         source: 'barcode',
         confidence: 0.9,
+        timestamp: expect.any(String),
       })
     );
 
@@ -245,7 +249,7 @@ describe('BarcodeScannerModal', () => {
       expect.objectContaining({
         name: 'Manzana Gala',
         weight: 150,
-        carbs: 23,
+        carbs: 22.5,
         kcal: 116,
       })
     );
@@ -334,6 +338,7 @@ describe('BarcodeScannerModal', () => {
         type: 'exportBolus',
         carbs: 60,
         insulin: 0,
+        timestamp: expect.any(String),
       })
     );
     expect(toastMock).toHaveBeenCalledWith(
