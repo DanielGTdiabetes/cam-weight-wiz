@@ -546,88 +546,196 @@ fi
 if [[ -d /opt/x735-script ]]; then
   cd /opt/x735-script || true
   chmod +x *.sh || true
-  # Raspberry Pi 5 usa pwmchip2 en lugar de pwmchip0
-  sed -i 's/pwmchip0/pwmchip2/g' x735-fan.sh 2>/dev/null || true
-  ./install-fan-service.sh || true
-  ./install-pwr-service.sh || true
-  
-  # Override para esperar a que PWM esté disponible
-  install -d -m 0755 /etc/systemd/system/x735-fan.service.d
-  cat > /etc/systemd/system/x735-fan.service.d/override.conf <<'EOF'
-[Unit]
-After=local-fs.target sysinit.target
-ConditionPathExistsGlob=/sys/class/pwm/pwmchip*
 
-[Service]
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 20); do for c in /sys/class/pwm/pwmchip2 /sys/class/pwm/pwmchip1 /sys/class/pwm/pwmchip0; do [ -d "$c" ] && exit 0; done; sleep 1; done; exit 0'
-Restart=on-failure
-RestartSec=5
-EOF
+  install -m 0755 x735-fan.sh /usr/local/bin/x735-fan.sh || true
+  install -m 0755 xPWR.sh /usr/local/bin/xPWR.sh || true
+  install -m 0644 pwm_fan_control.py /usr/local/bin/pwm_fan_control.py || true
+  install -m 0755 xSoft.sh /usr/local/bin/xSoft.sh || true
 
-  systemctl_safe daemon-reload
-  systemctl_safe enable x735-fan.service x735-pwr.service
-  
   # Añadir alias para apagar el sistema desde la X735
   cp -f ./xSoft.sh /usr/local/bin/ 2>/dev/null || true
   if [[ -f "${TARGET_HOME}/.bashrc" ]] && ! grep -q 'alias x735off=' "${TARGET_HOME}/.bashrc" 2>/dev/null; then
     echo 'alias x735off="sudo /usr/local/bin/xSoft.sh 0 20"' >> "${TARGET_HOME}/.bashrc"
     chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.bashrc" || true
   fi
-  
-  log "✓ X735 v3 configurada (ventilador + power management)"
+
+  log "✓ X735 v3 scripts instalados"
 else
   warn "X735 script no disponible, continuando sin soporte X735"
 fi
 
-# Script de verificación X735 (se ejecuta en cada arranque si es necesario)
-cat > /usr/local/sbin/x735-ensure.sh <<'EOF'
+# Script xPWR modernizado con debounce y logs
+cat > /usr/local/bin/xPWR.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-STAMP=/var/lib/x735-setup.done
-LOG(){ printf "[x735] %s\n" "$*"; }
 
-# Detectar qué pwmchip está disponible
-PWMCHIP=
-for c in /sys/class/pwm/pwmchip2 /sys/class/pwm/pwmchip1 /sys/class/pwm/pwmchip0; do
-  if [[ -d "$c" ]]; then 
-    PWMCHIP="${c##*/}"
-    break
+LOG_TAG="x735-pwr"
+log() {
+  logger -t "${LOG_TAG}" "$*"
+  printf '[x735-pwr] %s\n' "$*"
+}
+
+if [[ $# -ne 3 ]]; then
+  log "Uso: $0 <gpiochip> <shutdown_pin> <boot_pin>"
+  exit 1
+fi
+
+GPIOCHIP_RAW="$1"
+SHUTDOWN_PIN="$2"
+BOOT_PIN="$3"
+
+if [[ ! "$GPIOCHIP_RAW" =~ ^(gpiochip)?[0-9]+$ ]]; then
+  log "gpiochip inválido: ${GPIOCHIP_RAW}"
+  exit 1
+fi
+
+for pin in "$SHUTDOWN_PIN" "$BOOT_PIN"; do
+  if [[ ! "$pin" =~ ^[0-9]+$ ]]; then
+    log "Pin GPIO inválido: ${pin}"
+    exit 1
   fi
 done
 
-if [[ -z "${PWMCHIP}" ]]; then
-  LOG "PWM no disponible; reintentando en próximo arranque"
+if ! command -v gpioget >/dev/null 2>&1 || ! command -v gpioset >/dev/null 2>&1; then
+  log "Herramientas gpiod no disponibles"
+  exit 1
+fi
+
+GPIOCHIP="${GPIOCHIP_RAW}"
+if [[ "$GPIOCHIP" =~ ^[0-9]+$ ]]; then
+  GPIOCHIP="gpiochip${GPIOCHIP}"
+fi
+
+DEBOUNCE_MS=${DEBOUNCE_MS:-200}
+REBOOT_MAX_MS=${REBOOT_MAX_MS:-800}
+LONG_PRESS_MS=${LONG_PRESS_MS:-1500}
+SAMPLE_SLEEP=${SAMPLE_SLEEP:-0.02}
+
+millis() { date +%s%3N; }
+
+safe_poweroff() {
+  log "Solicitando apagado seguro (shutdown -h now)"
+  if ! shutdown -h now; then
+    log "shutdown falló, usando systemctl poweroff"
+    systemctl poweroff || poweroff
+  fi
+}
+
+safe_reboot() {
+  log "Solicitando reinicio seguro"
+  systemctl reboot || reboot
+}
+
+log "Inicializando (chip=${GPIOCHIP} shutdown_pin=${SHUTDOWN_PIN} boot_pin=${BOOT_PIN})"
+gpioset "${GPIOCHIP}" "${BOOT_PIN}=1"
+
+trap 'log "Servicio finalizado"' EXIT
+
+while true; do
+  if [[ "$(gpioget "${GPIOCHIP}" "${SHUTDOWN_PIN}")" -eq 0 ]]; then
+    sleep "${SAMPLE_SLEEP}"
+    continue
+  fi
+
+  press_start=$(millis)
+  log "Botón presionado"
+
+  while [[ "$(gpioget "${GPIOCHIP}" "${SHUTDOWN_PIN}")" -eq 1 ]]; do
+    sleep "${SAMPLE_SLEEP}"
+  done
+
+  press_duration_ms=$(( $(millis) - press_start ))
+  log "Duración pulsación: ${press_duration_ms} ms"
+
+  if (( press_duration_ms < DEBOUNCE_MS )); then
+    log "Pulsación descartada (bounce)"
+    sleep "${SAMPLE_SLEEP}"
+    continue
+  fi
+
+  if (( press_duration_ms >= LONG_PRESS_MS )); then
+    log "Pulsación larga detectada -> apagado"
+    safe_poweroff
+    break
+  fi
+
+  if (( press_duration_ms <= REBOOT_MAX_MS )); then
+    log "Pulsación corta detectada -> reinicio"
+    safe_reboot
+    break
+  fi
+
+  log "Duración intermedia, se interpreta como reinicio"
+  safe_reboot
+  break
+done
+EOF
+chmod 0755 /usr/local/bin/xPWR.sh
+
+# Script de verificación y ajuste dinámico del ventilador X735
+cat > /usr/local/sbin/x735-ensure.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG_TAG="x735-ensure"
+log() {
+  logger -t "${LOG_TAG}" "$*"
+  printf '[x735-ensure] %s\n' "$*"
+}
+
+STAMP=/var/lib/x735-setup.done
+mkdir -p /var/lib
+
+if [[ -f "${STAMP}" ]]; then
+  log "Configuración previa detectada (${STAMP})"
+fi
+
+wait_for_pwm() {
+  local timeout=${1:-30}
+  local elapsed=0
+  while (( elapsed < timeout )); do
+    mapfile -t chips < <(find /sys/class/pwm -maxdepth 1 -mindepth 1 -type d -name 'pwmchip*' 2>/dev/null | sort)
+    if (( ${#chips[@]} > 0 )); then
+      local last_index=$(( ${#chips[@]} - 1 ))
+      PWM_PATH="${chips[$last_index]}"
+      return 0
+    fi
+    sleep 1
+    ((elapsed++))
+  done
+  return 1
+}
+
+if ! wait_for_pwm 30; then
+  log "PWM no disponible tras la espera; se reintentará en el próximo arranque"
   exit 0
 fi
 
-# Clonar scripts si no existen
-if [[ ! -d /opt/x735-script/.git && "${NET_OK}" = "1" ]]; then
-  git clone https://github.com/geekworm-com/x735-script /opt/x735-script || true
+PWM_CHIP="${PWM_PATH##*/}"
+log "PWM detectado: ${PWM_CHIP}"
+
+TARGET_SCRIPT="/usr/local/bin/x735-fan.sh"
+if [[ -f "${TARGET_SCRIPT}" ]]; then
+  if sed -i -E "s|/sys/class/pwm/pwmchip[0-9]+|/sys/class/pwm/${PWM_CHIP}|g" "${TARGET_SCRIPT}"; then
+    log "Actualizado PWM_CHIP_PATH en ${TARGET_SCRIPT}"
+  else
+    log "No se pudo actualizar ${TARGET_SCRIPT}"
+  fi
+else
+  log "${TARGET_SCRIPT} no encontrado"
 fi
 
-cd /opt/x735-script || exit 0
-chmod +x *.sh || true
-
-# Actualizar el pwmchip correcto en el script
-sed -i "s/pwmchip[0-9]\+/${PWMCHIP}/g" x735-fan.sh 2>/dev/null || true
-
-# Instalar servicios
-./install-fan-service.sh || true
-./install-pwr-service.sh || true
-systemctl enable --now x735-fan.service x735-pwr.service 2>/dev/null || true
-
 touch "${STAMP}"
-LOG "X735 setup completado (pwmchip=${PWMCHIP})"
-exit 0
+log "Configuración X735 completada"
 EOF
 chmod 0755 /usr/local/sbin/x735-ensure.sh
 
-# Servicio systemd para verificar X735 en cada arranque
+# Servicios systemd para X735
 cat > /etc/systemd/system/x735-ensure.service <<'EOF'
 [Unit]
-Description=Ensure X735 fan/power services
-After=multi-user.target local-fs.target
-ConditionPathExists=!/var/lib/x735-setup.done
+Description=Ensure Geekworm X735 fan/power configuration
+After=local-fs.target sysinit.target
+Before=x735-fan.service x735-pwr.service
 
 [Service]
 Type=oneshot
@@ -638,8 +746,72 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
+cat > /etc/systemd/system/x735-fan.service <<'EOF'
+[Unit]
+Description=Geekworm X735 Fan Controller
+Requires=x735-ensure.service
+After=x735-ensure.service
+ConditionPathExistsGlob=/sys/class/pwm/pwmchip*
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/x735-fan.sh
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/x735-pwr.service <<'EOF'
+[Unit]
+Description=Geekworm X735 Power Button Handler
+Requires=x735-ensure.service
+After=multi-user.target x735-ensure.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/xPWR.sh gpiochip0 5 12
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 systemctl_safe daemon-reload
-systemctl_safe enable x735-ensure.service
+systemctl_safe enable x735-ensure.service x735-fan.service x735-pwr.service
+systemctl_safe start x735-fan.service x735-pwr.service
+
+# Advertencia si el kernel es demasiado antiguo para PWM estable
+KERNEL_VERSION="$(uname -r)"
+if command -v dpkg >/dev/null 2>&1; then
+  if dpkg --compare-versions "${KERNEL_VERSION}" lt "6.6.22"; then
+    warn "Kernel ${KERNEL_VERSION} < 6.6.22: el ventilador X735 puede no funcionar; actualiza el kernel"
+  fi
+else
+  warn "No se pudo comparar versión de kernel (dpkg ausente)"
+fi
+
+log "[X735] Kernel ${KERNEL_VERSION}"
+if PWM_PATHS=$(ls /sys/class/pwm/pwmchip* 2>/dev/null); then
+  log "[X735] PWM disponible: $(printf '%s' "${PWM_PATHS}" | tr '\n' ' ')"
+else
+  warn "[X735] PWM no disponible en /sys/class/pwm"
+fi
+
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  systemctl is-active x735-fan.service >/dev/null 2>&1 && log "[X735] x735-fan.service activo" || warn "[X735] x735-fan.service no activo"
+  systemctl is-active x735-pwr.service >/dev/null 2>&1 && log "[X735] x735-pwr.service activo" || warn "[X735] x735-pwr.service no activo"
+else
+  warn "[X735] systemd no disponible para verificar servicios"
+fi
 
 cd "${BASCULA_CURRENT_LINK}"
 log "✓ X735 v3 power management configurado"
