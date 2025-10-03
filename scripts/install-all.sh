@@ -20,6 +20,22 @@ NC='\033[0m'
 log()  { printf "${BLUE}[inst]${NC} %s\n" "$*"; }
 warn() { printf "${YELLOW}[inst][warn]${NC} %s\n" "$*"; }
 err()  { printf "${RED}[inst][err]${NC} %s\n" "$*"; }
+fail() { err "$*"; exit 1; }
+
+apt_has() {
+  dpkg -s "$1" >/dev/null 2>&1
+}
+
+apt_install() {
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
+}
+
+ensure_pkg() {
+  local pkg
+  for pkg in "$@"; do
+    apt_has "${pkg}" || apt_install "${pkg}"
+  done
+}
 
 # --- Require root privileges ---
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
@@ -133,21 +149,55 @@ fi
 # Install base system packages
 log "[3/20] Instalando dependencias del sistema..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-    if apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
-        python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial \
-        python3-pil python3-pil.imagetk python3-xdg \
-        x11-xserver-utils xserver-xorg xinit openbox xserver-xorg-legacy \
-        chromium unclutter fonts-dejavu-core \
-        libjpeg-dev zlib1g-dev libpng-dev \
-        alsa-utils sox ffmpeg \
-        libzbar0 gpiod python3-rpi.gpio \
-        network-manager policykit-1 dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng; then
+    BASE_PACKAGES=(
+        git curl ca-certificates build-essential cmake pkg-config
+        python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial
+        python3-pil python3-pil.imagetk python3-xdg
+        x11-xserver-utils xserver-xorg-legacy
+        fonts-dejavu-core
+        libjpeg-dev zlib1g-dev libpng-dev
+        alsa-utils sox ffmpeg
+        libzbar0 gpiod python3-rpi.gpio
+        network-manager policykit-1 dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+    )
+    if apt_install "${BASE_PACKAGES[@]}"; then
         log "✓ Dependencias base instaladas"
     else
         warn "No se pudieron instalar todas las dependencias base"
     fi
+
+    ensure_pkg xorg
+    ensure_pkg xinit
+    ensure_pkg openbox
+    ensure_pkg unclutter
+
+    CHROME_PKG=""
+    if apt-cache policy chromium 2>/dev/null | grep -q 'Candidate:'; then
+      CHROME_PKG="chromium"
+    fi
+    if apt-cache policy chromium-browser 2>/dev/null | grep -q 'Candidate:'; then
+      CHROME_PKG="${CHROME_PKG:-chromium-browser}"
+    fi
+    if [[ -n "${CHROME_PKG}" ]]; then
+      ensure_pkg "${CHROME_PKG}"
+      log "✓ Paquete Chromium seleccionado: ${CHROME_PKG}"
+    else
+      warn "No se encontró paquete Chromium disponible en apt-cache"
+    fi
 else
     warn "Sin red: omitiendo la instalación de dependencias base"
+fi
+
+if ! command -v startx >/dev/null 2>&1 && ! command -v xinit >/dev/null 2>&1; then
+  fail "Falta startx/xinit tras la instalación"
+fi
+
+if ! command -v openbox >/dev/null 2>&1; then
+  fail "Falta openbox tras la instalación"
+fi
+
+if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+  fail "Falta Chromium tras la instalación"
 fi
 
 # Ensure NetworkManager service is enabled and running
@@ -340,6 +390,9 @@ else
 polkit.addRule(function(action, subject) {
   if (subject.isInGroup("netdev") || subject.user == "pi") {
     if (action.id == "org.freedesktop.NetworkManager.settings.modify.system") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.settings.modify.own") {
       return polkit.Result.YES;
     }
     if (action.id == "org.freedesktop.NetworkManager.network-control") {
@@ -962,13 +1015,15 @@ else
   warn ".xinitrc no encontrado en el proyecto, creando uno básico"
   cat > "${TARGET_HOME}/.xinitrc" <<'EOF'
 #!/bin/sh
+set -e
 xset s off
 xset -dpms
 xset s noblank
 unclutter -idle 0.5 -root &
 openbox &
 sleep 2
-chromium \
+CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo chromium)"
+exec "$CHROME_BIN" \
   --kiosk \
   --noerrdialogs \
   --disable-infobars \
@@ -984,6 +1039,21 @@ chromium \
 EOF
   chmod +x "${TARGET_HOME}/.xinitrc"
   chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.xinitrc"
+fi
+
+# Determinar binario startx/xinit disponible
+STARTX_BIN="$(command -v startx || true)"
+if [[ -z "${STARTX_BIN}" ]]; then
+  STARTX_BIN="$(command -v xinit || true)"
+fi
+if [[ -z "${STARTX_BIN}" ]]; then
+  fail "No se encontró startx/xinit"
+fi
+
+if [[ "${STARTX_BIN##*/}" == "startx" ]]; then
+  STARTX_CMD="${STARTX_BIN} -- :0 vt1"
+else
+  STARTX_CMD="${STARTX_BIN} ${TARGET_HOME}/.xinitrc -- :0 vt1"
 fi
 
 # Crear servicio systemd usando el archivo del proyecto o uno por defecto
@@ -1018,7 +1088,7 @@ PermissionsStartOnly=yes
 ExecStartPre=/usr/bin/install -d -m 0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula
 ExecStartPre=/usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/app.log
 ExecStartPre=/usr/bin/install -d -m 0700 -o ${TARGET_USER} -g ${TARGET_GROUP} ${TARGET_HOME}/.local/share/xorg
-ExecStart=/usr/bin/startx -- :0 vt1
+ExecStart=${STARTX_CMD}
 Restart=on-failure
 RestartSec=2
 StandardOutput=journal
