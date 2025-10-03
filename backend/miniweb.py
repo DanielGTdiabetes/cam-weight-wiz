@@ -8,13 +8,15 @@ import subprocess
 import ipaddress
 import random
 import string
+import asyncio
+import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Union
 
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -1023,6 +1025,80 @@ async def network_status():
 # ====== (opcional) WebSocket y tare/zero/scale como ya estaban si aplica ======
 # Mantén aquí los endpoints ya existentes de báscula...
 # ==============================================================================
+
+
+# ====== WebSocket de báscula + /info ======
+active_ws_clients: list[WebSocket] = []
+
+
+@app.get("/info")
+async def miniweb_info():
+    host = "127.0.0.1"
+    port = 8080
+    return {
+        "ok": True,
+        "app": "Bascula Mini-Web",
+        "version": "1.0",
+        "hostname": os.uname().nodename if hasattr(os, "uname") else "bascula",
+        "listen": {"host": host, "port": port},
+        "endpoints": {
+            "health": "/health",
+            "info": "/info",
+            "scale_read": "/api/scale/read",
+            "ws_scale": "/ws/scale",
+        },
+        "settings": {"wsUrl": f"ws://{host}:{port}/ws/scale"},
+    }
+
+
+@app.websocket("/ws/scale")
+async def ws_scale(websocket: WebSocket):
+    await websocket.accept()
+    active_ws_clients.append(websocket)
+    try:
+        while True:
+            svc = _get_scale_service()
+            if svc is None:
+                await websocket.send_json({"ok": False, "reason": "service_not_initialized"})
+                await asyncio.sleep(1.0)
+                continue
+
+            data = svc.get_reading() if hasattr(svc, "get_reading") else {}
+            if data.get("ok"):
+                grams = data.get("grams")
+                instant = data.get("instant", grams)
+                stable_value = data.get("stable")
+                if stable_value is None and grams is not None and instant is not None:
+                    try:
+                        stable_value = abs(float(instant) - float(grams)) <= 1.0
+                    except Exception:
+                        stable_value = False
+                payload = {
+                    "ok": True,
+                    "weight": float(grams) if grams is not None else 0.0,
+                    "unit": "g",
+                    "stable": bool(stable_value) if stable_value is not None else False,
+                    "ts": data.get("ts", time.time()),
+                }
+                await websocket.send_json(payload)
+            else:
+                await websocket.send_json({"ok": False, **data})
+
+            cfg = _load_config()
+            try:
+                sr = float(cfg.get("scale", {}).get("sample_rate_hz", 20.0))
+            except Exception:
+                sr = 20.0
+            interval = max(0.05, min(0.2, 1.0 / sr if sr > 0 else 0.1))
+            await asyncio.sleep(interval)
+
+    except WebSocketDisconnect:
+        if websocket in active_ws_clients:
+            active_ws_clients.remove(websocket)
+    except Exception as exc:
+        LOG_SCALE.error("WebSocket error: %s", exc)
+        if websocket in active_ws_clients:
+            active_ws_clients.remove(websocket)
 
 
 # Mensaje de arranque útil
