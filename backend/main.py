@@ -11,8 +11,8 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Optional, Dict, Any, List
 import asyncio
-import serial
 import json
+import logging
 import os
 import subprocess
 import time
@@ -26,6 +26,8 @@ from uuid import uuid4
 from datetime import datetime
 import httpx
 import re
+
+from scale_service import HX711Service
 
 
 CHATGPT_MODELS = [
@@ -215,14 +217,59 @@ async def chatgpt_barcode_lookup(payload: Dict[str, Any]) -> Optional[Dict[str, 
 
 # Configuration
 CONFIG_PATH = os.path.expanduser("~/.bascula/config.json")
-DEFAULT_SERIAL_PORT = "/dev/serial0"
-DEFAULT_BAUD_RATE = 115200
+DEFAULT_DT_PIN = 5
+DEFAULT_SCK_PIN = 6
+DEFAULT_SAMPLE_RATE = 20.0
+DEFAULT_FILTER_WINDOW = 12
+DEFAULT_CALIBRATION_FACTOR = 1.0
+
+LOG_SCALE = logging.getLogger("bascula.scale")
 
 # Global state
-scale_serial: Optional[serial.Serial] = None
+scale_service: Optional[HX711Service] = None
 active_websockets: list[WebSocket] = []
 timer_task: Optional[asyncio.Task] = None
 timer_state = {"running": False, "remaining": 0, "total": 0}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        LOG_SCALE.warning("Invalid integer for %s: %s", name, value)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        LOG_SCALE.warning("Invalid float for %s: %s", name, value)
+        return default
+
+
+def _create_scale_service() -> HX711Service:
+    dt_pin = _env_int("HX711_DT", DEFAULT_DT_PIN)
+    sck_pin = _env_int("HX711_SCK", DEFAULT_SCK_PIN)
+    sample_rate = _env_float("SAMPLE_RATE_HZ", DEFAULT_SAMPLE_RATE)
+    filter_window = _env_int("SCALE_FILTER_WINDOW", DEFAULT_FILTER_WINDOW)
+    calibration_factor = _env_float("CALIBRATION_FACTOR", DEFAULT_CALIBRATION_FACTOR)
+
+    service = HX711Service(
+        dt_pin=dt_pin,
+        sck_pin=sck_pin,
+        sample_rate_hz=sample_rate,
+        filter_window=filter_window,
+        calibration_factor=calibration_factor,
+    )
+    service.start()
+    return service
 
 # Recipe knowledge base for deterministic guidance
 RECIPE_DATABASE: List[Dict[str, Any]] = [
@@ -341,14 +388,8 @@ VERSION_FILE = Path(os.getenv("BASCULA_VERSION_FILE", Path.home() / ".bascula" /
 
 # ============= MODELS =============
 
-class TareCommand(BaseModel):
-    pass
-
-class ZeroCommand(BaseModel):
-    pass
-
-class CalibrationData(BaseModel):
-    factor: float
+class CalibrationRequest(BaseModel):
+    known_grams: float
 
 class TimerStart(BaseModel):
     seconds: int
@@ -384,7 +425,12 @@ def load_config():
             print(f"Error loading config: {e}")
     return {
         "general": {"sound_enabled": True, "volume": 70, "tts_enabled": True},
-        "scale": {"port": DEFAULT_SERIAL_PORT, "baud": DEFAULT_BAUD_RATE, "calib_factor": 1.0, "unit": "g"},
+        "scale": {
+            "dt": DEFAULT_DT_PIN,
+            "sck": DEFAULT_SCK_PIN,
+            "calibration_factor": DEFAULT_CALIBRATION_FACTOR,
+            "sample_rate_hz": DEFAULT_SAMPLE_RATE,
+        },
         "network": {"miniweb_enabled": True, "miniweb_port": 8080},
         "diabetes": {"diabetes_enabled": False, "ns_url": "", "ns_token": ""},
     }
@@ -397,26 +443,29 @@ def save_config(config: dict):
 
 # ============= SERIAL/SCALE =============
 
-async def init_scale():
-    """Initialize serial connection to ESP32 scale"""
-    global scale_serial
+async def init_scale() -> None:
+    """Initialize HX711 service."""
+    global scale_service
+    if scale_service is not None:
+        return
     try:
-        config = load_config()
-        port = config.get("scale", {}).get("port", DEFAULT_SERIAL_PORT)
-        baud = config.get("scale", {}).get("baud", DEFAULT_BAUD_RATE)
-        
-        scale_serial = serial.Serial(port=port, baudrate=baud, timeout=1)
-        print(f"✅ Scale connected on {port} @ {baud}")
-    except Exception as e:
-        print(f"⚠️  Scale not connected: {e}")
-        scale_serial = None
+        scale_service = _create_scale_service()
+    except Exception as exc:
+        LOG_SCALE.error("Failed to start HX711 service: %s", exc)
+        scale_service = None
 
-async def close_scale():
-    """Close serial connection"""
-    global scale_serial
-    if scale_serial and scale_serial.is_open:
-        scale_serial.close()
-        print("Scale connection closed")
+
+async def close_scale() -> None:
+    """Stop HX711 service."""
+    global scale_service
+    if scale_service is None:
+        return
+    try:
+        scale_service.stop()
+    except Exception as exc:
+        LOG_SCALE.error("Failed to stop HX711 service: %s", exc)
+    finally:
+        scale_service = None
 
 # ============= APP LIFECYCLE =============
 
@@ -445,84 +494,88 @@ async def websocket_scale(websocket: WebSocket):
     """WebSocket endpoint for real-time weight data"""
     await websocket.accept()
     active_websockets.append(websocket)
-    
+
     try:
         while True:
-            if scale_serial and scale_serial.is_open:
-                try:
-                    if scale_serial.in_waiting > 0:
-                        line = scale_serial.readline().decode('utf-8').strip()
-                        
-                        try:
-                            data = json.loads(line)
-                            await websocket.send_json(data)
-                        except json.JSONDecodeError:
-                            try:
-                                weight = float(line)
-                                await websocket.send_json({
-                                    "weight": weight,
-                                    "stable": True,
-                                    "unit": "g"
-                                })
-                            except ValueError:
-                                pass
-                except Exception as e:
-                    print(f"Error reading from scale: {e}")
-            
-            await asyncio.sleep(0.1)
-            
+            service = scale_service
+            if service is None:
+                await websocket.send_json({"ok": False, "reason": "service_not_initialized"})
+                await asyncio.sleep(1.0)
+                continue
+
+            data = service.get_reading()
+            if data.get("ok"):
+                grams = data.get("grams")
+                instant = data.get("instant")
+                stable = False
+                if grams is not None and instant is not None:
+                    stable = abs(instant - grams) <= 1.0
+                payload = {
+                    **data,
+                    "weight": grams if grams is not None else 0.0,
+                    "unit": "g",
+                    "stable": stable,
+                }
+                await websocket.send_json(payload)
+            else:
+                await websocket.send_json(data)
+
+            interval = max(0.05, 1.0 / service.sample_rate_hz)
+            await asyncio.sleep(interval)
+
     except WebSocketDisconnect:
         active_websockets.remove(websocket)
-    except Exception as e:
-        print(f"WebSocket error: {e}")
+    except Exception as exc:
+        LOG_SCALE.error("WebSocket error: %s", exc)
         if websocket in active_websockets:
             active_websockets.remove(websocket)
 
+@app.get("/api/scale/status")
+async def scale_status():
+    service = scale_service
+    if service is None:
+        return {"ok": False, "reason": "service_not_initialized"}
+    status = service.get_status()
+    status["success"] = status.get("ok", False)
+    return status
+
+
+@app.get("/api/scale/read")
+async def scale_read():
+    service = scale_service
+    if service is None:
+        return {"ok": False, "reason": "service_not_initialized"}
+    data = service.get_reading()
+    data["success"] = data.get("ok", False)
+    return data
+
+
 @app.post("/api/scale/tare")
 async def scale_tare():
-    """Send tare command to scale"""
-    if scale_serial and scale_serial.is_open:
-        try:
-            # La báscula basada en ESP32 espera comandos terminados en nueva línea
-            scale_serial.write(b"TARE\n")
-            return {"success": True, "message": "Tare command sent"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-    else:
-        raise HTTPException(status_code=503, detail="Scale not connected")
+    service = scale_service
+    if service is None:
+        return {"ok": False, "success": False, "reason": "service_not_initialized"}
+    result = service.tare()
+    result["success"] = result.get("ok", False)
+    return result
+
 
 @app.post("/api/scale/zero")
 async def scale_zero():
-    """Send zero/calibrate command to scale"""
-    if scale_serial and scale_serial.is_open:
-        try:
-            scale_serial.write(b"ZERO\n")
-            return {"success": True, "message": "Zero command sent"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-    else:
-        raise HTTPException(status_code=503, detail="Scale not connected")
+    """Backward-compatible endpoint mapped to tare."""
+    result = await scale_tare()
+    result.setdefault("message", "Zero command mapped to tare")
+    return result
+
 
 @app.post("/api/scale/calibrate")
-async def set_calibration(data: CalibrationData):
-    """Update calibration factor"""
-    config = load_config()
-    config.setdefault("scale", {})
-    config["scale"]["calib_factor"] = data.factor
-    save_config(config)
-    return {"success": True, "factor": data.factor}
-
-@app.get("/api/scale/status")
-async def scale_status():
-    """Get scale connection status"""
-    connected = scale_serial is not None and scale_serial.is_open
-    config = load_config()
-    
-    return {
-        "connected": connected,
-        "port": config.get("scale", {}).get("port", DEFAULT_SERIAL_PORT),
-        "baud": config.get("scale", {}).get("baud", DEFAULT_BAUD_RATE)
-    }
+async def set_calibration(data: CalibrationRequest):
+    service = scale_service
+    if service is None:
+        return {"ok": False, "success": False, "reason": "service_not_initialized"}
+    result = service.calibrate(data.known_grams)
+    result["success"] = result.get("ok", False)
+    return result
 
 # ============= FOOD SCANNER =============
 
@@ -1256,7 +1309,7 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "ok",
-        "scale_connected": scale_serial is not None and scale_serial.is_open,
+        "scale_connected": scale_service is not None and scale_service.get_status().get("ok", False),
         "timestamp": datetime.now().isoformat()
     }
 

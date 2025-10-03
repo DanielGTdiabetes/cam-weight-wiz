@@ -2,6 +2,7 @@
 # (Codex: escribir archivo COMPLETO, sin "...", listo para ejecutar)
 import os
 import json
+import logging
 import subprocess
 import ipaddress
 import random
@@ -9,7 +10,6 @@ import string
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
-import serial  # keep existing behavior; ok if not present in some installs
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,6 +19,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from scale_service import HX711Service
+
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = BASE_DIR / "dist"
@@ -26,8 +28,13 @@ DIST_DIR = BASE_DIR / "dist"
 CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
 PIN_PATH = CFG_DIR / "miniweb_pin"
 CONFIG_PATH = CFG_DIR / "config.json"
-DEFAULT_SERIAL_PORT = "/dev/serial0"
-DEFAULT_BAUD_RATE = 115200
+DEFAULT_DT_PIN = 5
+DEFAULT_SCK_PIN = 6
+DEFAULT_SAMPLE_RATE = 20.0
+DEFAULT_FILTER_WINDOW = 12
+DEFAULT_CALIBRATION_FACTOR = 1.0
+
+LOG_SCALE = logging.getLogger("bascula.scale")
 
 NMCLI_BIN = Path("/usr/bin/nmcli")
 NM_CONNECTIONS_DIR = Path("/etc/NetworkManager/system-connections")
@@ -40,7 +47,7 @@ WIFI_INTERFACE = "wlan0"
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Estado global ----------
-scale_serial: Optional[serial.Serial] = None
+scale_service: Optional[HX711Service] = None
 
 # ---------- Helpers ----------
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -87,6 +94,50 @@ def _get_or_create_pin() -> str:
     pin = _gen_pin()
     _write_pin(pin)
     return pin
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        LOG_SCALE.warning("Invalid integer for %s: %s", name, value)
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        LOG_SCALE.warning("Invalid float for %s: %s", name, value)
+        return default
+
+
+def _get_scale_service() -> Optional[HX711Service]:
+    return scale_service
+
+
+def _init_scale_service() -> HX711Service:
+    dt_pin = _env_int("HX711_DT", DEFAULT_DT_PIN)
+    sck_pin = _env_int("HX711_SCK", DEFAULT_SCK_PIN)
+    sample_rate = _env_float("SAMPLE_RATE_HZ", DEFAULT_SAMPLE_RATE)
+    filter_window = _env_int("SCALE_FILTER_WINDOW", DEFAULT_FILTER_WINDOW)
+    calibration_factor = _env_float("CALIBRATION_FACTOR", DEFAULT_CALIBRATION_FACTOR)
+
+    service = HX711Service(
+        dt_pin=dt_pin,
+        sck_pin=sck_pin,
+        sample_rate_hz=sample_rate,
+        filter_window=filter_window,
+        calibration_factor=calibration_factor,
+    )
+    service.start()
+    return service
 
 
 def _get_iface_ip(iface: str) -> Optional[str]:
@@ -597,36 +648,27 @@ def _schedule_reboot(delay_minutes: int = 1) -> None:
         print(f"⚠️ No se pudo ejecutar shutdown: {exc}")
 
 
-def _load_config() -> dict:
-    cfg = _load_json(CONFIG_PATH) or {}
-    return {
-        "scale": {
-            "port": cfg.get("scale", {}).get("port", DEFAULT_SERIAL_PORT),
-            "baud": cfg.get("scale", {}).get("baud", DEFAULT_BAUD_RATE),
-        }
-    }
-
-
-# ---------- Arranque / parada báscula ----------
-async def init_scale():
-    global scale_serial
+async def init_scale() -> None:
+    global scale_service
+    if scale_service is not None:
+        return
     try:
-        sc = _load_config()["scale"]
-        scale_serial = serial.Serial(port=sc["port"], baudrate=sc["baud"], timeout=1)
-        print(f"✅ Scale connected on {sc['port']} @ {sc['baud']}")
-    except Exception as e:
-        print(f"⚠️ Scale not connected: {e}")
-        scale_serial = None
+        scale_service = _init_scale_service()
+    except Exception as exc:
+        LOG_SCALE.error("Failed to start HX711 service: %s", exc)
+        scale_service = None
 
 
-async def close_scale():
-    global scale_serial
-    if scale_serial and getattr(scale_serial, "is_open", False):
-        try:
-            scale_serial.close()
-            print("Scale connection closed")
-        except Exception:
-            pass
+async def close_scale() -> None:
+    global scale_service
+    if scale_service is None:
+        return
+    try:
+        scale_service.stop()
+    except Exception as exc:
+        LOG_SCALE.error("Failed to stop HX711 service: %s", exc)
+    finally:
+        scale_service = None
 
 
 @asynccontextmanager
@@ -644,6 +686,52 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+@app.get("/api/scale/status")
+async def api_scale_status():
+    service = _get_scale_service()
+    if service is None:
+        return {"ok": False, "reason": "service_not_initialized"}
+    return service.get_status()
+
+
+@app.get("/api/scale/read")
+async def api_scale_read():
+    service = _get_scale_service()
+    if service is None:
+        return {"ok": False, "reason": "service_not_initialized"}
+    return service.get_reading()
+
+
+@app.post("/api/scale/tare")
+async def api_scale_tare():
+    service = _get_scale_service()
+    if service is None:
+        return {"ok": False, "reason": "service_not_initialized"}
+    result = service.tare()
+    if result.get("ok"):
+        LOG_SCALE.info("Tare command processed: offset=%s", result.get("tare_offset"))
+    else:
+        LOG_SCALE.warning("Tare command failed: %s", result.get("reason"))
+    return result
+
+
+@app.post("/api/scale/calibrate")
+async def api_scale_calibrate(payload: CalibrationPayload):
+    service = _get_scale_service()
+    if service is None:
+        return {"ok": False, "reason": "service_not_initialized"}
+    result = service.calibrate(payload.known_grams)
+    if result.get("ok"):
+        LOG_SCALE.info(
+            "Calibration updated via API: factor=%s tare=%s",
+            result.get("calibration_factor"),
+            result.get("tare_offset"),
+        )
+    else:
+        LOG_SCALE.warning("Calibration failed: %s", result.get("reason"))
+    return result
+
 
 # ---------- Static SPA ----------
 if DIST_DIR.exists():
@@ -685,6 +773,10 @@ if DIST_DIR.exists():
 
 
 # ---------- Models ----------
+class CalibrationPayload(BaseModel):
+    known_grams: float
+
+
 class PinVerification(BaseModel):
     pin: str
 

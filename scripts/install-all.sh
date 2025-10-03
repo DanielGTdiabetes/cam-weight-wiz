@@ -98,6 +98,9 @@ BASCULA_RELEASES_DIR="${BASCULA_ROOT}/releases"
 BASCULA_CURRENT_LINK="${BASCULA_ROOT}/current"
 CFG_DIR="${TARGET_HOME}/.bascula"
 CFG_PATH="${CFG_DIR}/config.json"
+STATE_DIR="/var/lib/bascula"
+STATE_FILE="${STATE_DIR}/scale.json"
+LOG_DIR="/var/log/bascula"
 
 AP_SSID="${AP_SSID:-Bascula_AP}"
 AP_PASS="${AP_PASS:-bascula1234}"
@@ -157,7 +160,7 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         fonts-dejavu-core
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils sox ffmpeg
-        libzbar0 gpiod python3-rpi.gpio
+        libzbar0 gpiod python3-rpi.gpio pigpio python3-pigpio
         network-manager policykit-1 dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
@@ -199,6 +202,46 @@ fi
 if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
   fail "Falta Chromium tras la instalación"
 fi
+
+log "Configurando pigpio y persistencia de báscula..."
+if [[ "${NET_OK}" -eq 1 ]]; then
+  ensure_pkg pigpio python3-pigpio
+else
+  warn "Sin red: instala pigpio y python3-pigpio manualmente"
+fi
+
+systemctl_safe enable pigpiod
+systemctl_safe start pigpiod
+
+if getent group pigpi >/dev/null 2>&1; then
+  if ! id -nG "${TARGET_USER}" | tr ' ' '\n' | grep -q '^pigpi$'; then
+    if usermod -aG pigpi "${TARGET_USER}"; then
+      log "Usuario ${TARGET_USER} añadido al grupo pigpi"
+    else
+      warn "No se pudo añadir ${TARGET_USER} al grupo pigpi"
+    fi
+  fi
+fi
+
+mkdir -p "${STATE_DIR}"
+chown "${TARGET_USER}:${TARGET_GROUP}" "${STATE_DIR}" 2>/dev/null || true
+if [[ ! -f "${STATE_FILE}" ]]; then
+  cat > "${STATE_FILE}" <<'EOF'
+{
+  "calibration_factor": 1.0,
+  "tare_offset": 0.0
+}
+EOF
+  log "Archivo de estado de báscula inicializado en ${STATE_FILE}"
+fi
+chmod 664 "${STATE_FILE}" 2>/dev/null || true
+chown "${TARGET_USER}:${TARGET_GROUP}" "${STATE_FILE}" 2>/dev/null || true
+
+mkdir -p "${LOG_DIR}"
+touch "${LOG_DIR}/app.log"
+chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}" 2>/dev/null || true
+chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}/app.log" 2>/dev/null || true
+chmod 664 "${LOG_DIR}/app.log" 2>/dev/null || true
 
 # Ensure NetworkManager service is enabled and running
 log "[3a/20] Reinstalando NetworkManager..."
