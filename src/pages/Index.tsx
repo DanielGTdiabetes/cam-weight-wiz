@@ -58,7 +58,7 @@ const Index = () => {
 
     const verifyBackend = async () => {
       try {
-        const response = await fetch('/api/network/status', { cache: 'no-store' });
+        const response = await fetch('/api/miniweb/status', { cache: 'no-store' });
         if (!response.ok) {
           return;
         }

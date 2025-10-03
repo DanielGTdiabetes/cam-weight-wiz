@@ -26,6 +26,20 @@ wifi_active() {
   nmcli -t -f TYPE,STATE connection show --active 2>/dev/null | grep -q '^wifi:activated$'
 }
 
+# Verificar si Ethernet está conectada
+ethernet_active() {
+  local line
+  while IFS=: read -r device type state rest; do
+    if [[ -z "${device}" || -z "${type}" || -z "${state}" ]]; then
+      continue
+    fi
+    if [[ "${type}" == "ethernet" && "${state}" == connected* ]]; then
+      return 0
+    fi
+  done < <(nmcli -t -f DEVICE,TYPE,STATE device status 2>/dev/null || true)
+  return 1
+}
+
 # Verificar si AP está activo
 ap_active() {
   nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null | grep -q "^${AP_NAME}:"
@@ -119,7 +133,15 @@ main() {
       exit 1
     fi
   fi
-  
+
+  if ethernet_active; then
+    log "Ethernet activa detectada; no se activará el AP"
+    if ap_active; then
+      deactivate_ap
+    fi
+    exit 0
+  fi
+
   # Verificar conectividad
   if have_inet; then
     # Tenemos Internet, desactivar AP si está activo

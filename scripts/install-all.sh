@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Script de instalación completa para Báscula Inteligente
+# Script de instalación completa para Báscula Digital Pro (bascula-cam)
 # Raspberry Pi 5 + Bookworm Lite 64-bit
 # - Instala estructura OTA con versionado
 # - Configura HDMI (1024x600), KMS, I2S audio, UART, Camera Module 3
@@ -93,7 +93,7 @@ BOOTDIR="/boot/firmware"
 CONF="${BOOTDIR}/config.txt"
 
 log "============================================"
-log "  Instalación Completa - Báscula Inteligente"
+log "  Instalación Completa - Báscula Digital Pro"
 log "============================================"
 log "Target user      : $TARGET_USER ($TARGET_GROUP)"
 log "Target home      : $TARGET_HOME"
@@ -346,6 +346,12 @@ polkit.addRule(function(action, subject) {
       return polkit.Result.YES;
     }
     if (action.id == "org.freedesktop.NetworkManager.wifi.scan") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.wifi.share.protected") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.wifi.share.open") {
       return polkit.Result.YES;
     }
   }

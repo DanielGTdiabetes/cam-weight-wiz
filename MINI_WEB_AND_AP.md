@@ -46,8 +46,8 @@ Sistema completo de fallback WiFi con mini-web de configuración que se activa a
 - **Endpoints**:
   - `POST /api/miniweb/verify-pin` - Verificar PIN
   - `GET /api/miniweb/scan-networks` - Escanear redes WiFi
-  - `POST /api/miniweb/connect-wifi` - Conectar a red
-  - `GET /api/network/status` - Estado de red actual
+  - `POST /api/miniweb/connect` - Conectar a red (alias legacy `/api/miniweb/connect-wifi`)
+  - `GET /api/miniweb/status` - Estado de red actual (alias legacy `/api/network/status`)
   - `POST /api/network/enable-ap` - Activar modo AP
   - `POST /api/network/disable-ap` - Desactivar modo AP
 
@@ -331,14 +331,14 @@ curl http://192.168.4.1:8080/api/miniweb/scan-networks
 
 ### Conectar WiFi
 ```bash
-curl -X POST http://192.168.4.1:8080/api/miniweb/connect-wifi \
+curl -X POST http://192.168.4.1:8080/api/miniweb/connect \
   -H "Content-Type: application/json" \
   -d '{"ssid":"MiRed","password":"mipassword"}'
 ```
 
 ### Estado de Red
 ```bash
-curl http://192.168.4.1:8080/api/network/status
+curl http://192.168.4.1:8080/api/miniweb/status
 ```
 
 ---

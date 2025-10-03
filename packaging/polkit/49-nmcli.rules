@@ -9,5 +9,11 @@ polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.NetworkManager.wifi.scan") {
       return polkit.Result.YES;
     }
+    if (action.id == "org.freedesktop.NetworkManager.wifi.share.protected") {
+      return polkit.Result.YES;
+    }
+    if (action.id == "org.freedesktop.NetworkManager.wifi.share.open") {
+      return polkit.Result.YES;
+    }
   }
 });

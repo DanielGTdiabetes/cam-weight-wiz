@@ -10,11 +10,19 @@ import { logger } from "@/services/logger";
 interface WifiNetwork {
   ssid: string;
   signal: number;
+  sec: string;
+  in_use: boolean;
   secured: boolean;
 }
 
 interface ScanNetworksResponse {
-  networks?: WifiNetwork[];
+  networks?: Array<{
+    ssid: string;
+    signal?: number;
+    sec?: string;
+    in_use?: boolean;
+    secured?: boolean;
+  }>;
 }
 
 interface ApiErrorResponse {
@@ -36,7 +44,9 @@ export const MiniWebConfig = () => {
   const { toast } = useToast();
 
   const selectedNetwork = networks.find((network) => network.ssid === selectedSSID);
-  const requiresPassword = selectedNetwork?.secured ?? false;
+  const requiresPassword = selectedNetwork
+    ? selectedNetwork.secured ?? (selectedNetwork.sec && selectedNetwork.sec.toUpperCase() !== 'NONE')
+    : false;
 
   useEffect(() => {
     const fetchPin = async () => {
@@ -101,7 +111,30 @@ export const MiniWebConfig = () => {
       const response = await fetch('/api/miniweb/scan-networks');
       if (response.ok) {
         const data = (await response.json()) as ScanNetworksResponse;
-        setNetworks(Array.isArray(data.networks) ? data.networks : []);
+        if (Array.isArray(data.networks)) {
+          const mapped = data.networks.map((net) => ({
+            ssid: net.ssid,
+            signal: typeof net.signal === 'number' ? net.signal : 0,
+            sec: net.sec ?? '',
+            in_use: Boolean(net.in_use),
+            secured:
+              typeof net.secured === 'boolean'
+                ? net.secured
+                : Boolean(net.sec && net.sec.toUpperCase() !== 'NONE'),
+          }));
+
+          mapped.sort((a, b) => b.signal - a.signal);
+          setNetworks(mapped);
+
+          if (!selectedSSID) {
+            const active = mapped.find((net) => net.in_use);
+            if (active) {
+              setSelectedSSID(active.ssid);
+            }
+          }
+        } else {
+          setNetworks([]);
+        }
       } else {
         const errorBody = (await response.json().catch(() => null)) as ApiErrorResponse | null;
         const errorDetail =
@@ -163,13 +196,14 @@ export const MiniWebConfig = () => {
 
     setIsConnecting(true);
     try {
-      const response = await fetch('/api/miniweb/connect-wifi', {
+      const response = await fetch('/api/miniweb/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ssid: selectedSSID,
           password: requiresPassword ? password : '',
           secured: requiresPassword,
+          sec: selectedNetwork?.sec ?? undefined,
         }),
       });
 
@@ -313,21 +347,29 @@ export const MiniWebConfig = () => {
                     }`}
                   >
                     <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <Wifi className="h-5 w-5" />
-                        <div>
-                          <p className="font-semibold">{network.ssid}</p>
-                          <p className="text-sm text-muted-foreground">
-                            Señal: {network.signal}%
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {network.secured && <Lock className="h-4 w-4" />}
-                        {selectedSSID === network.ssid && (
-                          <Check className="h-5 w-5 text-primary" />
-                        )}
-                      </div>
+                <div className="flex items-center gap-3">
+                  <Wifi className={`h-5 w-5 ${network.in_use ? 'text-primary' : ''}`} />
+                  <div>
+                    <p className="font-semibold">{network.ssid}</p>
+                    <p className="text-sm text-muted-foreground">
+                      Señal: {network.signal}%
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1 uppercase tracking-wide">
+                      {network.sec && network.sec.toUpperCase() !== 'NONE' ? network.sec : 'Abierta'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {network.in_use && (
+                    <span className="text-xs font-semibold uppercase text-primary border border-primary/40 rounded-full px-2 py-0.5">
+                      En uso
+                    </span>
+                  )}
+                  {network.secured && <Lock className="h-4 w-4" />}
+                  {selectedSSID === network.ssid && (
+                    <Check className="h-5 w-5 text-primary" />
+                  )}
+                </div>
                     </div>
                   </button>
                 ))
