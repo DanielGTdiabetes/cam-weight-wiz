@@ -210,15 +210,18 @@ describe('BarcodeScannerModal', () => {
 
     await waitFor(() => expect(apiMocks.scanBarcode).toHaveBeenCalledWith('7501035194805'));
 
-    expect(await screen.findByText('Manzana Gala')).toBeInTheDocument();
+    const nameInput = await screen.findByLabelText(/nombre del alimento/i);
+    expect(nameInput).toHaveValue('Manzana Gala');
     expect(screen.getByText('Código de barras')).toBeInTheDocument();
     expect(screen.getByText('Confianza 90%')).toBeInTheDocument();
 
-    const nutritionCard = screen.getByRole('heading', { name: /manzana gala/i }).closest('div');
-    expect(nutritionCard).toBeTruthy();
-    expect(screen.getByText('15 g / 100 g')).toBeInTheDocument();
+    const perHundredCard = screen.getByRole('heading', { name: /por 100 g/i }).closest('div');
+    expect(perHundredCard).toBeTruthy();
+    expect(within(perHundredCard as HTMLElement).getByText('15 g')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /continuar a pesar/i }));
+    const continueButton = screen.getByRole('button', { name: /continuar a pesar/i });
+    await waitFor(() => expect(continueButton).toBeEnabled());
+    await user.click(continueButton);
 
     expect(await screen.findByText('150 g')).toBeInTheDocument();
     const nutritionSummary = screen.getByRole('heading', { name: /nutrición estimada/i }).closest('div');
@@ -380,9 +383,46 @@ describe('BarcodeScannerModal', () => {
 
     await waitFor(() => expect(apiMocks.analyzeFoodPhoto).toHaveBeenCalled());
 
-    expect(await screen.findByText('Ensalada mixta')).toBeInTheDocument();
+    const nameInput = await screen.findByLabelText(/nombre del alimento/i);
+    expect(nameInput).toHaveValue('Ensalada mixta');
     expect(screen.getByText('IA')).toBeInTheDocument();
     expect(screen.getByText('Confianza 95%')).toBeInTheDocument();
+
+    const weightInput = screen.getByLabelText(/peso de la porción/i);
+    await user.clear(weightInput);
+    await user.type(weightInput, '150');
+
+    const totalCard = screen.getByRole('heading', { name: /porción total/i }).closest('div');
+    await waitFor(() =>
+      expect(
+        within(totalCard as HTMLElement).getByText((content) => content.trim() === '15 g')
+      ).toBeInTheDocument()
+    );
+
+    const perTotalButton = screen.getByRole('button', { name: /por total/i });
+    await user.click(perTotalButton);
+
+    const carbsInput = screen.getByLabelText(/carbohidratos/i);
+    await waitFor(() => expect(carbsInput).toHaveValue(15));
+
+    await user.clear(carbsInput);
+    await user.type(carbsInput, '18');
+
+    const perHundredButton = screen.getByRole('button', { name: /por 100 g/i });
+    await user.click(perHundredButton);
+    await waitFor(() => expect(carbsInput).toHaveValue(12));
+    await waitFor(() =>
+      expect(
+        within(totalCard as HTMLElement).getByText((content) => content.trim() === '18 g')
+      ).toBeInTheDocument()
+    );
+
+    const continueButton = screen.getByRole('button', { name: /continuar a pesar/i });
+    await waitFor(() => expect(continueButton).toBeDisabled());
+
+    const confirmCheckbox = screen.getByRole('checkbox', { name: /confirma carbs estimados/i });
+    await user.click(confirmCheckbox);
+    await waitFor(() => expect(continueButton).toBeEnabled());
   });
 
   it('vuelve al escaneo de código de barras cuando la IA no detecta el alimento', async () => {
