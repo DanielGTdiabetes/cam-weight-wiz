@@ -244,7 +244,7 @@ export const RecipesView = () => {
 
           <div className="space-y-4">
             <Textarea
-              placeholder="Ejemplo: "Quiero preparar pasta con salsa de tomate""
+              placeholder={'Ejemplo: "Quiero preparar pasta con salsa de tomate"'}
               value={userPrompt}
               onChange={(event) => setUserPrompt(event.target.value)}
               className="min-h-32 text-lg"

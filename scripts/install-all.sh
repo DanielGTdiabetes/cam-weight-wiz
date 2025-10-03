@@ -30,13 +30,51 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Detect systemd availability early
+HAS_SYSTEMD=1
+if [[ ! -d /run/systemd/system ]]; then
+  warn "systemd no está activo (PID 1); se omitirán comandos systemctl"
+  HAS_SYSTEMD=0
+fi
+
+systemctl_safe() {
+  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+    if ! systemctl "$@"; then
+      warn "systemctl $* falló"
+    fi
+  else
+    warn "systemd no disponible: systemctl $* omitido"
+  fi
+}
+
 # --- Configuration variables ---
 TARGET_USER="${SUDO_USER:-pi}"
+TARGET_ENTRY="$(getent passwd "$TARGET_USER" || true)"
+if [[ -z "${TARGET_ENTRY}" ]]; then
+  warn "Usuario ${TARGET_USER} no encontrado; usando $(id -un)"
+  TARGET_USER="$(id -un)"
+  TARGET_ENTRY="$(getent passwd "$TARGET_USER" || true)"
+fi
+
 TARGET_GROUP="${TARGET_USER}"
-TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
+if [[ -n "${TARGET_ENTRY}" ]]; then
+  TARGET_GID="$(printf '%s' "${TARGET_ENTRY}" | cut -d: -f4)"
+  TARGET_HOME="$(printf '%s' "${TARGET_ENTRY}" | cut -d: -f6)"
+  if [[ -n "${TARGET_GID}" ]]; then
+    TARGET_GROUP="$(getent group "${TARGET_GID}" | cut -d: -f1)"
+  fi
+else
+  TARGET_HOME="${HOME:-/root}"
+fi
+
 if [[ -z "${TARGET_HOME}" ]]; then
   err "No se pudo determinar el home de ${TARGET_USER}"
   exit 1
+fi
+
+# Asegura que el grupo existe; si el gid no se resolvió usa el del usuario
+if [[ -z "${TARGET_GROUP}" ]] || ! getent group "${TARGET_GROUP}" &>/dev/null; then
+  TARGET_GROUP="$(id -gn "${TARGET_USER}")"
 fi
 
 BASCULA_ROOT="/opt/bascula"
@@ -80,56 +118,104 @@ fi
 
 # Update system
 log "[2/20] Actualizando el sistema..."
-apt-get update -y
-apt-get upgrade -y
-log "✓ Sistema actualizado"
+if [[ "${NET_OK}" -eq 1 ]]; then
+    if ! apt-get update -y; then
+        warn "apt-get update falló; continúa con el resto de la instalación"
+    elif ! apt-get upgrade -y; then
+        warn "apt-get upgrade falló; continúa con el resto de la instalación"
+    else
+        log "✓ Sistema actualizado"
+    fi
+else
+    warn "Sin red: omitiendo apt-get update/upgrade"
+fi
 
 # Install base system packages
 log "[3/20] Instalando dependencias del sistema..."
-apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
-    python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial \
-    python3-pil python3-pil.imagetk python3-xdg \
-    x11-xserver-utils xserver-xorg xinit openbox xserver-xorg-legacy \
-    chromium unclutter fonts-dejavu-core \
-    libjpeg-dev zlib1g-dev libpng-dev \
-    alsa-utils sox ffmpeg \
-    libzbar0 gpiod python3-rpi.gpio \
-    network-manager policykit-1 dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
-
-log "✓ Dependencias base instaladas"
+if [[ "${NET_OK}" -eq 1 ]]; then
+    if apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
+        python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial \
+        python3-pil python3-pil.imagetk python3-xdg \
+        x11-xserver-utils xserver-xorg xinit openbox xserver-xorg-legacy \
+        chromium unclutter fonts-dejavu-core \
+        libjpeg-dev zlib1g-dev libpng-dev \
+        alsa-utils sox ffmpeg \
+        libzbar0 gpiod python3-rpi.gpio \
+        network-manager policykit-1 dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng; then
+        log "✓ Dependencias base instaladas"
+    else
+        warn "No se pudieron instalar todas las dependencias base"
+    fi
+else
+    warn "Sin red: omitiendo la instalación de dependencias base"
+fi
 
 # Ensure NetworkManager service is enabled and running
 log "[3a/20] Reinstalando NetworkManager..."
-apt-get install -y network-manager
-systemctl enable NetworkManager --now || true
+if [[ "${NET_OK}" -eq 1 ]]; then
+    if ! apt-get install -y network-manager; then
+        warn "No se pudo reinstalar NetworkManager"
+    fi
+else
+    warn "Sin red: omitiendo reinstalación de NetworkManager"
+fi
+systemctl_safe enable NetworkManager --now
 
 # Install camera dependencies
 log "[4/20] Instalando dependencias de cámara..."
-apt-get install -y libcamera-apps v4l-utils python3-picamera2 \
-    python3-libcamera libcamera-ipa python3-opencv
-log "✓ Dependencias de cámara instaladas"
+if [[ "${NET_OK}" -eq 1 ]]; then
+    if apt-get install -y libcamera-apps v4l-utils python3-picamera2 \
+        python3-libcamera libcamera-ipa python3-opencv; then
+        log "✓ Dependencias de cámara instaladas"
+    else
+        warn "No se pudieron instalar todas las dependencias de cámara"
+    fi
+else
+    warn "Sin red: omitiendo dependencias de cámara"
+fi
 
 # Install Node.js
 log "[5/20] Instalando Node.js..."
 if ! command -v node &> /dev/null; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-    apt-get install -y nodejs
+    if [[ "${NET_OK}" -eq 1 ]]; then
+        if curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; then
+            if apt-get install -y nodejs; then
+                log "✓ Node.js $(node --version) instalado"
+            else
+                warn "No se pudo instalar Node.js"
+            fi
+        else
+            warn "No se pudo descargar el instalador de NodeSource"
+        fi
+    else
+        warn "Sin red: omitiendo instalación de Node.js"
+    fi
+else
+    log "✓ Node.js $(node --version) instalado"
 fi
-log "✓ Node.js $(node --version) instalado"
 
 # Configure hardware permissions
 log "[6/20] Configurando permisos de hardware..."
-usermod -aG video,render,input,dialout,i2c,gpio,audio,netdev "${TARGET_USER}"
-log "✓ Usuario ${TARGET_USER} añadido a grupos necesarios"
+HARDWARE_GROUPS=(video render input dialout i2c gpio audio netdev)
+for grp in "${HARDWARE_GROUPS[@]}"; do
+  if getent group "${grp}" >/dev/null 2>&1; then
+    usermod -aG "${grp}" "${TARGET_USER}" || warn "No se pudo añadir ${TARGET_USER} al grupo ${grp}"
+  else
+    warn "Grupo ${grp} no existe en el sistema; omitiendo"
+  fi
+done
+log "✓ Usuario ${TARGET_USER} añadido a grupos disponibles"
 
 # Configure boot config
 log "[7/20] Configurando boot/config.txt..."
 
-if [[ "${SKIP_HARDWARE_CONFIG:-0}" == "1" ]]; then
+if [[ ! -f "${CONF}" ]]; then
+  warn "No se encontró ${CONF}; omitiendo configuración de arranque"
+elif [[ "${SKIP_HARDWARE_CONFIG:-0}" == "1" ]]; then
   warn "SKIP_HARDWARE_CONFIG=1, saltando modificación de config.txt"
 else
   # Limpiar configuración anterior
-  sed -i '/# --- Bascula-Cam/,/# --- Bascula-Cam (end) ---/d' "${CONF}"
+  sed -i '/# --- Bascula-Cam/,/# --- Bascula-Cam (end) ---/d' "${CONF}" || warn "No se pudo limpiar configuración previa"
 
   # Añadir configuración mínima segura por defecto
   # El usuario puede habilitar más hardware después del primer arranque exitoso
@@ -175,8 +261,9 @@ EOF
 fi
 
 # Disable Bluetooth UART
-systemctl disable --now hciuart 2>/dev/null || true
-systemctl disable --now serial-getty@ttyAMA0.service serial-getty@ttyS0.service 2>/dev/null || true
+systemctl_safe disable --now hciuart
+systemctl_safe disable --now serial-getty@ttyAMA0.service
+systemctl_safe disable --now serial-getty@ttyS0.service
 
 # Run fix-serial script
 log "Ejecutando fix-serial.sh..."
@@ -192,8 +279,12 @@ allowed_users=anybody
 needs_root_rights=yes
 EOF
 done
-chown root:root /usr/lib/xorg/Xorg || true
-chmod 4755 /usr/lib/xorg/Xorg || true
+if [[ -f /usr/lib/xorg/Xorg ]]; then
+  chown root:root /usr/lib/xorg/Xorg || warn "No se pudo ajustar propietario de Xorg"
+  chmod 4755 /usr/lib/xorg/Xorg || warn "No se pudo ajustar permisos de Xorg"
+else
+  warn "/usr/lib/xorg/Xorg no existe; omitiendo ajustes de permisos"
+fi
 echo "xserver-xorg-legacy xserver-xorg-legacy/allowed_users select Anybody" | debconf-set-selections
 DEBIAN_FRONTEND=noninteractive dpkg-reconfigure xserver-xorg-legacy || true
 log "✓ Xwrapper configurado"
@@ -279,7 +370,11 @@ polkit.addRule(function(action, subject) {
   }
 });
 EOF
-systemctl restart polkit || systemctl restart polkitd || true
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  systemctl restart polkit 2>/dev/null || systemctl restart polkitd 2>/dev/null || warn "No se pudo reiniciar polkit"
+else
+  warn "systemd no disponible: omitiendo reinicio de polkit"
+fi
 log "✓ Polkit configurado"
 
 # Create config.json
@@ -363,10 +458,18 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BI
 export PIP_INDEX_URL="https://www.piwheels.org/simple"
 export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
 
-${VENV_PIP} install --upgrade pip wheel setuptools
-${VENV_PIP} install fastapi 'uvicorn[standard]' websockets python-multipart \
+if [[ "${NET_OK}" -eq 1 ]]; then
+  if ! ${VENV_PIP} install --upgrade pip wheel setuptools; then
+    warn "No se pudo actualizar pip/wheel/setuptools"
+  fi
+  if ! ${VENV_PIP} install fastapi 'uvicorn[standard]' websockets python-multipart \
     pyserial opencv-python pillow pyzbar numpy aiofiles httpx \
-    pytesseract rapidocr-onnxruntime
+    pytesseract rapidocr-onnxruntime; then
+    warn "No se pudieron instalar todas las dependencias de Python"
+  fi
+else
+  warn "Sin red: omitiendo instalación de dependencias Python"
+fi
 
 log "✓ Entorno Python configurado"
 
@@ -430,6 +533,8 @@ log "[13b/20] Configurando X735 v3 (gestión de alimentación y ventilador)..."
 install -d -m 0755 /opt
 if [[ ! -d /opt/x735-script/.git && "${NET_OK}" = "1" ]]; then
   git clone https://github.com/geekworm-com/x735-script /opt/x735-script || warn "No se pudo clonar x735-script"
+elif [[ ! -d /opt/x735-script/.git ]]; then
+  warn "Sin red: no se puede clonar x735-script"
 fi
 
 if [[ -d /opt/x735-script ]]; then
@@ -453,8 +558,8 @@ Restart=on-failure
 RestartSec=5
 EOF
 
-  systemctl daemon-reload || true
-  systemctl enable x735-fan.service x735-pwr.service 2>/dev/null || true
+  systemctl_safe daemon-reload
+  systemctl_safe enable x735-fan.service x735-pwr.service
   
   # Añadir alias para apagar el sistema desde la X735
   cp -f ./xSoft.sh /usr/local/bin/ 2>/dev/null || true
@@ -490,7 +595,7 @@ if [[ -z "${PWMCHIP}" ]]; then
 fi
 
 # Clonar scripts si no existen
-if [[ ! -d /opt/x735-script/.git ]]; then
+if [[ ! -d /opt/x735-script/.git && "${NET_OK}" = "1" ]]; then
   git clone https://github.com/geekworm-com/x735-script /opt/x735-script || true
 fi
 
@@ -527,8 +632,8 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable x735-ensure.service || true
+systemctl_safe daemon-reload
+systemctl_safe enable x735-ensure.service
 
 cd "${BASCULA_CURRENT_LINK}"
 log "✓ X735 v3 power management configurado"
@@ -581,9 +686,9 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable ocr-service.service
-systemctl restart ocr-service.service
+systemctl_safe daemon-reload
+systemctl_safe enable ocr-service.service
+systemctl_safe restart ocr-service.service
 log "✓ Servicio OCR configurado"
 
 # Setup Frontend (build if node_modules exists)
@@ -597,8 +702,14 @@ fi
 
 # Install and configure Nginx
 log "[16/20] Instalando y configurando Nginx..."
-apt-get install -y nginx
-systemctl enable nginx
+if [[ "${NET_OK}" -eq 1 ]]; then
+  if ! apt-get install -y nginx; then
+    warn "No se pudo instalar Nginx"
+  fi
+else
+  warn "Sin red: omitiendo instalación de Nginx"
+fi
+systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 cat > /etc/nginx/sites-available/bascula <<EOF
 server {
@@ -640,9 +751,9 @@ server {
 EOF
 ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
 rm -f /etc/nginx/sites-enabled/default
-nginx -t
-systemctl restart nginx
-systemctl enable nginx
+nginx -t || warn "Configuración de Nginx con errores"
+systemctl_safe restart nginx
+systemctl_safe enable nginx
 log "✓ Nginx configurado"
 
 # Create mini-web backend service
@@ -656,8 +767,8 @@ if [[ ! -f "${SYSTEMD_SRC}" ]]; then
 fi
 
 install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
-systemctl daemon-reload
-systemctl enable --now bascula-miniweb.service
+systemctl_safe daemon-reload
+systemctl_safe enable --now bascula-miniweb.service
 log "✓ Mini-web backend configurado"
 
 # Setup UI kiosk service
@@ -744,9 +855,9 @@ EOF
   log "✓ bascula-app.service creado por defecto"
 fi
 
-systemctl daemon-reload
-systemctl disable getty@tty1.service || true
-systemctl enable bascula-app.service
+systemctl_safe daemon-reload
+systemctl_safe disable getty@tty1.service
+systemctl_safe enable bascula-app.service
 log "✓ UI kiosk configurado"
 
 # Setup tmpfiles
@@ -798,5 +909,9 @@ echo "  say.sh 'Hola'    # probar voz"
 echo "  x735off          # apagar el sistema de forma segura"
 echo ""
 log "Instalación finalizada"
-systemctl status bascula-miniweb --no-pager -l || true
-ss -ltnp | grep 8080 || true
+systemctl_safe status bascula-miniweb --no-pager -l
+if command -v ss >/dev/null 2>&1; then
+  ss -ltnp | grep 8080 || true
+else
+  warn "Herramienta 'ss' no disponible; omitiendo comprobación de puertos"
+fi
