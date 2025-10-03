@@ -1096,12 +1096,24 @@ async def ws_scale(websocket: WebSocket):
             else:
                 await websocket.send_json({"ok": False, **data})
 
+            # Ritmo de emisión (fluido)
             cfg = _load_config()
-            try:
-                sr = float(cfg.get("scale", {}).get("sample_rate_hz", 20.0))
-            except Exception:
-                sr = 20.0
-            interval = max(0.05, min(0.2, 1.0 / sr if sr > 0 else 0.1))
+            scale_cfg = cfg.get("scale", {}) if isinstance(cfg.get("scale"), dict) else {}
+
+            def _as_float(v, default):
+                try:
+                    return float(v)
+                except Exception:
+                    return default
+
+            # Permitir override específico para WS
+            ws_rate_hz = _as_float(scale_cfg.get("ws_rate_hz"), None)
+            sample_rate_hz = _as_float(scale_cfg.get("sample_rate_hz"), 20.0)
+            emit_hz = ws_rate_hz if (ws_rate_hz and ws_rate_hz > 0) else sample_rate_hz
+
+            # Intervalo entre 0.03s (≈33 Hz) y 0.2s (5 Hz)
+            interval = 1.0 / emit_hz if emit_hz > 0 else 0.1
+            interval = max(0.03, min(0.2, interval))
             await asyncio.sleep(interval)
 
     except WebSocketDisconnect:
