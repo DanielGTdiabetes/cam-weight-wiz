@@ -42,6 +42,7 @@ describe("food scanner contract", () => {
       proteins: 0.68,
       fats: 0.12,
       glycemicIndex: 44,
+      kcal: 53.21,
       confidence: 0.82,
       avgColor: { r: 120, g: 85, b: 60 },
     });
@@ -84,6 +85,7 @@ describe("food scanner contract", () => {
     expect(item.proteins).toBe(0.68);
     expect(item.fats).toBe(0.12);
     expect(item.glycemicIndex).toBe(44);
+    expect(item.kcal).toBe(53.21);
     expect(item.source).toBe("camera");
   });
 
@@ -95,5 +97,6 @@ describe("food scanner contract", () => {
     expect(snapshot.proteins).toBe(1.36);
     expect(snapshot.fats).toBe(0.25);
     expect(snapshot.glycemicIndex).toBe(44);
+    expect(snapshot.kcal).toBe(106.45);
   });
 });
