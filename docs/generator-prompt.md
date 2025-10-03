@@ -16,29 +16,31 @@ Quiero que actualices la vista de la báscula para que utilice el hook de WebSoc
 
 1. Importa el cliente existente con `import { api } from '@/services/api';`.
 2. Llama al servicio disponible mediante `await api.scanBarcode(codigoBarras);` en lugar de funciones inexistentes como `fetchFatSecret`.
-3. El servicio devuelve un objeto `FoodAnalysis` con la siguiente forma:
+3. El servicio devuelve un objeto `FoodAnalysis` real del repositorio con la siguiente forma y tipos:
    - `name`: nombre del producto detectado.
    - `confidence`: confianza opcional del reconocimiento.
    - `nutrition`: objeto con `carbs`, `proteins`, `fats` e `glycemic_index`.
-4. Asegúrate de que el flujo describa cómo presentar estos datos en la UI (por ejemplo, rellenar la tarjeta del alimento, actualizar totales y mostrar la confianza si está disponible).
+4. Asegúrate de que el flujo describa cómo presentar estos datos en la UI (por ejemplo, rellenar la tarjeta del alimento, actualizar totales, recalcular macros agregados y mostrar la confianza si está disponible).
 5. Gestiona errores y estados de carga usando los mecanismos existentes (spinners, toasts o mensajes) explicando claramente cómo se conectan al llamado de `api.scanBarcode`.
 
 #### Flujo recomendado para `api.scanBarcode`
 
 1. Validar o solicitar el código de barras.
 2. Mostrar un indicador de carga y deshabilitar acciones repetidas mientras se espera la respuesta.
-3. Ejecutar `const analysis = await api.scanBarcode(code);`.
-4. Con la respuesta:
-   - Actualiza la lista de alimentos con `analysis.name`.
-   - Usa `analysis.nutrition` para calcular y reflejar macronutrientes e índice glucémico.
-   - Si `analysis.confidence` existe, inclúyela en la descripción o en un badge informativo.
-5. Si la petición falla, captura el error y muestra un mensaje adecuado (toast o alerta) indicando que no se pudo obtener la información del código.
+3. Ejecutar `const analysis = await api.scanBarcode(code);` y envolver la llamada en `try/catch` para capturar errores del servicio.
+4. Con la respuesta del backend, detalla explícitamente cómo mapear cada campo real:
+   - Desestructura `name`, `confidence` y `nutrition` (`carbs`, `proteins`, `fats`, `glycemic_index`).
+   - Actualiza la lista de alimentos o el estado correspondiente con un nuevo objeto que combine estos datos con metainformación local (por ejemplo, peso escaneado o timestamp).
+   - Usa los valores de `nutrition` para recalcular totales, porcentajes o indicadores de la UI; documenta cómo se guardan en estado y cómo se muestran.
+   - Si `confidence` existe, muéstrala en la UI (badge, texto secundario) e indica qué formato utilizar (por ejemplo, porcentaje redondeado).
+   - Guarda la respuesta en `localStorage` si el flujo requiere persistencia (utilizando las utilidades existentes en `storage`).
+5. Si la petición falla, captura el error y muestra un mensaje adecuado (toast o alerta) indicando que no se pudo obtener la información del código, además de restablecer cualquier estado temporal (spinners, botones deshabilitados).
 6. Restablece el estado de carga independientemente del resultado.
 
 ### Notas sobre FatSecret
 
-- Solo utiliza FatSecret si el requisito lo especifica. En ese caso, indica explícitamente en el prompt cómo crear y configurar el cliente antes de usarlo (por ejemplo, instanciando un `FatSecretClient` con claves y tokens válidos o creando un helper `createFatSecretClient` que gestione la autenticación).
-- Deja claro que cualquier uso posterior del cliente debe partir de esa instancia configurada; no invoques funciones como `fetchFatSecret` sin haber creado previamente dicho cliente.
+- Solo utiliza FatSecret si el requisito lo especifica. En ese caso, indica explícitamente en el prompt cómo crear y configurar el cliente antes de usarlo (por ejemplo, instanciando un `FatSecretClient` con claves y tokens válidos o creando un helper `createFatSecretClient` que gestione la autenticación) **antes** de realizar cualquier llamada.
+- Deja claro que cualquier uso posterior del cliente debe partir de esa instancia configurada; no invoques funciones como `fetchFatSecret` sin haber creado previamente dicho cliente y sin pasar la configuración necesaria.
 
 ## Contexto adicional
 
