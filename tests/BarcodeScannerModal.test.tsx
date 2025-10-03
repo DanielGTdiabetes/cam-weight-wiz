@@ -426,7 +426,7 @@ describe('BarcodeScannerModal', () => {
   });
 
   it('vuelve al escaneo de código de barras cuando la IA no detecta el alimento', async () => {
-    const COOLDOWN_MS = 15_000;
+    const COOLDOWN_MS = 20_000;
     let currentTime = Date.now();
     const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
@@ -455,7 +455,7 @@ describe('BarcodeScannerModal', () => {
   });
 
   it('cambia a código de barras cuando la confianza de la IA es baja', async () => {
-    const COOLDOWN_MS = 15_000;
+    const COOLDOWN_MS = 20_000;
     let currentTime = Date.now();
     const dateSpy = vi.spyOn(Date, 'now').mockImplementation(() => currentTime);
 
@@ -510,9 +510,7 @@ describe('BarcodeScannerModal', () => {
 
     expect(await screen.findByText(/apunta al alimento y espera/i)).toBeInTheDocument();
 
-    await act(async () => {
-      vi.advanceTimersByTime(10_000);
-    });
+    vi.advanceTimersByTime(10_000);
 
     await waitFor(() =>
       expect(toastMock).toHaveBeenCalledWith(expect.objectContaining({ title: 'Tiempo agotado' }))
