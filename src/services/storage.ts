@@ -74,6 +74,8 @@ export interface ScannerHistoryEntry {
   portionWeight?: number;
   photo?: string;
   timestamp: string;
+  id?: string;
+  capturedAt?: string;
 }
 
 export type ScannerRecordInput = Omit<ScannerHistoryEntry, 'timestamp'> & {
@@ -175,11 +177,27 @@ const toScannerHistoryEntry = (value: unknown): ScannerHistoryEntry | null => {
     ? entry.kcalPer100g
     : carbsPer100g * 4 + proteinsPer100g * 4 + fatsPer100g * 9;
 
-  const timestamp = typeof entry.timestamp === 'string'
-    ? entry.timestamp
-    : typeof entry.timestamp === 'number'
-      ? new Date(entry.timestamp).toISOString()
-      : new Date().toISOString();
+  const timestampSource = (() => {
+    if (typeof entry.timestamp === 'string') {
+      return entry.timestamp;
+    }
+
+    if (typeof entry.timestamp === 'number') {
+      return new Date(entry.timestamp).toISOString();
+    }
+
+    if (typeof entry.capturedAt === 'string') {
+      return entry.capturedAt;
+    }
+
+    if (typeof entry.capturedAt === 'number') {
+      return new Date(entry.capturedAt).toISOString();
+    }
+
+    return new Date().toISOString();
+  })();
+
+  const timestamp = timestampSource;
 
   const normalised: ScannerHistoryEntry = {
     name,
@@ -195,6 +213,16 @@ const toScannerHistoryEntry = (value: unknown): ScannerHistoryEntry | null => {
     source: normaliseScannerSource(entry.source),
     timestamp,
   };
+
+  if (typeof entry.id === 'string' && entry.id.length > 0) {
+    normalised.id = entry.id;
+  }
+
+  if (typeof entry.capturedAt === 'string') {
+    normalised.capturedAt = entry.capturedAt;
+  } else if (typeof entry.capturedAt === 'number') {
+    normalised.capturedAt = new Date(entry.capturedAt).toISOString();
+  }
 
   if (typeof entry.kcal === 'number') {
     normalised.kcal = entry.kcal;
