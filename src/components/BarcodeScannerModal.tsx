@@ -399,7 +399,7 @@ export function BarcodeScannerModal({
 
   const ensureCooldown = useCallback(() => {
     const now = Date.now();
-    const currentCooldown = cooldownUntilRef.current ?? cooldownUntil;
+    const currentCooldown = cooldownUntilRef.current;
     if (currentCooldown && now < currentCooldown) {
       const remaining = Math.ceil((currentCooldown - now) / 1000);
       toast({
@@ -413,7 +413,7 @@ export function BarcodeScannerModal({
     cooldownUntilRef.current = nextCooldown;
     setCooldownUntil(nextCooldown);
     return true;
-  }, [cooldownUntil, toast]);
+  }, [toast]);
 
   const startBarcodeScanning = useCallback(async () => {
     if (attemptCount >= MAX_ATTEMPTS) {
