@@ -87,7 +87,7 @@ const manualSchema = z.object({
 const MAX_ATTEMPTS = 3;
 const BARCODE_TIMEOUT_SECONDS = 10;
 const AI_TIMEOUT_SECONDS = 10;
-const SCAN_COOLDOWN_MS = 15_000;
+const SCAN_COOLDOWN_MS = 20_000;
 
 type ManualFormValues = z.infer<typeof manualSchema>;
 
@@ -292,6 +292,7 @@ export function BarcodeScannerModal({
   const aiAbortRef = useRef(false);
   const initialFocusRef = useRef<HTMLButtonElement>(null);
   const previousWeightRef = useRef<number | null>(null);
+  const aiRemainingRef = useRef<number>(AI_TIMEOUT_SECONDS);
 
   const isClient = typeof window !== 'undefined';
   const speechRecognitionClass: SpeechRecognitionConstructor | null = isClient
@@ -797,8 +798,10 @@ export function BarcodeScannerModal({
     fallbackToAssistiveModes,
   ]);
 
-  const captureAndAnalyze = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current || aiAbortRef.current) return;
+  const captureAndAnalyze = useCallback(() => {
+    if (!videoRef.current || !canvasRef.current || aiAbortRef.current) {
+      return;
+    }
 
     if (autoCaptureTimeoutRef.current) {
       clearTimeout(autoCaptureTimeoutRef.current);
@@ -812,7 +815,9 @@ export function BarcodeScannerModal({
     canvas.height = video.videoHeight;
 
     const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    if (!ctx) {
+      return;
+    }
 
     ctx.drawImage(video, 0, 0);
     const imageBase64 = canvas.toDataURL('image/jpeg', 0.8);
@@ -821,104 +826,104 @@ export function BarcodeScannerModal({
     setLoading(true);
     setStatusMessage('Analizando imagen con IA');
 
-    try {
-      const result = await api.analyzeFoodPhoto(imageBase64);
+    api
+      .analyzeFoodPhoto(imageBase64)
+      .then((result) => {
+        if (aiAbortRef.current) {
+          return;
+        }
 
-      if (aiAbortRef.current) {
-        return;
-      }
+        if (!result || result.confidence < 0.7) {
+          let attemptsAfterIncrement = 0;
+          setAttemptCount((c) => {
+            const next = c + 1;
+            attemptsAfterIncrement = next;
+            return next;
+          });
 
-      if (!result || result.confidence < 0.7) {
+          if (attemptsAfterIncrement >= MAX_ATTEMPTS) {
+            fallbackToAssistiveModes('Detección IA incierta, usa voz o código de barras', {
+              title: 'Detección IA incierta',
+              description: 'Usa voz o código de barras para continuar',
+              variant: 'destructive',
+            });
+            return;
+          }
+
+          toast({
+            title: 'Detección IA incierta, probando barcode',
+            description: 'Intenta escanear el código de barras',
+          });
+          aiAbortRef.current = true;
+          cleanup();
+          setScanMode('barcode');
+          resetCooldown();
+          startBarcodeScanning();
+          return;
+        }
+
+        const inferredKcal =
+          result.kcalPer100g ?? Math.round(result.carbsPer100g * 4 + (result.fatsPer100g || 0) * 9);
+
+        const aiRawGlycemicIndex =
+          'glycemicIndex' in result && typeof (result as { glycemicIndex?: number }).glycemicIndex === 'number'
+            ? (result as { glycemicIndex?: number }).glycemicIndex
+            : undefined;
+
+        const aiProduct: ProductData = {
+          name: result.name,
+          carbsPer100g: result.carbsPer100g,
+          proteinsPer100g: result.proteinsPer100g || 0,
+          fatsPer100g: result.fatsPer100g || 0,
+          kcalPer100g: inferredKcal,
+          glycemicIndex: Math.round(aiRawGlycemicIndex ?? 50),
+          confidence: result.confidence,
+          source: 'ai',
+          photo: imageBase64,
+          portionWeight: 100,
+        };
+
+        setProductData(aiProduct);
+        setStatusMessage(`Reconocido: ${result.name} (confianza ${(result.confidence * 100).toFixed(0)}%)`);
+        setPhase('preview');
+
+        cleanup();
+
+        logger.info('AI analysis successful', { name: result.name, confidence: result.confidence });
+      })
+      .catch((error) => {
+        logger.error('AI analysis failed:', error);
         let attemptsAfterIncrement = 0;
         setAttemptCount((c) => {
           const next = c + 1;
           attemptsAfterIncrement = next;
           return next;
         });
-
         if (attemptsAfterIncrement >= MAX_ATTEMPTS) {
-          fallbackToAssistiveModes('Detección IA incierta, usa voz o código de barras', {
-            title: 'Detección IA incierta',
+          fallbackToAssistiveModes('Error en análisis IA, usa voz o código de barras', {
+            title: 'Error en análisis IA',
             description: 'Usa voz o código de barras para continuar',
             variant: 'destructive',
           });
-          return;
+        } else {
+          toast({
+            title: 'Error en análisis IA',
+            description: 'Intenta de nuevo o usa código de barras',
+            variant: 'destructive',
+          });
+          aiAbortRef.current = true;
+          cleanup();
+          setPhase('fallback');
         }
-
-        toast({
-          title: 'Detección IA incierta, probando barcode',
-          description: 'Intenta escanear el código de barras',
-        });
-        aiAbortRef.current = true;
-        cleanup();
-        setScanMode('barcode');
-        resetCooldown();
-        startBarcodeScanning();
-        return;
-      }
-
-      const inferredKcal =
-        result.kcalPer100g ?? Math.round(result.carbsPer100g * 4 + (result.fatsPer100g || 0) * 9);
-
-      const aiRawGlycemicIndex =
-        'glycemicIndex' in result && typeof (result as { glycemicIndex?: number }).glycemicIndex === 'number'
-          ? (result as { glycemicIndex?: number }).glycemicIndex
-          : undefined;
-
-      const aiProduct: ProductData = {
-        name: result.name,
-        carbsPer100g: result.carbsPer100g,
-        proteinsPer100g: result.proteinsPer100g || 0,
-        fatsPer100g: result.fatsPer100g || 0,
-        kcalPer100g: inferredKcal,
-        glycemicIndex: Math.round(aiRawGlycemicIndex ?? 50),
-        confidence: result.confidence,
-        source: 'ai',
-        photo: imageBase64,
-        portionWeight: 100,
-      };
-
-      setProductData(aiProduct);
-      setStatusMessage(`Reconocido: ${result.name} (confianza ${(result.confidence * 100).toFixed(0)}%)`);
-      setPhase('preview');
-
-      cleanup();
-
-      logger.info('AI analysis successful', { name: result.name, confidence: result.confidence });
-    } catch (error) {
-      logger.error('AI analysis failed:', error);
-      let attemptsAfterIncrement = 0;
-      setAttemptCount((c) => {
-        const next = c + 1;
-        attemptsAfterIncrement = next;
-        return next;
+      })
+      .finally(() => {
+        setLoading(false);
       });
-      if (attemptsAfterIncrement >= MAX_ATTEMPTS) {
-        fallbackToAssistiveModes('Error en análisis IA, usa voz o código de barras', {
-          title: 'Error en análisis IA',
-          description: 'Usa voz o código de barras para continuar',
-          variant: 'destructive',
-        });
-      } else {
-        toast({
-          title: 'Error en análisis IA',
-          description: 'Intenta de nuevo o usa código de barras',
-          variant: 'destructive',
-        });
-        aiAbortRef.current = true;
-        cleanup();
-        setPhase('fallback');
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [
-    toast,
-    cleanup,
-    startBarcodeScanning,
-    resetCooldown,
-    fallbackToAssistiveModes,
-  ]);
+  }, [toast, cleanup, startBarcodeScanning, resetCooldown, fallbackToAssistiveModes]);
+
+  const handleManualCapture = useCallback(() => {
+    void captureAndAnalyze();
+  }, [captureAndAnalyze]);
 
   const startAIScanning = useCallback(async () => {
     if (attemptCount >= MAX_ATTEMPTS) {
@@ -951,18 +956,16 @@ export function BarcodeScannerModal({
         await videoRef.current.play();
       }
 
-      const aiStart = Date.now();
-      const timeoutMs = AI_TIMEOUT_SECONDS * 1000;
+      aiRemainingRef.current = AI_TIMEOUT_SECONDS;
 
       if (countdownRef.current) {
         clearInterval(countdownRef.current);
       }
 
       countdownRef.current = setInterval(() => {
-        const elapsed = Date.now() - aiStart;
-        const remaining = Math.max(timeoutMs - elapsed, 0);
-        const progress = Math.max(0, Math.round((remaining / timeoutMs) * 100));
-        setScanProgress(progress);
+        aiRemainingRef.current = Math.max(0, aiRemainingRef.current - 1);
+        const remaining = aiRemainingRef.current;
+        setScanProgress(Math.max(0, Math.round((remaining / AI_TIMEOUT_SECONDS) * 100)));
 
         if (remaining <= 0) {
           if (countdownRef.current) {
@@ -980,7 +983,7 @@ export function BarcodeScannerModal({
       }, 1000);
 
       autoCaptureTimeoutRef.current = setTimeout(() => {
-        captureAndAnalyze();
+        void captureAndAnalyze();
       }, 5000);
     } catch (error) {
       logger.error('Camera access error:', error);
@@ -1430,7 +1433,7 @@ export function BarcodeScannerModal({
                 />
                 <canvas ref={canvasRef} className="hidden" />
                 <div className="flex gap-2">
-                  <Button onClick={captureAndAnalyze} disabled={loading} className="flex-1">
+                  <Button onClick={handleManualCapture} disabled={loading} className="flex-1">
                     <ImagePlus className="mr-2 h-4 w-4" aria-hidden="true" />
                     {loading ? 'Analizando...' : 'Capturar Ahora'}
                   </Button>
