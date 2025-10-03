@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from scale_service import HX711Service
+from backend.scale_service import HX711Service
 
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -49,6 +49,10 @@ CFG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Estado global ----------
 scale_service: Optional[HX711Service] = None
+
+# ---------- Modelos ----------
+class CalibrationPayload(BaseModel):
+    known_grams: float
 
 # ---------- Helpers ----------
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -771,11 +775,6 @@ if DIST_DIR.exists():
     @app.get("/config", response_class=FileResponse)
     async def config_index():
         return DIST_DIR / "index.html"
-
-
-# ---------- Models ----------
-class CalibrationPayload(BaseModel):
-    known_grams: float
 
 
 class PinVerification(BaseModel):
