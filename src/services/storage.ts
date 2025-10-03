@@ -96,6 +96,21 @@ interface StorageMigrationData {
   history?: WeightRecord[];
 }
 
+const isScannerSource = (value: unknown): value is ScannerSource =>
+  value === 'barcode' || value === 'ai' || value === 'manual';
+
+const normaliseScannerSource = (value: unknown): ScannerSource => {
+  if (isScannerSource(value)) {
+    return value;
+  }
+
+  if (value === 'camera') {
+    return 'ai';
+  }
+
+  return 'manual';
+};
+
 const isScannerHistoryEntry = (value: unknown): value is ScannerHistoryEntry => {
   if (!value || typeof value !== 'object') {
     return false;
@@ -111,8 +126,93 @@ const isScannerHistoryEntry = (value: unknown): value is ScannerHistoryEntry => 
     typeof entry.proteinsPer100g === 'number' &&
     typeof entry.fatsPer100g === 'number' &&
     typeof entry.kcalPer100g === 'number' &&
-    typeof entry.source === 'string'
+    isScannerSource(entry.source)
   );
+};
+
+const toScannerHistoryEntry = (value: unknown): ScannerHistoryEntry | null => {
+  if (isScannerHistoryEntry(value)) {
+    return value;
+  }
+
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const entry = value as Record<string, unknown>;
+
+  const name = typeof entry.name === 'string' ? entry.name : undefined;
+  const weight = typeof entry.weight === 'number' ? entry.weight : undefined;
+  const carbs = typeof entry.carbs === 'number' ? entry.carbs : undefined;
+
+  if (!name || typeof weight !== 'number' || typeof carbs !== 'number') {
+    return null;
+  }
+
+  const proteins = typeof entry.proteins === 'number' ? entry.proteins : 0;
+  const fats = typeof entry.fats === 'number' ? entry.fats : 0;
+  const glycemicIndex = typeof entry.glycemicIndex === 'number' ? entry.glycemicIndex : 0;
+
+  const referenceWeight = weight > 0
+    ? weight
+    : typeof entry.portionWeight === 'number' && entry.portionWeight > 0
+      ? entry.portionWeight
+      : 100;
+
+  const carbsPer100g = typeof entry.carbsPer100g === 'number'
+    ? entry.carbsPer100g
+    : (carbs / referenceWeight) * 100;
+
+  const proteinsPer100g = typeof entry.proteinsPer100g === 'number'
+    ? entry.proteinsPer100g
+    : (proteins / referenceWeight) * 100;
+
+  const fatsPer100g = typeof entry.fatsPer100g === 'number'
+    ? entry.fatsPer100g
+    : (fats / referenceWeight) * 100;
+
+  const kcalPer100g = typeof entry.kcalPer100g === 'number'
+    ? entry.kcalPer100g
+    : carbsPer100g * 4 + proteinsPer100g * 4 + fatsPer100g * 9;
+
+  const timestamp = typeof entry.timestamp === 'string'
+    ? entry.timestamp
+    : typeof entry.timestamp === 'number'
+      ? new Date(entry.timestamp).toISOString()
+      : new Date().toISOString();
+
+  const normalised: ScannerHistoryEntry = {
+    name,
+    weight,
+    carbs,
+    proteins,
+    fats,
+    glycemicIndex,
+    carbsPer100g,
+    proteinsPer100g,
+    fatsPer100g,
+    kcalPer100g,
+    source: normaliseScannerSource(entry.source),
+    timestamp,
+  };
+
+  if (typeof entry.kcal === 'number') {
+    normalised.kcal = entry.kcal;
+  }
+
+  if (typeof entry.confidence === 'number') {
+    normalised.confidence = entry.confidence;
+  }
+
+  if (typeof entry.portionWeight === 'number') {
+    normalised.portionWeight = entry.portionWeight;
+  }
+
+  if (typeof entry.photo === 'string') {
+    normalised.photo = entry.photo;
+  }
+
+  return normalised;
 };
 
 const isQueuedScannerAction = (value: unknown): value is QueuedScannerAction => {
@@ -294,7 +394,9 @@ class StorageService {
     try {
       const stored = parseJson<unknown[]>(localStorage.getItem('scanner_history'));
       if (Array.isArray(stored)) {
-        return stored.filter(isScannerHistoryEntry);
+        return stored
+          .map(toScannerHistoryEntry)
+          .filter((entry): entry is ScannerHistoryEntry => entry !== null);
       }
     } catch (error) {
       console.error('Error loading scanner history:', error);
