@@ -1,4 +1,5 @@
-const CACHE_VERSION = `v${Date.now()}`;
+// Se sustituye en build por install-all.sh
+const CACHE_VERSION = "__CACHE_VERSION__";
 const STATIC_CACHE = `bascula-static-${CACHE_VERSION}`;
 const PRECACHE_ASSETS = [
   '/manifest.json',
@@ -25,11 +26,8 @@ self.addEventListener('activate', (event) => {
     (async () => {
       const keys = await caches.keys();
       await Promise.all(
-        keys.map((key) => {
-          if (key !== STATIC_CACHE) {
-            return caches.delete(key);
-          }
-          return Promise.resolve();
+        keys.map((k) => {
+          if (k !== STATIC_CACHE) return caches.delete(k);
         })
       );
       await self.clients.claim();
