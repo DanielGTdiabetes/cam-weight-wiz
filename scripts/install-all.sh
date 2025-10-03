@@ -1141,6 +1141,9 @@ log "✓ Servicio OCR configurado"
 log "[15/20] Configurando frontend..."
 cd "${BASCULA_CURRENT_LINK}"
 if [[ -f "package.json" ]]; then
+  if [[ -f ".env.device" ]]; then
+    cp -f .env.device .env
+  fi
   npm install || warn "npm install falló, continuar con backend"
   npm run build || warn "npm build falló"
   log "✓ Frontend compilado"

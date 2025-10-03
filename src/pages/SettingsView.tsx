@@ -53,8 +53,8 @@ export const SettingsView = () => {
   }>({ title: "", type: "text", field: "" });
   
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
-  const [apiUrl, setApiUrl] = useState("http://localhost:8080");
-  const [wsUrl, setWsUrl] = useState("ws://localhost:8080");
+  const [apiUrl, setApiUrl] = useState("http://127.0.0.1:8080");
+  const [wsUrl, setWsUrl] = useState("ws://127.0.0.1:8080");
   const [chatGptKey, setChatGptKey] = useState("");
   const [nightscoutUrl, setNightscoutUrl] = useState("");
   const [nightscoutToken, setNightscoutToken] = useState("");
