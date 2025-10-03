@@ -667,7 +667,8 @@ export function BarcodeScannerModal({
 
       try {
         if (action.type === 'exportBolus') {
-          await api.exportBolus(action.carbs, action.insulin ?? 0, action.timestamp);
+          const timestamp = typeof action.timestamp === 'string' ? action.timestamp : action.timestamp.toISOString();
+          await api.exportBolus(action.carbs, action.insulin ?? 0, timestamp);
         }
       } catch (error) {
         logger.error('Failed to flush offline queue', { error });

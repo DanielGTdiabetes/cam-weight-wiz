@@ -7,7 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { BolusCalculator } from "@/components/BolusCalculator";
 import { BarcodeScannerModal } from "@/components/BarcodeScannerModal";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
-import { storage } from "@/services/storage";
+import { storage, type ScannerHistoryEntry, type ScannerSource } from "@/services/storage";
 import { logger } from "@/services/logger";
 import { api } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
@@ -32,7 +32,7 @@ export const FoodScannerView = () => {
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasHydratedHistoryRef = useRef(false);
-  const preservedScannerEntriesRef = useRef<unknown[]>([]);
+  const preservedScannerEntriesRef = useRef<ScannerHistoryEntry[]>([]);
 
   const { toast } = useToast();
 
@@ -54,78 +54,66 @@ export const FoodScannerView = () => {
   );
 
   const hydrateScannerHistory = useCallback(() => {
-    const history = storage.getScannerHistory() as unknown;
+    const history = storage.getScannerHistory();
     preservedScannerEntriesRef.current = [];
     if (!Array.isArray(history)) {
       hasHydratedHistoryRef.current = true;
       return;
     }
 
-    const entries = history as unknown[];
-    const normalised = entries
-      .map((entry) => {
+    const normalised = history
+      .map((entry): FoodItem | null => {
         if (!entry || typeof entry !== "object") {
-          preservedScannerEntriesRef.current.push(entry);
           return null;
         }
 
-        const candidate = entry as Partial<FoodItem> & {
-          timestamp?: number | string;
-        } & { avgColor?: { r?: number; g?: number; b?: number } };
-
+        // Check if it has all required fields for FoodItem
         const hasRequiredNumbers =
-          typeof candidate.weight === "number" &&
-          typeof candidate.carbs === "number" &&
-          typeof candidate.proteins === "number" &&
-          typeof candidate.fats === "number" &&
-          typeof candidate.glycemicIndex === "number";
+          typeof entry.weight === "number" &&
+          typeof entry.carbs === "number" &&
+          typeof entry.proteins === "number" &&
+          typeof entry.fats === "number" &&
+          typeof entry.glycemicIndex === "number";
 
-        if (!hasRequiredNumbers || typeof candidate.name !== "string") {
-          preservedScannerEntriesRef.current.push(entry);
+        if (!hasRequiredNumbers || typeof entry.name !== "string") {
+          // Keep original entry if it looks valid
+          if (entry.name && entry.weight && typeof entry.timestamp === 'string') {
+            preservedScannerEntriesRef.current.push(entry);
+          }
           return null;
         }
 
-        const source: FoodItem["source"] = candidate.source === "camera" ? "camera" : "barcode";
+        const source: FoodItem["source"] = entry.source === "ai" ? "camera" : "barcode";
 
-        const capturedAt =
-          typeof candidate.capturedAt === "number"
-            ? candidate.capturedAt
-            : typeof candidate.timestamp === "string"
-              ? Date.parse(candidate.timestamp) || Date.now()
-              : typeof candidate.timestamp === "number"
-                ? candidate.timestamp
-                : Date.now();
+        // Parse timestamp from ScannerHistoryEntry to capturedAt for FoodItem
+        const capturedAt = (() => {
+          if (typeof entry.capturedAt === "string") {
+            return Date.parse(entry.capturedAt) || Date.now();
+          }
+          if (typeof entry.timestamp === "string") {
+            return Date.parse(entry.timestamp) || Date.now();
+          }
+          return Date.now();
+        })();
 
-        const avgColor = candidate.avgColor;
-        const normalisedColor =
-          avgColor &&
-          typeof avgColor.r === "number" &&
-          typeof avgColor.g === "number" &&
-          typeof avgColor.b === "number"
-            ? { r: avgColor.r, g: avgColor.g, b: avgColor.b }
-            : undefined;
-
-        const baseId =
-          typeof candidate.id === "string"
-            ? candidate.id
-            : `${capturedAt}-${candidate.name.toLowerCase().replace(/\s+/g, "-")}`;
+        const baseId = entry.id ?? `${capturedAt}-${entry.name.toLowerCase().replace(/\s+/g, "-")}`;
 
         return {
           id: baseId,
-          name: candidate.name,
-          weight: candidate.weight,
-          carbs: candidate.carbs,
-          proteins: candidate.proteins,
-          fats: candidate.fats,
-          glycemicIndex: candidate.glycemicIndex,
-          kcal: typeof candidate.kcal === "number" ? candidate.kcal : undefined,
-          confidence: typeof candidate.confidence === "number" ? candidate.confidence : undefined,
+          name: entry.name,
+          weight: entry.weight,
+          carbs: entry.carbs,
+          proteins: entry.proteins,
+          fats: entry.fats,
+          glycemicIndex: entry.glycemicIndex,
+          kcal: entry.kcal,
+          confidence: entry.confidence,
           source,
           capturedAt,
-          avgColor: normalisedColor,
-        } satisfies FoodItem;
+          photo: entry.photo,
+        } as FoodItem;
       })
-      .filter((item): item is FoodItem => Boolean(item));
+      .filter((item): item is FoodItem => Boolean(item?.name && item?.weight));
 
     if (normalised.length > 0) {
       setFoods(normalised);
@@ -144,9 +132,31 @@ export const FoodScannerView = () => {
       return;
     }
     try {
-      const payload = [
+      // Convert FoodItem to ScannerHistoryEntry format
+      const scannerEntries = foods.map((item): ScannerHistoryEntry => ({
+        id: item.id,
+        name: item.name,
+        weight: item.weight,
+        carbs: item.carbs,
+        proteins: item.proteins,
+        fats: item.fats,
+        glycemicIndex: item.glycemicIndex,
+        kcal: item.kcal,
+        confidence: item.confidence,
+        source: item.source as ScannerSource,
+        timestamp: new Date(item.capturedAt).toISOString(),
+        capturedAt: new Date(item.capturedAt).toISOString(),
+        photo: item.photo,
+        carbsPer100g: item.weight > 0 ? (item.carbs / item.weight) * 100 : 0,
+        proteinsPer100g: item.weight > 0 ? (item.proteins / item.weight) * 100 : 0,
+        fatsPer100g: item.weight > 0 ? (item.fats / item.weight) * 100 : 0,
+        kcalPer100g: item.kcal && item.weight > 0 ? (item.kcal / item.weight) * 100 : 0,
+        portionWeight: item.weight,
+      }));
+      
+      const payload: ScannerHistoryEntry[] = [
         ...preservedScannerEntriesRef.current,
-        ...foods.map((item) => ({ ...item })),
+        ...scannerEntries,
       ];
       storage.saveScannerHistory(payload);
     } catch (error) {
@@ -253,7 +263,7 @@ export const FoodScannerView = () => {
   const appendFood = (item: FoodItem) => {
     setFoods((prev) => [...prev, item]);
     setSelectedId(item.id);
-    logger.info("Food registered", item);
+    logger.info("Food registered", { name: item.name, weight: item.weight, source: item.source });
     toast({ title: "Alimento añadido", description: `${item.name} - ${item.weight.toFixed(1)} g` });
     if (navigator.vibrate) {
       navigator.vibrate(25);
@@ -356,7 +366,8 @@ export const FoodScannerView = () => {
 
       try {
         if (action.type === "exportBolus") {
-          await api.exportBolus(action.carbs, action.insulin ?? 0, action.timestamp);
+          const timestamp = typeof action.timestamp === 'string' ? action.timestamp : action.timestamp.toISOString();
+          await api.exportBolus(action.carbs, action.insulin ?? 0, timestamp);
         }
         logger.info("Scanner queue action processed", { action });
       } catch (error) {

@@ -8,6 +8,32 @@ import { useToast } from "@/hooks/use-toast";
 import { api, type GeneratedRecipe, type RecipeStep } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
 
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+  resultIndex: number;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+  message: string;
+}
+
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  maxAlternatives: number;
+  onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => void) | null;
+  onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => void) | null;
+  onend: ((this: SpeechRecognition, ev: Event) => void) | null;
+  start(): void;
+  stop(): void;
+}
+
+interface SpeechRecognitionConstructor {
+  new (): SpeechRecognition;
+}
+
 declare global {
   interface Window {
     webkitSpeechRecognition?: SpeechRecognitionConstructor;
@@ -16,10 +42,6 @@ declare global {
 }
 
 type SpeechRecognitionInstance = SpeechRecognition;
-
-interface SpeechRecognitionConstructor {
-  new (): SpeechRecognition;
-}
 
 interface IngredientDisplay {
   name: string;
