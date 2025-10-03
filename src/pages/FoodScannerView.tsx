@@ -5,19 +5,13 @@ import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { BolusCalculator } from "@/components/BolusCalculator";
+import { BarcodeScannerModal } from "@/components/BarcodeScannerModal";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { storage } from "@/services/storage";
 import { logger } from "@/services/logger";
 import { api } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
-import {
-  buildFoodItem,
-  createScannerSnapshot,
-  scaleNutritionByFactor,
-  toFoodItem,
-  type FoodScannerConfirmedPayload,
-  type FoodItem,
-} from "@/features/food-scanner/foodItem";
+import { buildFoodItem, toFoodItem, type FoodScannerConfirmedPayload, type FoodItem } from "@/features/food-scanner/foodItem";
 
 export const FoodScannerView = () => {
   const { weight: scaleWeight } = useScaleWebSocket();
@@ -30,11 +24,15 @@ export const FoodScannerView = () => {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState(false);
+  const [prefilledBarcode, setPrefilledBarcode] = useState<string | undefined>(undefined);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const hasHydratedHistoryRef = useRef(false);
+  const preservedScannerEntriesRef = useRef<unknown[]>([]);
 
   const { toast } = useToast();
 
@@ -54,6 +52,107 @@ export const FoodScannerView = () => {
       ),
     [foods]
   );
+
+  const hydrateScannerHistory = useCallback(() => {
+    const history = storage.getScannerHistory() as unknown;
+    preservedScannerEntriesRef.current = [];
+    if (!Array.isArray(history)) {
+      hasHydratedHistoryRef.current = true;
+      return;
+    }
+
+    const entries = history as unknown[];
+    const normalised = entries
+      .map((entry) => {
+        if (!entry || typeof entry !== "object") {
+          preservedScannerEntriesRef.current.push(entry);
+          return null;
+        }
+
+        const candidate = entry as Partial<FoodItem> & {
+          timestamp?: number | string;
+        } & { avgColor?: { r?: number; g?: number; b?: number } };
+
+        const hasRequiredNumbers =
+          typeof candidate.weight === "number" &&
+          typeof candidate.carbs === "number" &&
+          typeof candidate.proteins === "number" &&
+          typeof candidate.fats === "number" &&
+          typeof candidate.glycemicIndex === "number";
+
+        if (!hasRequiredNumbers || typeof candidate.name !== "string") {
+          preservedScannerEntriesRef.current.push(entry);
+          return null;
+        }
+
+        const source: FoodItem["source"] = candidate.source === "camera" ? "camera" : "barcode";
+
+        const capturedAt =
+          typeof candidate.capturedAt === "number"
+            ? candidate.capturedAt
+            : typeof candidate.timestamp === "string"
+              ? Date.parse(candidate.timestamp) || Date.now()
+              : typeof candidate.timestamp === "number"
+                ? candidate.timestamp
+                : Date.now();
+
+        const avgColor = candidate.avgColor;
+        const normalisedColor =
+          avgColor &&
+          typeof avgColor.r === "number" &&
+          typeof avgColor.g === "number" &&
+          typeof avgColor.b === "number"
+            ? { r: avgColor.r, g: avgColor.g, b: avgColor.b }
+            : undefined;
+
+        const baseId =
+          typeof candidate.id === "string"
+            ? candidate.id
+            : `${capturedAt}-${candidate.name.toLowerCase().replace(/\s+/g, "-")}`;
+
+        return {
+          id: baseId,
+          name: candidate.name,
+          weight: candidate.weight,
+          carbs: candidate.carbs,
+          proteins: candidate.proteins,
+          fats: candidate.fats,
+          glycemicIndex: candidate.glycemicIndex,
+          kcal: typeof candidate.kcal === "number" ? candidate.kcal : undefined,
+          confidence: typeof candidate.confidence === "number" ? candidate.confidence : undefined,
+          source,
+          capturedAt,
+          avgColor: normalisedColor,
+        } satisfies FoodItem;
+      })
+      .filter((item): item is FoodItem => Boolean(item));
+
+    if (normalised.length > 0) {
+      setFoods(normalised);
+      setSelectedId(normalised[normalised.length - 1]?.id ?? null);
+    }
+
+    hasHydratedHistoryRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    hydrateScannerHistory();
+  }, [hydrateScannerHistory]);
+
+  useEffect(() => {
+    if (!hasHydratedHistoryRef.current) {
+      return;
+    }
+    try {
+      const payload = [
+        ...preservedScannerEntriesRef.current,
+        ...foods.map((item) => ({ ...item })),
+      ];
+      storage.saveScannerHistory(payload);
+    } catch (error) {
+      logger.error("Failed to persist scanner history", { error });
+    }
+  }, [foods]);
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -161,6 +260,16 @@ export const FoodScannerView = () => {
     }
   };
 
+  const handleBarcodeModalClose = useCallback(() => {
+    setIsBarcodeModalOpen(false);
+    setPrefilledBarcode(undefined);
+  }, []);
+
+  const handleBarcodeModalOpen = useCallback((barcode?: string) => {
+    setPrefilledBarcode(barcode?.trim() || undefined);
+    setIsBarcodeModalOpen(true);
+  }, []);
+
   const handleFoodConfirmed = (payload: FoodScannerConfirmedPayload) => {
     const item = toFoodItem(payload, "barcode");
     appendFood(item);
@@ -209,35 +318,9 @@ export const FoodScannerView = () => {
     }
   };
 
-  const handleScanBarcode = async () => {
-    const code = window.prompt("Escanea o escribe el código de barras del producto");
-    if (!code) {
-      return;
-    }
-
-    const validWeight = await ensureWeight();
-    if (!validWeight) {
-      return;
-    }
-
-    setIsScanning(true);
-    try {
-      const analysis = await api.scanBarcode(code.trim());
-      const factor = validWeight / 100;
-      const normalized = scaleNutritionByFactor(analysis, factor);
-      const snapshot = createScannerSnapshot(normalized, validWeight);
-      handleFoodConfirmed(snapshot);
-    } catch (error) {
-      logger.error("Barcode lookup failed", { error });
-      if (error instanceof ApiError) {
-        toast({ title: "No encontrado", description: error.message, variant: "destructive" });
-      } else {
-        toast({ title: "Error", description: "No se pudo consultar el código de barras", variant: "destructive" });
-      }
-    } finally {
-      setIsScanning(false);
-    }
-  };
+  const handleScanBarcode = useCallback(() => {
+    handleBarcodeModalOpen();
+  }, [handleBarcodeModalOpen]);
 
   const handleDelete = (id: string) => {
     setFoods((prev) => prev.filter((food) => food.id !== id));
@@ -259,6 +342,42 @@ export const FoodScannerView = () => {
       description: `Peso total: ${totals.weight.toFixed(1)} g`
     });
   };
+
+  const flushScannerQueue = useCallback(async () => {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      return;
+    }
+
+    while (true) {
+      const action = storage.dequeueScannerAction();
+      if (!action) {
+        break;
+      }
+
+      try {
+        if (action.type === "exportBolus") {
+          await api.exportBolus(action.carbs, action.insulin ?? 0, action.timestamp);
+        }
+        logger.info("Scanner queue action processed", { action });
+      } catch (error) {
+        logger.error("Failed to process scanner queue action", { action, error });
+        storage.enqueueScannerAction(action);
+        break;
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    flushScannerQueue();
+
+    const handleOnline = () => {
+      toast({ title: "Conexión restaurada", description: "Procesando acciones pendientes" });
+      flushScannerQueue();
+    };
+
+    window.addEventListener("online", handleOnline);
+    return () => window.removeEventListener("online", handleOnline);
+  }, [flushScannerQueue, toast]);
 
   return (
     <div className="flex h-full flex-col gap-6 bg-background p-4">
@@ -530,6 +649,13 @@ export const FoodScannerView = () => {
           }}
         />
       )}
+
+      <BarcodeScannerModal
+        open={isBarcodeModalOpen}
+        onClose={handleBarcodeModalClose}
+        prefilledBarcode={prefilledBarcode}
+        onFoodConfirmed={handleFoodConfirmed}
+      />
     </div>
   );
 };
