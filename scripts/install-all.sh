@@ -213,12 +213,12 @@ fi
 systemctl_safe enable pigpiod
 systemctl_safe start pigpiod
 
-if getent group pigpi >/dev/null 2>&1; then
-  if ! id -nG "${TARGET_USER}" | tr ' ' '\n' | grep -q '^pigpi$'; then
-    if usermod -aG pigpi "${TARGET_USER}"; then
-      log "Usuario ${TARGET_USER} añadido al grupo pigpi"
+if getent group pigpio >/dev/null 2>&1; then
+  if ! id -nG "${TARGET_USER}" | tr ' ' '\n' | grep -q '^pigpio$'; then
+    if usermod -aG pigpio "${TARGET_USER}"; then
+      log "Usuario ${TARGET_USER} añadido al grupo pigpio"
     else
-      warn "No se pudo añadir ${TARGET_USER} al grupo pigpi"
+      warn "No se pudo añadir ${TARGET_USER} al grupo pigpio"
     fi
   fi
 fi
