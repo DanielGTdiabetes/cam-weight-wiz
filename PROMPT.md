@@ -11,8 +11,8 @@ Contexto clave:
 - La vista `FoodScannerView` (`src/pages/FoodScannerView.tsx`) maneja la lista `foods` con `useState` y helpers como `appendFood`, `handleAnalyze`, `handleScanBarcode` y `handleDelete`. No existe ningún `FoodListContext` ni hook `useFoodList`; la acumulación se gestiona con estado local.
 - Cuando añadas o elimines alimentos, sincroniza el estado con una persistencia ligera guardando el arreglo completo en `localStorage` mediante el servicio `storage` (`src/services/storage.ts`). Sigue el mismo patrón que `getWeightHistory`/`addWeightRecord`: crea utilidades `getScannerHistory`/`saveScannerHistory` si aún no existen y usa la clave `scanner_history`.
 - La comunicación con backend se hace a través de `api.analyzeFood` y `api.scanBarcode`; los resultados devueltos alimentan `appendFood`.
-- Para exportar bolos a Nightscout, llama al método real `api.exportBolus(carbs, insulin, timestamp)`. El timestamp debe ser una cadena ISO generada con `new Date().toISOString()` y el payload enviado al backend debe incluir `{ carbs, insulin, timestamp }`.
-- Antes de invocar la exportación, lee la configuración mediante `storage.getSettings()` y cancela la operación con un toast de error si `nightscoutUrl` no está configurado; respeta los toasts, logs (`logger`) y vibración (`navigator.vibrate`) existentes tras una exportación exitosa o fallida.
+- Para exportar bolos a Nightscout, usa la API real `api.exportBolus(carbs, insulin, timestamp)`. Prepara el payload con los mismos valores (`const payload = { carbs, insulin, timestamp: new Date().toISOString() };`) y pásalos en ese orden al método.
+- Respeta la lógica actual: valida la configuración con `storage.getSettings()`, aborta con un toast destructivo si falta `nightscoutUrl`, registra el éxito/fracaso con `logger`, vibra el dispositivo (`navigator.vibrate`) y cierra el modal tras una exportación exitosa.
 
 Instrucciones:
 1. Lee los alimentos iniciales desde `storage` al montar la vista y rellena `foods` con ese historial.
