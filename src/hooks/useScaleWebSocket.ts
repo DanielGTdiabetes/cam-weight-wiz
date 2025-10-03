@@ -27,9 +27,14 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const shouldReconnectRef = useRef(true);
+  const mockIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Load settings
   const settings = storage.getSettings();
+  
+  // Detect if we're in demo/preview mode (no real backend)
+  const isDemoMode = window.location.hostname.includes('lovable.app') || 
+                     window.location.hostname === 'localhost';
 
   // Calculate exponential backoff delay
   const getReconnectDelay = (attempt: number): number => {
@@ -120,6 +125,42 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
   }, [reconnectAttempts, settings.wsUrl]);
 
   useEffect(() => {
+    // In demo mode, generate mock weight data
+    if (isDemoMode) {
+      console.log("🎭 Demo mode: Using mock weight data");
+      setIsConnected(true);
+      setError(null);
+      
+      // Simulate weight fluctuations
+      let mockWeight = 125.0;
+      let stable = false;
+      let cycles = 0;
+      
+      mockIntervalRef.current = setInterval(() => {
+        cycles++;
+        
+        // Simulate stabilization after 3 seconds
+        if (cycles > 6) {
+          stable = true;
+          mockWeight = 127.5 + (Math.random() * 0.2 - 0.1);
+        } else {
+          stable = false;
+          mockWeight = 125 + Math.random() * 5;
+        }
+        
+        setWeight(Number(mockWeight.toFixed(1)));
+        setIsStable(stable);
+        setUnit("g");
+      }, 500);
+      
+      return () => {
+        if (mockIntervalRef.current) {
+          clearInterval(mockIntervalRef.current);
+        }
+      };
+    }
+    
+    // Real WebSocket connection for production
     shouldReconnectRef.current = true;
     connect();
 
@@ -134,8 +175,12 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
         wsRef.current.close();
         wsRef.current = null;
       }
+      
+      if (mockIntervalRef.current) {
+        clearInterval(mockIntervalRef.current);
+      }
     };
-  }, [connect]);
+  }, [connect, isDemoMode]);
 
   return {
     weight,
