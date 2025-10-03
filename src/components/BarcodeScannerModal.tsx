@@ -167,6 +167,7 @@ export function BarcodeScannerModal({
   const [attemptCount, setAttemptCount] = useState(0);
   const [statusMessage, setStatusMessage] = useState('Selecciona un modo de escaneo para comenzar');
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const cooldownUntilRef = useRef<number | null>(null);
   const [expectedPortion, setExpectedPortion] = useState(100);
   const [lastStableWeight, setLastStableWeight] = useState(0);
   const [capturedPhoto, setCapturedPhoto] = useState<string | undefined>(undefined);
@@ -392,13 +393,15 @@ export function BarcodeScannerModal({
   useEffect(() => cleanup, [cleanup]);
 
   const resetCooldown = useCallback(() => {
+    cooldownUntilRef.current = null;
     setCooldownUntil(null);
   }, []);
 
   const ensureCooldown = useCallback(() => {
     const now = Date.now();
-    if (cooldownUntil && now < cooldownUntil) {
-      const remaining = Math.ceil((cooldownUntil - now) / 1000);
+    const currentCooldown = cooldownUntilRef.current ?? cooldownUntil;
+    if (currentCooldown && now < currentCooldown) {
+      const remaining = Math.ceil((currentCooldown - now) / 1000);
       toast({
         title: 'Espera un momento',
         description: `Puedes volver a intentar en ${remaining}s`,
@@ -406,7 +409,9 @@ export function BarcodeScannerModal({
       });
       return false;
     }
-    setCooldownUntil(now + SCAN_COOLDOWN_MS);
+    const nextCooldown = now + SCAN_COOLDOWN_MS;
+    cooldownUntilRef.current = nextCooldown;
+    setCooldownUntil(nextCooldown);
     return true;
   }, [cooldownUntil, toast]);
 
