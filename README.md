@@ -74,7 +74,16 @@ Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/c
 
 ## Mini-Web (AP setup)
 
-Pruebas de aceptación rápidas (backend servido en `http://localhost:8080`):
+### 🚀 Migración rápida (Raspberry Pi con instalación existente)
+
+```bash
+cd /opt/bascula/current
+sudo ./scripts/migrate_2025_10.sh
+```
+
+El script aplica la nueva versión de `backend/miniweb.py`, instala la regla de PolicyKit, actualiza el servicio `bascula-miniweb.service` y crea el perfil `BasculaAP` de NetworkManager si falta. Después reinicia automáticamente el servicio.
+
+### ✅ Pruebas de aceptación rápidas (backend servido en `http://localhost:8080`)
 
 ```bash
 # Healthcheck
@@ -83,7 +92,7 @@ curl -s http://localhost:8080/health
 # SPA principal (debe devolver HTML, no una página en blanco)
 curl -s http://localhost:8080/ | head
 
-# Leer PIN (solo visible en modo AP, bandera o cabecera forzada)
+# Leer PIN (solo visible en modo AP o si BASCULA_ALLOW_PIN_READ=1)
 curl -s http://localhost:8080/api/miniweb/pin
 
 # Verificar PIN persistente
@@ -91,16 +100,20 @@ curl -s -X POST http://localhost:8080/api/miniweb/verify-pin \
   -H 'Content-Type: application/json' \
   -d '{"pin":"NNNN"}'
 
-# Escanear redes Wi-Fi (403 si falta permiso, 503 si no hay nmcli)
+# Escanear redes Wi-Fi (403 si falta PolicyKit, 503 si no existe /usr/bin/nmcli)
 curl -s http://localhost:8080/api/miniweb/scan-networks
 
-# Iniciar conexión Wi-Fi (ejemplo)
+# Iniciar conexión Wi-Fi (genera perfil .nmconnection con PSK)
 curl -s -X POST http://localhost:8080/api/miniweb/connect-wifi \
   -H 'Content-Type: application/json' \
   -d '{"ssid":"MiRed","password":"secreto"}'
 
 # Estado de red actual
 curl -s http://localhost:8080/api/network/status
+
+# Activar / desactivar modo AP gestionado por NetworkManager
+curl -s -X POST http://localhost:8080/api/network/enable-ap
+curl -s -X POST http://localhost:8080/api/network/disable-ap
 ```
 
 Expectativas clave:

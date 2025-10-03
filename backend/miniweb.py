@@ -1,38 +1,47 @@
 # backend/miniweb.py
-# (Codex: escribir archivo COMPLETO, sin “...”, listo para ejecutar)
+# (Codex: escribir archivo COMPLETO, sin "...", listo para ejecutar)
 import os
 import json
 import subprocess
 import ipaddress
 import random
 import string
+import uuid
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 import serial  # keep existing behavior; ok if not present in some installs
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from contextlib import asynccontextmanager
-from pathlib import Path
 
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = BASE_DIR / "dist"
 
 CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
-PIN_PATH = CFG_DIR / "pin.json"
+PIN_PATH = CFG_DIR / "miniweb_pin"
 CONFIG_PATH = CFG_DIR / "config.json"
 DEFAULT_SERIAL_PORT = "/dev/serial0"
 DEFAULT_BAUD_RATE = 115200
+
+NMCLI_BIN = Path("/usr/bin/nmcli")
+NM_CONNECTIONS_DIR = Path("/etc/NetworkManager/system-connections")
+HOME_CONNECTION_ID = "BasculaHome"
+AP_CONNECTION_ID = "BasculaAP"
+AP_DEFAULT_SSID = "Bascula-AP"
+AP_DEFAULT_PASSWORD = "bascula2025"
+WIFI_INTERFACE = "wlan0"
 
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Estado global ----------
 scale_serial: Optional[serial.Serial] = None
-active_connections: list[WebSocket] = []
 
 # ---------- Helpers ----------
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -43,42 +52,49 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
             return None
     return None
 
+
 def _save_json(path: Path, data: Dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
+
 def _gen_pin() -> str:
-    return ''.join(random.choices(string.digits, k=4))
+    return "".join(random.choices(string.digits, k=4))
+
 
 def _load_pin() -> Optional[str]:
-    data = _load_json(PIN_PATH) or {}
-    pin = data.get("pin")
-    if isinstance(pin, str) and len(pin) == 4 and pin.isdigit():
-        return pin
+    try:
+        if PIN_PATH.exists():
+            value = PIN_PATH.read_text().strip()
+            if value.isdigit() and len(value) == 4:
+                return value
+    except Exception:
+        return None
     return None
 
 
 def _write_pin(pin: str) -> None:
-    CFG_DIR.mkdir(parents=True, exist_ok=True)
-    _save_json(PIN_PATH, {"pin": pin, "created_at": datetime.utcnow().isoformat()})
+    try:
+        CFG_DIR.mkdir(parents=True, exist_ok=True)
+        PIN_PATH.write_text(pin)
+        os.chmod(PIN_PATH, 0o600)
+    except Exception:
+        pass
 
 
 def _get_or_create_pin() -> str:
     pin = _load_pin()
     if pin:
         return pin
-    if os.getenv("BASCULA_RANDOM_PIN") == "1":
-        pin = _gen_pin()
-    else:
-        pin = "1234"
+    pin = _gen_pin()
     _write_pin(pin)
     return pin
+
 
 def _get_iface_ip(iface: str) -> Optional[str]:
     try:
         out = subprocess.check_output(["ip", "-4", "addr", "show", iface], text=True)
         for line in out.splitlines():
             line = line.strip()
-            # e.g. "inet 192.168.4.1/24 ..."
             if line.startswith("inet "):
                 ip = line.split()[1].split("/")[0]
                 return ip
@@ -86,9 +102,20 @@ def _get_iface_ip(iface: str) -> Optional[str]:
         return None
     return None
 
+
+def _nmcli_available() -> bool:
+    return NMCLI_BIN.exists()
+
+
+def _nmcli(args: List[str], timeout: int = 15) -> subprocess.CompletedProcess:
+    if not _nmcli_available():
+        raise FileNotFoundError(str(NMCLI_BIN))
+    return subprocess.run([str(NMCLI_BIN), *args], capture_output=True, text=True, timeout=timeout)
+
+
 def _is_ap_mode_legacy() -> bool:
     """Fallback heurístico: IP clásica de AP en NM: 192.168.4.1/24 en wlan0."""
-    ip = _get_iface_ip("wlan0")
+    ip = _get_iface_ip(WIFI_INTERFACE)
     if not ip:
         return False
     try:
@@ -97,111 +124,79 @@ def _is_ap_mode_legacy() -> bool:
         return False
 
 
-def _is_wlan0_shared_mode() -> bool:
-    """Comprueba si wlan0 está en modo AP/shared mediante NetworkManager."""
+def _is_ap_active() -> bool:
     try:
-        active = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"], timeout=10)
+        res = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"], timeout=5)
     except FileNotFoundError:
         return _is_ap_mode_legacy()
     except Exception:
         return _is_ap_mode_legacy()
 
-    if active.returncode != 0:
+    if res.returncode != 0:
         return _is_ap_mode_legacy()
 
-    for line in active.stdout.strip().splitlines():
+    for line in res.stdout.strip().splitlines():
+        if not line:
+            continue
         parts = line.split(":")
         if len(parts) < 3:
             continue
         name, conn_type, device = parts[0], parts[1], parts[2]
-        if device != "wlan0" or conn_type != "802-11-wireless":
-            continue
-        detail = _nmcli(["-t", "-f", "802-11-wireless.mode,ipv4.method", "connection", "show", name], timeout=10)
-        if detail.returncode != 0:
-            continue
-        values: Dict[str, str] = {}
-        for entry in detail.stdout.strip().splitlines():
-            if ":" in entry:
-                key, value = entry.split(":", 1)
-                values[key.strip()] = value.strip()
-        if values.get("802-11-wireless.mode") == "ap":
-            return True
-        if values.get("ipv4.method") == "shared":
+        if name == AP_CONNECTION_ID and conn_type == "802-11-wireless" and device == WIFI_INTERFACE:
             return True
     return _is_ap_mode_legacy()
 
-def _nmcli(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
-    return subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout)
 
-def _split_nmcli(line: str, separator: str = "|") -> list[str]:
-    values: list[str] = []
-    current: list[str] = []
-    escape = False
-    for char in line:
-        if escape:
-            current.append(char)
-            escape = False
-            continue
-        if char == "\\":
-            escape = True
-            continue
-        if char == separator:
-            values.append("".join(current))
-            current = []
-            continue
-        current.append(char)
-    values.append("".join(current))
-    return values
+def _allow_pin_disclosure() -> bool:
+    if os.getenv("BASCULA_ALLOW_PIN_READ", "0") == "1":
+        return True
+    return _is_ap_active()
 
 
-def _list_networks() -> list[dict]:
+def _list_networks() -> List[Dict[str, Any]]:
     """Devuelve lista de redes Wi-Fi visibles usando nmcli."""
     try:
-        rescan = _nmcli(["device", "wifi", "rescan"], timeout=20)
-        if rescan.returncode != 0:
-            err = (rescan.stderr or rescan.stdout).strip()
-            if "not authorized" not in err.lower():
-                raise RuntimeError(f"NMCLI_RESCAN_ERROR: {err}")
-        res = _nmcli(
-            [
-                "-t",
-                "--fields",
-                "SSID,SIGNAL,SECURITY",
-                "--separator",
-                "|",
-                "device",
-                "wifi",
-                "list",
-            ],
-            timeout=25,
-        )
-        if res.returncode != 0:
-            err = (res.stderr or res.stdout).strip()
+        try:
+            _nmcli(["dev", "wifi", "rescan"], timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+
+        result = _nmcli(["-t", "-f", "SSID,SIGNAL,SECURITY", "dev", "wifi", "list"], timeout=10)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout).strip()
             if "not authorized" in err.lower():
                 raise PermissionError("NMCLI_NOT_AUTHORIZED")
-            raise RuntimeError(f"NMCLI_ERROR: {err}")
+            raise RuntimeError(err)
 
-        networks = []
-        for raw_line in res.stdout.strip().splitlines():
-            if not raw_line:
+        networks: List[Dict[str, Any]] = []
+        for line in result.stdout.strip().splitlines():
+            if not line:
                 continue
-            parts = _split_nmcli(raw_line)
-            if not parts:
+            parts = line.split(":")
+            if len(parts) < 2:
                 continue
-            ssid = parts[0]
+            ssid = parts[0].strip()
             if not ssid:
                 continue
-            signal = 0
-            if len(parts) > 1:
-                try:
-                    signal = int(parts[1])
-                except ValueError:
-                    signal = 0
-            security = parts[2] if len(parts) > 2 else ""
-            secured = bool(security and security.lower() != "--" and security.upper() != "NONE")
-            networks.append({"ssid": ssid, "signal": signal, "secured": secured})
+            signal_part = parts[1].strip()
+            try:
+                signal = int(signal_part)
+            except ValueError:
+                signal = 0
+            security = parts[2].strip() if len(parts) > 2 else ""
+            secured = bool(security and security.upper() != "NONE")
+            networks.append({
+                "ssid": ssid,
+                "signal": signal,
+                "secured": secured,
+            })
+
         networks.sort(key=lambda item: item["signal"], reverse=True)
-        return networks
+        unique: Dict[str, Dict[str, Any]] = {}
+        for net in networks:
+            if net["ssid"] not in unique:
+                unique[net["ssid"]] = net
+        return list(unique.values())
     except FileNotFoundError:
         raise PermissionError("NMCLI_NOT_AVAILABLE")
     except PermissionError:
@@ -209,71 +204,130 @@ def _list_networks() -> list[dict]:
     except Exception as exc:
         raise RuntimeError(str(exc))
 
-def _disable_ap_nm():
-    """Intenta desconectar wlan0 para liberar el interfaz antes de conectar a un STA."""
+
+def _ssid_to_slug(ssid: str) -> str:
+    safe = "".join(c for c in ssid if c.isalnum() or c in ("-", "_", "."))
+    return safe or "wifi"
+
+
+def _write_nm_profile(ssid: str, password: str, ifname: str = WIFI_INTERFACE) -> Path:
+    slug = _ssid_to_slug(ssid.lower())
+    profile_path = NM_CONNECTIONS_DIR / f"{slug}.nmconnection"
+    content = f"""[connection]
+id={HOME_CONNECTION_ID}
+uuid={uuid.uuid4()}
+type=wifi
+interface-name={ifname}
+autoconnect=true
+autoconnect-priority=100
+
+[wifi]
+ssid={ssid}
+mode=infrastructure
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk={password}
+auth-alg=open
+proto=rsn
+
+[ipv4]
+method=auto
+
+[ipv6]
+method=ignore
+"""
+    NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    profile_path.write_text(content)
+    os.chmod(profile_path, 0o600)
+    return profile_path
+
+
+def _remove_connection(connection_id: str) -> None:
     try:
-        _nmcli(["device", "disconnect", "wlan0"], timeout=10)
-    except FileNotFoundError:
-        pass
-
-
-def _connect_wifi(ssid: str, password: str) -> None:
-    """Configura una conexión Wi-Fi WPA2-PSK con nmcli siguiendo la receta solicitada."""
-    if not ssid:
-        raise ValueError("SSID is required")
-    _disable_ap_nm()
-
-    try:
-        delete = _nmcli(["connection", "delete", ssid], timeout=10)
-        if delete.returncode != 0:
-            msg = (delete.stderr or delete.stdout).strip().lower()
-            if "unknown connection" not in msg and "not found" not in msg:
-                raise RuntimeError((delete.stderr or delete.stdout).strip())
+        res = _nmcli(["con", "delete", connection_id], timeout=5)
+        if res.returncode not in (0, 10):
+            message = (res.stderr or res.stdout).strip().lower()
+            if "unknown" not in message and "not found" not in message:
+                raise RuntimeError((res.stderr or res.stdout).strip())
     except FileNotFoundError:
         raise PermissionError("NMCLI_NOT_AVAILABLE")
 
-    add_cmd = [
-        "connection",
-        "add",
-        "type",
-        "wifi",
-        "ifname",
-        "wlan0",
-        "con-name",
-        ssid,
-        "ssid",
-        ssid,
-        "wifi-sec.key-mgmt",
-        "wpa-psk",
-        "wifi-sec.psk",
-        password,
-        "802-11-wireless.band",
-        "bg",
-        "802-11-wireless-security.proto",
-        "rsn",
-        "802-11-wireless-security.auth-alg",
-        "open",
-    ]
 
-    add_res = _nmcli(add_cmd, timeout=25)
-    if add_res.returncode != 0:
-        msg = (add_res.stderr or add_res.stdout).strip()
-        lower = msg.lower()
-        if "secrets were required" in lower:
-            raise PermissionError("NMCLI_SECRETS_REQUIRED")
-        if "not authorized" in lower:
-            raise PermissionError("NMCLI_NOT_AUTHORIZED")
-        raise RuntimeError(msg)
+def _disconnect_connection(connection_id: str) -> None:
+    try:
+        _nmcli(["con", "down", connection_id], timeout=5)
+    except Exception:
+        pass
 
-    up_res = _nmcli(["connection", "up", ssid], timeout=45)
+
+def ensure_ap_profile() -> None:
+    if not _nmcli_available():
+        raise PermissionError("NMCLI_NOT_AVAILABLE")
+
+    NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    ap_profile = NM_CONNECTIONS_DIR / f"{AP_CONNECTION_ID}.nmconnection"
+    if ap_profile.exists():
+        return
+
+    content = f"""[connection]
+id={AP_CONNECTION_ID}
+uuid={uuid.uuid4()}
+type=wifi
+interface-name={WIFI_INTERFACE}
+autoconnect=false
+
+[wifi]
+ssid={AP_DEFAULT_SSID}
+mode=ap
+
+[wifi-security]
+key-mgmt=wpa-psk
+psk={AP_DEFAULT_PASSWORD}
+
+[ipv4]
+method=shared
+
+[ipv6]
+method=ignore
+"""
+    ap_profile.write_text(content)
+    os.chmod(ap_profile, 0o600)
+
+
+def _connect_wifi(ssid: str, password: str) -> None:
+    if not ssid:
+        raise ValueError("SSID is required")
+    if not password:
+        raise ValueError("Password is required")
+
+    if not _nmcli_available():
+        raise PermissionError("NMCLI_NOT_AVAILABLE")
+
+    _disconnect_connection(AP_CONNECTION_ID)
+    _remove_connection(HOME_CONNECTION_ID)
+
+    profile_path = _write_nm_profile(ssid, password)
+
+    reload_res = _nmcli(["con", "reload"], timeout=5)
+    if reload_res.returncode != 0:
+        raise RuntimeError((reload_res.stderr or reload_res.stdout).strip())
+
+    up_res = _nmcli(["con", "up", HOME_CONNECTION_ID], timeout=45)
     if up_res.returncode != 0:
-        msg = (up_res.stderr or up_res.stdout).strip()
-        lower = msg.lower()
+        message = (up_res.stderr or up_res.stdout).strip()
+        lower = message.lower()
         if "secrets were required" in lower:
             raise PermissionError("NMCLI_SECRETS_REQUIRED")
         if "not authorized" in lower:
             raise PermissionError("NMCLI_NOT_AUTHORIZED")
-        raise RuntimeError(msg)
+        raise RuntimeError(message)
+
+    try:
+        os.chmod(profile_path, 0o600)
+    except Exception:
+        pass
+
 
 def _load_config() -> dict:
     cfg = _load_json(CONFIG_PATH) or {}
@@ -283,6 +337,7 @@ def _load_config() -> dict:
             "baud": cfg.get("scale", {}).get("baud", DEFAULT_BAUD_RATE),
         }
     }
+
 
 # ---------- Arranque / parada báscula ----------
 async def init_scale():
@@ -295,6 +350,7 @@ async def init_scale():
         print(f"⚠️ Scale not connected: {e}")
         scale_serial = None
 
+
 async def close_scale():
     global scale_serial
     if scale_serial and getattr(scale_serial, "is_open", False):
@@ -304,11 +360,13 @@ async def close_scale():
         except Exception:
             pass
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_scale()
     yield
     await close_scale()
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -320,100 +378,87 @@ app.add_middleware(
 )
 
 # ---------- Static SPA ----------
-def _dist_file(name: str) -> FileResponse:
-    file_path = DIST_DIR / name
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Archivo no disponible")
-    return FileResponse(file_path)
+if DIST_DIR.exists():
+    assets_dir = DIST_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
+    @app.get("/manifest.json", response_class=FileResponse)
+    async def manifest():
+        return DIST_DIR / "manifest.json"
 
-if (DIST_DIR / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="assets")
+    @app.get("/service-worker.js", response_class=FileResponse)
+    async def service_worker():
+        return DIST_DIR / "service-worker.js"
 
+    @app.get("/favicon.ico", response_class=FileResponse)
+    async def favicon():
+        return DIST_DIR / "favicon.ico"
 
-@app.get("/", response_class=FileResponse)
-async def root_index():
-    return _dist_file("index.html")
+    @app.get("/icon-192.png", response_class=FileResponse)
+    async def icon_192():
+        return DIST_DIR / "icon-192.png"
 
+    @app.get("/icon-512.png", response_class=FileResponse)
+    async def icon_512():
+        return DIST_DIR / "icon-512.png"
 
-@app.get("/config", response_class=FileResponse)
-async def config_index():
-    return _dist_file("index.html")
+    @app.get("/robots.txt", response_class=FileResponse)
+    async def robots():
+        return DIST_DIR / "robots.txt"
 
+    @app.get("/", response_class=FileResponse)
+    async def root_index():
+        return DIST_DIR / "index.html"
 
-@app.get("/manifest.json", response_class=FileResponse)
-async def manifest():
-    return _dist_file("manifest.json")
+    @app.get("/config", response_class=FileResponse)
+    async def config_index():
+        return DIST_DIR / "index.html"
 
-
-@app.get("/service-worker.js", response_class=FileResponse)
-async def sw():
-    return _dist_file("service-worker.js")
-
-
-@app.get("/favicon.ico", response_class=FileResponse)
-async def favicon():
-    return _dist_file("favicon.ico")
-
-
-@app.get("/icon-192.png", response_class=FileResponse)
-async def icon192():
-    return _dist_file("icon-192.png")
-
-
-@app.get("/icon-512.png", response_class=FileResponse)
-async def icon512():
-    return _dist_file("icon-512.png")
-
-
-@app.get("/robots.txt", response_class=FileResponse)
-async def robots():
-    return _dist_file("robots.txt")
 
 # ---------- Models ----------
 class PinVerification(BaseModel):
     pin: str
 
+
 class WifiCredentials(BaseModel):
     ssid: str
     password: str
+
 
 # ---------- PIN persistente ----------
 CURRENT_PIN = _get_or_create_pin()
 
 # Rate limit básico en memoria (por IP)
-FAILED_ATTEMPTS: Dict[str, list[datetime]] = {}
+FAILED_ATTEMPTS: Dict[str, List[datetime]] = {}
 MAX_ATTEMPTS = 10
 WINDOW = timedelta(minutes=10)
+
 
 def _check_rate_limit(ip: str):
     now = datetime.utcnow()
     history = FAILED_ATTEMPTS.get(ip, [])
-    # purge
     history = [t for t in history if now - t <= WINDOW]
     FAILED_ATTEMPTS[ip] = history
     if len(history) >= MAX_ATTEMPTS:
         raise HTTPException(status_code=429, detail="Too many attempts, try later")
 
+
 def _register_fail(ip: str):
     FAILED_ATTEMPTS.setdefault(ip, []).append(datetime.utcnow())
 
-def _allow_pin_disclosure() -> bool:
-    if _is_wlan0_shared_mode():
-        return True
-    if os.getenv("BASCULA_ALLOW_PIN_READ") == "1":
-        return True
-    return False
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 @app.get("/api/miniweb/pin")
 async def get_pin():
     if not _allow_pin_disclosure():
         raise HTTPException(status_code=403, detail="PIN not available in this mode")
     return {"pin": CURRENT_PIN}
+
 
 @app.post("/api/miniweb/verify-pin")
 async def verify_pin(data: PinVerification, request: Request):
@@ -424,25 +469,27 @@ async def verify_pin(data: PinVerification, request: Request):
     _register_fail(ip)
     raise HTTPException(status_code=403, detail="Invalid PIN")
 
+
 @app.get("/api/miniweb/scan-networks")
 async def scan_networks():
     try:
         nets = _list_networks()
         return {"networks": nets}
-    except PermissionError as e:
-        code = str(e)
+    except PermissionError as exc:
+        code = str(exc)
         if code == "NMCLI_NOT_AUTHORIZED":
-            raise HTTPException(status_code=403, detail={"code": "NMCLI_NOT_AUTHORIZED"})
+            raise HTTPException(status_code=403, detail={"code": code}) from exc
         if code == "NMCLI_NOT_AVAILABLE":
-            raise HTTPException(status_code=503, detail={"code": "NMCLI_NOT_AVAILABLE"})
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=503, detail={"code": code}) from exc
+        raise HTTPException(status_code=400, detail={"code": code}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 
 @app.post("/api/miniweb/connect-wifi")
 async def connect_wifi(credentials: WifiCredentials):
     try:
-        _connect_wifi(credentials.ssid, credentials.password)
+        _connect_wifi(credentials.ssid.strip(), credentials.password.strip())
         return {"success": True, "message": "Conexión iniciada"}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -463,7 +510,7 @@ async def connect_wifi(credentials: WifiCredentials):
                 status_code=403,
                 detail={"code": code, "message": "NetworkManager denegó la operación (PolicyKit)."},
             ) from exc
-        raise HTTPException(status_code=400, detail={"code": code, "message": "Error de permisos al configurar Wi-Fi."}) from exc
+        raise HTTPException(status_code=400, detail={"code": code}) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -471,31 +518,65 @@ async def connect_wifi(credentials: WifiCredentials):
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+
+@app.post("/api/network/enable-ap")
+async def enable_ap():
+    try:
+        ensure_ap_profile()
+        _disconnect_connection(HOME_CONNECTION_ID)
+        res = _nmcli(["con", "up", AP_CONNECTION_ID], timeout=20)
+        if res.returncode != 0:
+            raise RuntimeError((res.stderr or res.stdout).strip())
+        return {"success": True}
+    except PermissionError as exc:
+        if str(exc) == "NMCLI_NOT_AVAILABLE":
+            raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+        raise HTTPException(status_code=403, detail="Permisos insuficientes para habilitar AP") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AP error: {exc}") from exc
+
+
+@app.post("/api/network/disable-ap")
+async def disable_ap():
+    try:
+        _disconnect_connection(AP_CONNECTION_ID)
+        return {"success": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"AP disable error: {exc}") from exc
+
+
 @app.get("/api/network/status")
 async def network_status():
-    # Minimal: si interfaz wlan0 tiene IP distinta de 192.168.4.1 asumimos STA
-    wlan_ip = _get_iface_ip("wlan0")
+    wlan_ip = _get_iface_ip(WIFI_INTERFACE)
     connected = False
-    ssid = None
+    ssid: Optional[str] = None
+
     try:
-        out = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"])
-        if out.returncode == 0:
-            for line in out.stdout.splitlines():
-                # NAME:TYPE:DEVICE
-                parts = line.strip().split(":")
-                if len(parts) >= 3 and parts[1] == "802-11-wireless" and parts[2] == "wlan0":
-                    ssid = parts[0]
-                    # Si no es la conexión AP/shared, lo damos por conectado
-                    if wlan_ip and not _is_wlan0_shared_mode():
-                        connected = True
-                        break
+        res = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"], timeout=5)
+        if res.returncode == 0:
+            for line in res.stdout.splitlines():
+                parts = line.split(":")
+                if len(parts) < 3:
+                    continue
+                name, conn_type, device = parts[0], parts[1], parts[2]
+                if conn_type != "802-11-wireless" or device != WIFI_INTERFACE:
+                    continue
+                ssid = name
+                if name != AP_CONNECTION_ID and wlan_ip:
+                    connected = True
+                    break
+    except FileNotFoundError:
+        pass
     except Exception:
         pass
+
     return {"connected": connected, "ssid": ssid, "ip": wlan_ip}
+
 
 # ====== (opcional) WebSocket y tare/zero/scale como ya estaban si aplica ======
 # Mantén aquí los endpoints ya existentes de báscula...
 # ==============================================================================
+
 
 # Mensaje de arranque útil
 def _print_boot_banner():
@@ -513,5 +594,6 @@ def _print_boot_banner():
         print("📍 Access URL: http://<device-ip>:8080")
     print(f"🔐 Mini-Web PIN: {CURRENT_PIN}")
     print("============================================================")
+
 
 _print_boot_banner()

@@ -1,7 +1,9 @@
-// 10-bascula-nmcli.rules
 polkit.addRule(function(action, subject) {
-  if ((subject.isInGroup("pi") || subject.user === "pi")
-      && action.id.indexOf("org.freedesktop.NetworkManager.") === 0) {
-    return polkit.Result.YES;
+  if (subject.isInGroup("netdev") || subject.user == "pi") {
+    if (action.id == "org.freedesktop.NetworkManager.settings.modify.system" ||
+        action.id == "org.freedesktop.NetworkManager.network-control" ||
+        action.id == "org.freedesktop.NetworkManager.wifi.scan") {
+      return polkit.Result.YES;
+    }
   }
 });

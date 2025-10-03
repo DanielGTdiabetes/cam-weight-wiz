@@ -1,7 +1,6 @@
 [Unit]
 Description=Bascula Mini-Web Backend
-After=network-online.target NetworkManager.service
-Wants=network-online.target
+After=network.target NetworkManager.service
 
 [Service]
 Type=simple
@@ -10,7 +9,7 @@ Group=pi
 WorkingDirectory=/opt/bascula/current
 Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=BASCULA_CFG_DIR=/home/pi/.bascula
-Environment=BASCULA_ALLOW_PIN_READ=1
+# Environment=BASCULA_ALLOW_PIN_READ=1
 ExecStart=/opt/bascula/current/.venv/bin/python -m uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=5
