@@ -33,3 +33,5 @@ Instrucciones:
 ```
 
 Este prompt elimina la referencia obligatoria a un `FoodListContext` inexistente y documenta la estrategia vigente (estado local + persistencia con `storage`). También deja claro el orden a seguir si en el futuro se decide exponer un contexto específico.
+
+> 💡 **Flujo híbrido barcode + IA**: si necesitas un prompt más avanzado que combine escaneo por código y estimaciones por foto, revisa `docs/barcode-hybrid-prompt.md`. Ese documento mantiene el mismo contrato `FoodScannerConfirmedPayload` y amplía los requisitos con la modalidad de IA.
