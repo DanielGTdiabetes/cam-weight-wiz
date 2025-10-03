@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -16,22 +17,41 @@ except ImportError as exc:  # pragma: no cover - handled at runtime
     raise ImportError("pyserial (python3-serial) is required for SerialScaleService") from exc
 
 
-LOG_DIR = Path("/var/log/bascula")
+_LOGGER: Optional[logging.Logger] = None
 
 
-def _setup_logger() -> logging.Logger:
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("bascula.scale")
+def get_logger() -> logging.Logger:
+    """Return a lazily configured logger for the serial scale service."""
+
+    global _LOGGER
+    if _LOGGER:
+        return _LOGGER
+
+    logger = logging.getLogger("bascula.serial")
     if not logger.handlers:
         logger.setLevel(logging.INFO)
-        handler = logging.FileHandler(LOG_DIR / "app.log")
         formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+
+        try:
+            log_dir = Path("/var/log/bascula")
+            log_dir.mkdir(parents=True, exist_ok=True)
+            file_handler = logging.FileHandler(log_dir / "app.log")
+            file_handler.setFormatter(formatter)
+            logger.addHandler(file_handler)
+        except Exception:
+            try:
+                home_dir = Path.home() / ".bascula" / "logs"
+                home_dir.mkdir(parents=True, exist_ok=True)
+                file_handler = logging.FileHandler(home_dir / "app.log")
+                file_handler.setFormatter(formatter)
+                logger.addHandler(file_handler)
+            except Exception:
+                stream_handler = logging.StreamHandler(sys.stderr)
+                stream_handler.setFormatter(formatter)
+                logger.addHandler(stream_handler)
+
+    _LOGGER = logger
     return logger
-
-
-LOGGER = _setup_logger()
 
 
 class SerialScaleService:
@@ -45,6 +65,7 @@ class SerialScaleService:
         reconnect_delay: float = 1.0,
         read_timeout: float = 0.1,
     ) -> None:
+        self._log = get_logger()
         self._device = device
         self._baud = int(baud)
         self._reconnect_delay = max(0.2, reconnect_delay)
@@ -61,6 +82,7 @@ class SerialScaleService:
         self._connected = False
         self._status_reason: str = ""
         self._last_error_log: float = 0.0
+        self._log.info("SerialScaleService init for device %s @ %d baud", self._device, self._baud)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -99,9 +121,10 @@ class SerialScaleService:
         return status
 
     def get_reading(self) -> Dict[str, object]:
+        if not self._connected:
+            return {"ok": False, "reason": "serial_disconnected"}
         if self._last_timestamp is None or self._last_grams is None:
-            reason = "not_connected" if not self._connected else "no_data"
-            return {"ok": False, "reason": reason}
+            return {"ok": False, "reason": "no_data"}
         ts_iso = datetime.fromtimestamp(self._last_timestamp, tz=timezone.utc).isoformat()
         payload: Dict[str, object] = {"ok": True, "grams": self._last_grams, "ts": ts_iso}
         if self._last_stable is not None:
@@ -109,6 +132,8 @@ class SerialScaleService:
         return payload
 
     def tare(self) -> Dict[str, object]:
+        if not self._connected:
+            return {"ok": False, "reason": "serial_disconnected"}
         try:
             self._send_command("T\n", expected_prefix="ACK:T")
         except TimeoutError:
@@ -118,6 +143,8 @@ class SerialScaleService:
         return {"ok": True}
 
     def calibrate(self, known_grams: float) -> Dict[str, object]:
+        if not self._connected:
+            return {"ok": False, "reason": "serial_disconnected"}
         try:
             ack = self._send_command(f"C:{known_grams}\n", expected_prefix="ACK:C")
         except TimeoutError:
@@ -182,12 +209,12 @@ class SerialScaleService:
             self._serial = serial_conn
             self._buffer.clear()
             self._set_connected(True, "")
-            LOGGER.info("Serial scale connected on %s @ %d baud", self._device, self._baud)
+            self._log.info("Serial scale connected on %s @ %d baud", self._device, self._baud)
         except Exception as exc:  # pragma: no cover - hardware specific
             self._set_connected(False, str(exc))
             now = time.time()
             if now - self._last_error_log > 5.0:
-                LOGGER.warning("Serial scale connection failed (%s): %s", self._device, exc)
+                self._log.warning("Serial scale connection failed (%s): %s", self._device, exc)
                 self._last_error_log = now
             self._close_serial()
 
@@ -195,9 +222,10 @@ class SerialScaleService:
         self._set_connected(False, str(exc))
         now = time.time()
         if now - self._last_error_log > 5.0:
-            LOGGER.warning("Serial scale communication error: %s", exc)
+            self._log.warning("Serial scale communication error: %s", exc)
             self._last_error_log = now
         self._close_serial()
+        self._wait(0.5)
 
     def _process_line(self, raw_line: bytes) -> None:
         if not raw_line:
@@ -205,7 +233,7 @@ class SerialScaleService:
         try:
             line = raw_line.decode("utf-8", errors="replace").strip()
         except Exception:
-            LOGGER.warning("Serial scale received undecodable line: %s", raw_line)
+            self._log.warning("Serial scale received undecodable line: %s", raw_line)
             return
 
         if not line:
@@ -216,7 +244,7 @@ class SerialScaleService:
             return
 
         if not line.startswith("G:"):
-            LOGGER.warning("Serial scale received unexpected line: %s", line)
+            self._log.warning("Serial scale received unexpected line: %s", line)
             return
 
         grams: Optional[float] = None
@@ -236,7 +264,7 @@ class SerialScaleService:
                     stable = None
 
         if grams is None:
-            LOGGER.warning("Serial scale could not parse grams from line: %s", line)
+            self._log.warning("Serial scale could not parse grams from line: %s", line)
             return
 
         self._last_grams = grams
@@ -249,7 +277,7 @@ class SerialScaleService:
 
         with self._serial_lock:
             if self._serial is None or not self._serial.is_open:
-                raise RuntimeError("serial_not_connected")
+                raise RuntimeError("serial_disconnected")
             self._drain_ack_queue()
             try:
                 self._serial.write(command.encode("utf-8"))
@@ -278,10 +306,18 @@ class SerialScaleService:
             return
 
     def _set_connected(self, state: bool, reason: str) -> None:
+        previous_state = self._connected
         self._connected = state
         self._status_reason = reason
         if not state:
+            if previous_state:
+                self._log.info("Serial scale disconnected: %s", reason or "unknown reason")
+            had_reading = self._last_grams is not None or self._last_timestamp is not None
+            self._last_grams = None
+            self._last_timestamp = None
             self._last_stable = None
+            if had_reading:
+                self._log.info("Cleared last reading after disconnect to avoid stale data")
 
     def _close_serial(self) -> None:
         with self._serial_lock:
