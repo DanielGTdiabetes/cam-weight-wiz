@@ -13,6 +13,15 @@ Contexto clave:
 - La comunicación con backend se hace a través de `api.analyzeFood` y `api.scanBarcode`; los resultados devueltos alimentan `appendFood`.
 - Para exportar bolos a Nightscout, llama al método real `api.exportBolus(carbs, insulin, timestamp)`. El timestamp debe ser una cadena ISO generada con `new Date().toISOString()` y el payload enviado al backend debe incluir `{ carbs, insulin, timestamp }`.
 - Antes de invocar la exportación, lee la configuración mediante `storage.getSettings()` y cancela la operación con un toast de error si `nightscoutUrl` no está configurado; respeta los toasts, logs (`logger`) y vibración (`navigator.vibrate`) existentes tras una exportación exitosa o fallida.
+- Dependencias externas: instala siempre `html5-qrcode`, `localforage` y `tesseract.js` con `npm install html5-qrcode localforage tesseract.js` cuando implementes características que dependan de escaneo de códigos, persistencia offline o reconocimiento óptico. Si alguna de estas librerías no es necesaria para la funcionalidad concreta, elimina su uso del diseño en lugar de dejar referencias huérfanas.
+- Integración en Vite:
+  - Importa los módulos directamente en archivos cliente usando ESM (`import { Html5QrcodeScanner } from "html5-qrcode";`, `import localforage from "localforage";`, `import { createWorker } from "tesseract.js";`). Evita `require` o accesos al objeto global.
+  - Debido a que `html5-qrcode` y `tesseract.js` dependen de APIs del navegador, protégelos detrás de comprobaciones `if (typeof window !== "undefined")` o carga diferida (`await import("html5-qrcode")`) cuando renderices en contextos que puedan ejecutarse en SSR o pruebas.
+  - Configura `localforage` en el arranque (por ejemplo en `src/services/storage.ts`) con `localforage.config({ name: "cam-weight-wiz", storeName: "scanner" });` antes de usarlo como backend de almacenamiento.
+- Adaptaciones adicionales:
+  - Declara tipos auxiliares en `src/types` si las definiciones de las librerías no cubren tus casos (por ejemplo ampliar `Html5QrcodeScannerConfig`). Evita valores `any` innecesarios.
+  - Para pruebas, proporciona mocks ligeros en `tests/__mocks__` que simulen los métodos mínimos (`Html5QrcodeScanner.render`, `localforage.getItem`/`setItem`, `createWorker`) para evitar dependencias de hardware o workers reales.
+  - Si necesitas workers de `tesseract.js`, define rutas usando las opciones `workerPath`, `langPath` y `corePath` apuntando a assets servidos por Vite (colócalos en `public/` si es necesario).
 
 Instrucciones:
 1. Lee los alimentos iniciales desde `storage` al montar la vista y rellena `foods` con ese historial.
