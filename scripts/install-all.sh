@@ -94,7 +94,7 @@ apt-get install -y git curl ca-certificates build-essential cmake pkg-config \
     libjpeg-dev zlib1g-dev libpng-dev \
     alsa-utils sox ffmpeg \
     libzbar0 gpiod python3-rpi.gpio \
-    network-manager dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+    network-manager policykit-1 dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
 
 log "✓ Dependencias base instaladas"
 
@@ -632,30 +632,25 @@ log "✓ Nginx configurado"
 
 # Create mini-web backend service
 log "[17/20] Configurando servicio mini-web..."
-install -d -m 0755 -o pi -g pi /var/lib/bascula
-cat > /etc/systemd/system/bascula-miniweb.service <<EOF
-[Unit]
-Description=Bascula Mini-Web Backend
-After=network.target NetworkManager.service
+install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${CFG_DIR}"
 
-[Service]
-Type=simple
-User=pi
-Group=pi
-WorkingDirectory=/opt/bascula/current
-Environment=PATH=/opt/bascula/current/.venv/bin
-# Permitir leer PIN vía API solo en modo AP; por defecto 0
-Environment=BASCULA_ALLOW_PIN_READ=0
-ExecStart=/opt/bascula/current/.venv/bin/python /opt/bascula/current/backend/miniweb.py
-Restart=always
-RestartSec=5
+POLKIT_DST="/etc/polkit-1/localauthority/50-local.d"
+if [[ -d "${BASCULA_CURRENT_LINK}/scripts/polkit" ]]; then
+  install -d -m 0755 "${POLKIT_DST}"
+  for pkla in "${BASCULA_CURRENT_LINK}"/scripts/polkit/*.pkla; do
+    [[ -f "${pkla}" ]] || continue
+    install -m 0644 "${pkla}" "${POLKIT_DST}/$(basename "${pkla}")"
+  done
+  if ! systemctl restart polkit; then
+    systemctl restart polkitd || true
+  fi
+else
+  warn "Archivos de PolicyKit no encontrados en ${BASCULA_CURRENT_LINK}/scripts/polkit"
+fi
 
-[Install]
-WantedBy=multi-user.target
-EOF
+install -m 0644 "${BASCULA_CURRENT_LINK}/systemd/bascula-miniweb.service" /etc/systemd/system/bascula-miniweb.service
 systemctl daemon-reload
-systemctl enable bascula-miniweb.service
-systemctl restart bascula-miniweb.service
+systemctl enable --now bascula-miniweb.service
 log "✓ Mini-web backend configurado"
 
 # Setup UI kiosk service
