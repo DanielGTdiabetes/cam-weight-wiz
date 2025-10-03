@@ -188,7 +188,7 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         fonts-dejavu-core
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils sox ffmpeg
-        libzbar0 gpiod python3-rpi.gpio python3-pigpio
+        libzbar0 gpiod python3-rpi.gpio
         network-manager dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
@@ -239,10 +239,6 @@ else
   warn "No se encontró paquete Polkit disponible en apt-cache"
 fi
 
-if [[ "${NET_OK}" -eq 1 ]] && apt_candidate_exists pigpiod; then
-  ensure_pkg pigpiod
-fi
-
 STARTX_BIN="$(command -v startx || command -v xinit || true)"
 if [[ -z "${STARTX_BIN}" ]]; then
   fail "Falta startx/xinit tras la instalación"
@@ -259,20 +255,49 @@ if [[ -z "${CHROME_BIN}" ]]; then
 fi
 log "✓ Binario Chromium detectado: ${CHROME_BIN}"
 
-log "Configurando pigpio y persistencia de báscula..."
+log "Configurando GPIO para HX711 y persistencia de báscula..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-  ensure_pkg python3-pigpio
-  if apt_candidate_exists pigpiod; then
-    ensure_pkg pigpiod
-  fi
+  ensure_pkg python3-lgpio
 else
-  warn "Sin red: instala python3-pigpio manualmente"
+  warn "Sin red: instala python3-lgpio manualmente para habilitar el backend lgpio"
 fi
 
-systemctl_safe enable pigpiod
-systemctl_safe start pigpiod
+if [[ "${NET_OK}" -eq 1 ]]; then
+  if apt_candidate_exists python3-pigpio; then
+    ensure_pkg python3-pigpio
+  else
+    log "python3-pigpio no disponible en apt-cache; se omite instalación"
+  fi
+  if apt_candidate_exists pigpiod; then
+    ensure_pkg pigpiod
+  else
+    log "pigpiod no disponible en apt-cache; se omite instalación"
+  fi
+else
+  log "Sin red: omitiendo instalación opcional de python3-pigpio/pigpiod"
+fi
 
-ensure_user_in_group "${TARGET_USER}" pigpio
+PIGPIOD_SERVICE_FILE=""
+for candidate in /lib/systemd/system/pigpiod.service /etc/systemd/system/pigpiod.service; do
+  if [[ -f "${candidate}" ]]; then
+    PIGPIOD_SERVICE_FILE="${candidate}"
+    break
+  fi
+done
+
+if [[ -n "${PIGPIOD_SERVICE_FILE}" ]]; then
+  log "Servicio pigpiod detectado; habilitando si es posible"
+  systemctl_safe enable pigpiod
+  systemctl_safe start pigpiod
+else
+  log "Servicio pigpiod no disponible; se omite enable/start"
+fi
+
+if getent group pigpio >/dev/null 2>&1; then
+  ensure_user_in_group "${TARGET_USER}" pigpio
+else
+  log "Grupo pigpio no encontrado; se omite adición de ${TARGET_USER}"
+fi
 
 mkdir -p "${STATE_DIR}"
 chown "${TARGET_USER}:${TARGET_GROUP}" "${STATE_DIR}" 2>/dev/null || true
