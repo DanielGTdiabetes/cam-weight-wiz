@@ -6,14 +6,13 @@ import subprocess
 import ipaddress
 import random
 import string
-import asyncio
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
 import serial  # keep existing behavior; ok if not present in some installs
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Header
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -22,13 +21,14 @@ from pathlib import Path
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = BASE_DIR / "dist"
-STATE_DIR = Path("/var/lib/bascula")
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-STATE_FILE = STATE_DIR / "miniweb_state.json"
 
-CONFIG_PATH = Path.home() / ".bascula" / "config.json"
+CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
+PIN_PATH = CFG_DIR / "pin.json"
+CONFIG_PATH = CFG_DIR / "config.json"
 DEFAULT_SERIAL_PORT = "/dev/serial0"
 DEFAULT_BAUD_RATE = 115200
+
+CFG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Estado global ----------
 scale_serial: Optional[serial.Serial] = None
@@ -49,12 +49,28 @@ def _save_json(path: Path, data: Dict[str, Any]) -> None:
 def _gen_pin() -> str:
     return ''.join(random.choices(string.digits, k=4))
 
-def _get_or_create_pin() -> str:
-    data = _load_json(STATE_FILE) or {}
+def _load_pin() -> Optional[str]:
+    data = _load_json(PIN_PATH) or {}
     pin = data.get("pin")
-    if not pin or not (isinstance(pin, str) and len(pin) == 4 and pin.isdigit()):
+    if isinstance(pin, str) and len(pin) == 4 and pin.isdigit():
+        return pin
+    return None
+
+
+def _write_pin(pin: str) -> None:
+    CFG_DIR.mkdir(parents=True, exist_ok=True)
+    _save_json(PIN_PATH, {"pin": pin, "created_at": datetime.utcnow().isoformat()})
+
+
+def _get_or_create_pin() -> str:
+    pin = _load_pin()
+    if pin:
+        return pin
+    if os.getenv("BASCULA_RANDOM_PIN") == "1":
         pin = _gen_pin()
-        _save_json(STATE_FILE, {"pin": pin, "created_at": datetime.utcnow().isoformat()})
+    else:
+        pin = "1234"
+    _write_pin(pin)
     return pin
 
 def _get_iface_ip(iface: str) -> Optional[str]:
@@ -70,8 +86,8 @@ def _get_iface_ip(iface: str) -> Optional[str]:
         return None
     return None
 
-def _is_ap_mode() -> bool:
-    # Heurística: IP clásica de AP en NM: 192.168.4.1/24 en wlan0
+def _is_ap_mode_legacy() -> bool:
+    """Fallback heurístico: IP clásica de AP en NM: 192.168.4.1/24 en wlan0."""
     ip = _get_iface_ip("wlan0")
     if not ip:
         return False
@@ -80,58 +96,184 @@ def _is_ap_mode() -> bool:
     except Exception:
         return False
 
+
+def _is_wlan0_shared_mode() -> bool:
+    """Comprueba si wlan0 está en modo AP/shared mediante NetworkManager."""
+    try:
+        active = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"], timeout=10)
+    except FileNotFoundError:
+        return _is_ap_mode_legacy()
+    except Exception:
+        return _is_ap_mode_legacy()
+
+    if active.returncode != 0:
+        return _is_ap_mode_legacy()
+
+    for line in active.stdout.strip().splitlines():
+        parts = line.split(":")
+        if len(parts) < 3:
+            continue
+        name, conn_type, device = parts[0], parts[1], parts[2]
+        if device != "wlan0" or conn_type != "802-11-wireless":
+            continue
+        detail = _nmcli(["-t", "-f", "802-11-wireless.mode,ipv4.method", "connection", "show", name], timeout=10)
+        if detail.returncode != 0:
+            continue
+        values: Dict[str, str] = {}
+        for entry in detail.stdout.strip().splitlines():
+            if ":" in entry:
+                key, value = entry.split(":", 1)
+                values[key.strip()] = value.strip()
+        if values.get("802-11-wireless.mode") == "ap":
+            return True
+        if values.get("ipv4.method") == "shared":
+            return True
+    return _is_ap_mode_legacy()
+
 def _nmcli(args: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
     return subprocess.run(["nmcli", *args], capture_output=True, text=True, timeout=timeout)
 
+def _split_nmcli(line: str, separator: str = "|") -> list[str]:
+    values: list[str] = []
+    current: list[str] = []
+    escape = False
+    for char in line:
+        if escape:
+            current.append(char)
+            escape = False
+            continue
+        if char == "\\":
+            escape = True
+            continue
+        if char == separator:
+            values.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    values.append("".join(current))
+    return values
+
+
 def _list_networks() -> list[dict]:
-    # Devuelve lista de redes o genera excepciones específicas para permisos
+    """Devuelve lista de redes Wi-Fi visibles usando nmcli."""
     try:
-        res = _nmcli(["-t", "-f", "SSID,SIGNAL,SECURITY", "dev", "wifi", "list"], timeout=20)
+        rescan = _nmcli(["device", "wifi", "rescan"], timeout=20)
+        if rescan.returncode != 0:
+            err = (rescan.stderr or rescan.stdout).strip()
+            if "not authorized" not in err.lower():
+                raise RuntimeError(f"NMCLI_RESCAN_ERROR: {err}")
+        res = _nmcli(
+            [
+                "-t",
+                "--fields",
+                "SSID,SIGNAL,SECURITY",
+                "--separator",
+                "|",
+                "device",
+                "wifi",
+                "list",
+            ],
+            timeout=25,
+        )
         if res.returncode != 0:
-            # Falta permiso o NM no deja escanear
             err = (res.stderr or res.stdout).strip()
             if "not authorized" in err.lower():
                 raise PermissionError("NMCLI_NOT_AUTHORIZED")
             raise RuntimeError(f"NMCLI_ERROR: {err}")
+
         networks = []
-        for line in res.stdout.strip().splitlines():
-            if not line:
+        for raw_line in res.stdout.strip().splitlines():
+            if not raw_line:
                 continue
-            # SSID:SIGNAL:SECURITY
-            parts = line.split(":")
+            parts = _split_nmcli(raw_line)
+            if not parts:
+                continue
             ssid = parts[0]
             if not ssid:
                 continue
             signal = 0
-            try:
-                signal = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-            except Exception:
-                signal = 0
-            secured = (len(parts) > 2 and parts[2] != "")
+            if len(parts) > 1:
+                try:
+                    signal = int(parts[1])
+                except ValueError:
+                    signal = 0
+            security = parts[2] if len(parts) > 2 else ""
+            secured = bool(security and security.lower() != "--" and security.upper() != "NONE")
             networks.append({"ssid": ssid, "signal": signal, "secured": secured})
-        networks.sort(key=lambda x: x["signal"], reverse=True)
+        networks.sort(key=lambda item: item["signal"], reverse=True)
         return networks
     except FileNotFoundError:
-        # nmcli no instalado
         raise PermissionError("NMCLI_NOT_AVAILABLE")
     except PermissionError:
         raise
-    except Exception as e:
-        raise RuntimeError(str(e))
+    except Exception as exc:
+        raise RuntimeError(str(exc))
 
 def _disable_ap_nm():
-    # En NetworkManager, si se usa conexión compartida, basta con desconectar AP y/o activar STA
-    # Aquí, intentamos borrar o desconectar la conexión 'BasculaAP' si existe
-    _nmcli(["device", "disconnect", "wlan0"], timeout=10)
+    """Intenta desconectar wlan0 para liberar el interfaz antes de conectar a un STA."""
+    try:
+        _nmcli(["device", "disconnect", "wlan0"], timeout=10)
+    except FileNotFoundError:
+        pass
+
 
 def _connect_wifi(ssid: str, password: str) -> None:
-    # Intento de conexión STA
-    # 1) Desconectar AP
+    """Configura una conexión Wi-Fi WPA2-PSK con nmcli siguiendo la receta solicitada."""
+    if not ssid:
+        raise ValueError("SSID is required")
     _disable_ap_nm()
-    # 2) Conectar
-    res = _nmcli(["dev", "wifi", "connect", ssid, "password", password], timeout=45)
-    if res.returncode != 0:
-        raise RuntimeError((res.stderr or res.stdout).strip())
+
+    try:
+        delete = _nmcli(["connection", "delete", ssid], timeout=10)
+        if delete.returncode != 0:
+            msg = (delete.stderr or delete.stdout).strip().lower()
+            if "unknown connection" not in msg and "not found" not in msg:
+                raise RuntimeError((delete.stderr or delete.stdout).strip())
+    except FileNotFoundError:
+        raise PermissionError("NMCLI_NOT_AVAILABLE")
+
+    add_cmd = [
+        "connection",
+        "add",
+        "type",
+        "wifi",
+        "ifname",
+        "wlan0",
+        "con-name",
+        ssid,
+        "ssid",
+        ssid,
+        "wifi-sec.key-mgmt",
+        "wpa-psk",
+        "wifi-sec.psk",
+        password,
+        "802-11-wireless.band",
+        "bg",
+        "802-11-wireless-security.proto",
+        "rsn",
+        "802-11-wireless-security.auth-alg",
+        "open",
+    ]
+
+    add_res = _nmcli(add_cmd, timeout=25)
+    if add_res.returncode != 0:
+        msg = (add_res.stderr or add_res.stdout).strip()
+        lower = msg.lower()
+        if "secrets were required" in lower:
+            raise PermissionError("NMCLI_SECRETS_REQUIRED")
+        if "not authorized" in lower:
+            raise PermissionError("NMCLI_NOT_AUTHORIZED")
+        raise RuntimeError(msg)
+
+    up_res = _nmcli(["connection", "up", ssid], timeout=45)
+    if up_res.returncode != 0:
+        msg = (up_res.stderr or up_res.stdout).strip()
+        lower = msg.lower()
+        if "secrets were required" in lower:
+            raise PermissionError("NMCLI_SECRETS_REQUIRED")
+        if "not authorized" in lower:
+            raise PermissionError("NMCLI_NOT_AUTHORIZED")
+        raise RuntimeError(msg)
 
 def _load_config() -> dict:
     cfg = _load_json(CONFIG_PATH) or {}
@@ -178,36 +320,55 @@ app.add_middleware(
 )
 
 # ---------- Static SPA ----------
-if DIST_DIR.exists():
+def _dist_file(name: str) -> FileResponse:
+    file_path = DIST_DIR / name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Archivo no disponible")
+    return FileResponse(file_path)
+
+
+if (DIST_DIR / "assets").exists():
     app.mount("/assets", StaticFiles(directory=DIST_DIR / "assets"), name="assets")
 
-    @app.get("/", response_class=FileResponse)
-    async def root_index():
-        return DIST_DIR / "index.html"
 
-    @app.get("/manifest.json", response_class=FileResponse)
-    async def manifest():
-        return DIST_DIR / "manifest.json"
+@app.get("/", response_class=FileResponse)
+async def root_index():
+    return _dist_file("index.html")
 
-    @app.get("/service-worker.js", response_class=FileResponse)
-    async def sw():
-        return DIST_DIR / "service-worker.js"
 
-    @app.get("/favicon.ico", response_class=FileResponse)
-    async def favicon():
-        return DIST_DIR / "favicon.ico"
+@app.get("/config", response_class=FileResponse)
+async def config_index():
+    return _dist_file("index.html")
 
-    @app.get("/icon-192.png", response_class=FileResponse)
-    async def icon192():
-        return DIST_DIR / "icon-192.png"
 
-    @app.get("/icon-512.png", response_class=FileResponse)
-    async def icon512():
-        return DIST_DIR / "icon-512.png"
+@app.get("/manifest.json", response_class=FileResponse)
+async def manifest():
+    return _dist_file("manifest.json")
 
-    @app.get("/robots.txt", response_class=FileResponse)
-    async def robots():
-        return DIST_DIR / "robots.txt"
+
+@app.get("/service-worker.js", response_class=FileResponse)
+async def sw():
+    return _dist_file("service-worker.js")
+
+
+@app.get("/favicon.ico", response_class=FileResponse)
+async def favicon():
+    return _dist_file("favicon.ico")
+
+
+@app.get("/icon-192.png", response_class=FileResponse)
+async def icon192():
+    return _dist_file("icon-192.png")
+
+
+@app.get("/icon-512.png", response_class=FileResponse)
+async def icon512():
+    return _dist_file("icon-512.png")
+
+
+@app.get("/robots.txt", response_class=FileResponse)
+async def robots():
+    return _dist_file("robots.txt")
 
 # ---------- Models ----------
 class PinVerification(BaseModel):
@@ -237,14 +398,10 @@ def _check_rate_limit(ip: str):
 def _register_fail(ip: str):
     FAILED_ATTEMPTS.setdefault(ip, []).append(datetime.utcnow())
 
-def _allow_pin_disclosure(request: Request, force_header: Optional[str]) -> bool:
-    if _is_ap_mode():
+def _allow_pin_disclosure() -> bool:
+    if _is_wlan0_shared_mode():
         return True
     if os.getenv("BASCULA_ALLOW_PIN_READ") == "1":
-        return True
-    # Solo desde localhost con cabecera explícita
-    client = request.client.host if request.client else ""
-    if client in ("127.0.0.1", "::1") and force_header == "1":
         return True
     return False
 
@@ -253,8 +410,8 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/api/miniweb/pin")
-async def get_pin(request: Request, force: Optional[str] = Header(default="0", alias="X-Force-Pin")):
-    if not _allow_pin_disclosure(request, force):
+async def get_pin():
+    if not _allow_pin_disclosure():
         raise HTTPException(status_code=403, detail="PIN not available in this mode")
     return {"pin": CURRENT_PIN}
 
@@ -286,13 +443,33 @@ async def scan_networks():
 async def connect_wifi(credentials: WifiCredentials):
     try:
         _connect_wifi(credentials.ssid, credentials.password)
-        # Programar reboot en 60s
-        subprocess.Popen(["sudo", "shutdown", "-r", "+1"])
-        return {"success": True, "message": "Conectado exitosamente"}
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"success": True, "message": "Conexión iniciada"}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except PermissionError as exc:
+        code = str(exc)
+        if code == "NMCLI_NOT_AVAILABLE":
+            raise HTTPException(status_code=503, detail={"code": code, "message": "nmcli no está instalado"}) from exc
+        if code == "NMCLI_SECRETS_REQUIRED":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": code,
+                    "message": "NetworkManager requiere secretos adicionales (comprueba la contraseña WPA).",
+                },
+            ) from exc
+        if code == "NMCLI_NOT_AUTHORIZED":
+            raise HTTPException(
+                status_code=403,
+                detail={"code": code, "message": "NetworkManager denegó la operación (PolicyKit)."},
+            ) from exc
+        raise HTTPException(status_code=400, detail={"code": code, "message": "Error de permisos al configurar Wi-Fi."}) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 @app.get("/api/network/status")
 async def network_status():
@@ -308,8 +485,8 @@ async def network_status():
                 parts = line.strip().split(":")
                 if len(parts) >= 3 and parts[1] == "802-11-wireless" and parts[2] == "wlan0":
                     ssid = parts[0]
-                    # Si no es la conexión AP (heurística), lo damos por conectado
-                    if wlan_ip and not _is_ap_mode():
+                    # Si no es la conexión AP/shared, lo damos por conectado
+                    if wlan_ip and not _is_wlan0_shared_mode():
                         connected = True
                         break
     except Exception:
@@ -334,7 +511,7 @@ def _print_boot_banner():
             print(f"📍 Access URL: {url}")
     else:
         print("📍 Access URL: http://<device-ip>:8080")
-    print(f"🔐 PIN: {CURRENT_PIN}")
+    print(f"🔐 Mini-Web PIN: {CURRENT_PIN}")
     print("============================================================")
 
 _print_boot_banner()

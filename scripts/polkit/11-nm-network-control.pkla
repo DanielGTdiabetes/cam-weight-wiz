@@ -1,0 +1,6 @@
+[Allow Network Control]
+Identity=unix-user:pi
+Action=org.freedesktop.NetworkManager.settings.modify.system;org.freedesktop.NetworkManager.network-control
+ResultActive=yes
+ResultAny=yes
+ResultInactive=yes
