@@ -266,8 +266,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   calibrationFactor: 1,
   defaultUnit: 'g',
   chatGptKey: '',
-  apiUrl: 'http://localhost:8080',
-  wsUrl: 'ws://localhost:8080',
+  // Dispositivo: usar loopback 127.0.0.1 por defecto
+  apiUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8080',
+  wsUrl: import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8080',
   nightscoutUrl: '',
   nightscoutToken: '',
   diabetesMode: false,
