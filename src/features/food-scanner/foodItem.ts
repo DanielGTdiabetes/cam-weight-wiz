@@ -21,6 +21,7 @@ export interface FoodItem {
   source: FoodSource;
   capturedAt: number;
   avgColor?: FoodColor;
+  photo?: string;
 }
 
 export interface FoodScannerConfirmedPayload {
@@ -33,6 +34,8 @@ export interface FoodScannerConfirmedPayload {
   kcal?: number;
   confidence?: number;
   avgColor?: FoodColor;
+  timestamp: Date;
+  photo?: string;
 }
 
 export type BarcodeScannerSnapshot = FoodScannerConfirmedPayload;
@@ -85,6 +88,7 @@ export const createScannerSnapshot = (
     kcal: calculateCalories(nutrition),
     confidence: analysis.confidence,
     avgColor: mapColor(analysis),
+    timestamp: new Date(),
   };
 };
 
@@ -102,8 +106,9 @@ export const toFoodItem = (
   kcal: snapshot.kcal,
   confidence: snapshot.confidence,
   source,
-  capturedAt: Date.now(),
+  capturedAt: snapshot.timestamp.getTime(),
   avgColor: snapshot.avgColor,
+  photo: snapshot.photo,
 });
 
 export const buildFoodItem = (

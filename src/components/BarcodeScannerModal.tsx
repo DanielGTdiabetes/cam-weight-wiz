@@ -677,6 +677,8 @@ export function BarcodeScannerModal({
       return;
     }
 
+    const confirmedAt = new Date();
+    const photo = productData.photo ?? capturedPhoto;
     const payload: FoodScannerConfirmedPayload = {
       name: productData.name,
       weight: pesoActual,
@@ -686,11 +688,13 @@ export function BarcodeScannerModal({
       glycemicIndex: productData.glycemicIndex,
       kcal: calculatedKcal > 0 ? calculatedKcal : undefined,
       confidence: productData.confidence || undefined,
+      timestamp: confirmedAt,
+      photo,
     };
 
     storage.addScannerRecord({
       ...payload,
-      photo: productData.photo,
+      timestamp: confirmedAt.toISOString(),
       carbsPer100g: productData.carbsPer100g,
       proteinsPer100g: productData.proteinsPer100g,
       fatsPer100g: productData.fatsPer100g,
@@ -704,7 +708,7 @@ export function BarcodeScannerModal({
     if (settings.nightscoutUrl && settings.nightscoutToken) {
       try {
         if (navigator.onLine) {
-          await api.exportBolus(calculatedCarbs, 0, new Date().toISOString());
+          await api.exportBolus(calculatedCarbs, 0, confirmedAt.toISOString());
           toast({
             title: 'Exportado a Nightscout',
             description: 'Revisa tu registro en Nightscout',
@@ -714,7 +718,7 @@ export function BarcodeScannerModal({
             type: 'exportBolus',
             carbs: calculatedCarbs,
             insulin: 0,
-            timestamp: new Date().toISOString(),
+            timestamp: confirmedAt.toISOString(),
           });
           toast({
             title: 'Sin conexión',
@@ -732,7 +736,7 @@ export function BarcodeScannerModal({
           type: 'exportBolus',
           carbs: calculatedCarbs,
           insulin: 0,
-          timestamp: new Date().toISOString(),
+          timestamp: confirmedAt.toISOString(),
         });
       }
     }
@@ -758,6 +762,7 @@ export function BarcodeScannerModal({
     onFoodConfirmed,
     onClose,
     toast,
+    capturedPhoto,
   ]);
 
   const parseVoiceTranscript = useCallback((transcript: string): Partial<ManualFormValues> => {
