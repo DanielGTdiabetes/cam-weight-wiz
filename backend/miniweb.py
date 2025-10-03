@@ -1,5 +1,6 @@
 # backend/miniweb.py
 # (Codex: escribir archivo COMPLETO, sin "...", listo para ejecutar)
+from __future__ import annotations
 import os
 import json
 import logging

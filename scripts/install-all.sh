@@ -37,6 +37,34 @@ ensure_pkg() {
   done
 }
 
+apt_candidate_exists() {
+  local candidate
+  candidate=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
+  [[ -n "${candidate}" && "${candidate}" != "(none)" ]]
+}
+
+ensure_user_in_group() {
+  local user="$1"
+  local group="$2"
+  if ! id -u "${user}" >/dev/null 2>&1; then
+    warn "Usuario ${user} no existe; omitiendo adición a ${group}"
+    return
+  fi
+  if ! getent group "${group}" >/dev/null 2>&1; then
+    warn "Grupo ${group} no existe; omitiendo adición de ${user}"
+    return
+  fi
+  if id -nG "${user}" | tr ' ' '\n' | grep -qx "${group}"; then
+    log "Usuario ${user} ya pertenece al grupo ${group}"
+    return
+  fi
+  if usermod -aG "${group}" "${user}"; then
+    log "Añadido usuario ${user} al grupo ${group}"
+  else
+    warn "No se pudo añadir ${user} al grupo ${group}"
+  fi
+}
+
 # --- Require root privileges ---
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   err "Ejecuta con sudo: sudo ./install-all.sh"
@@ -160,8 +188,8 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         fonts-dejavu-core
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils sox ffmpeg
-        libzbar0 gpiod python3-rpi.gpio pigpio python3-pigpio
-        network-manager policykit-1 dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+        libzbar0 gpiod python3-rpi.gpio python3-pigpio
+        network-manager dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
         log "✓ Dependencias base instaladas"
@@ -173,55 +201,78 @@ if [[ "${NET_OK}" -eq 1 ]]; then
     ensure_pkg xinit
     ensure_pkg openbox
     ensure_pkg unclutter
-
-    CHROME_PKG=""
-    if apt-cache policy chromium 2>/dev/null | grep -q 'Candidate:'; then
-      CHROME_PKG="chromium"
-    fi
-    if apt-cache policy chromium-browser 2>/dev/null | grep -q 'Candidate:'; then
-      CHROME_PKG="${CHROME_PKG:-chromium-browser}"
-    fi
-    if [[ -n "${CHROME_PKG}" ]]; then
-      ensure_pkg "${CHROME_PKG}"
-      log "✓ Paquete Chromium seleccionado: ${CHROME_PKG}"
-    else
-      warn "No se encontró paquete Chromium disponible en apt-cache"
-    fi
 else
     warn "Sin red: omitiendo la instalación de dependencias base"
 fi
 
-if ! command -v startx >/dev/null 2>&1 && ! command -v xinit >/dev/null 2>&1; then
+CHROME_PKG=""
+if apt_candidate_exists chromium; then
+  CHROME_PKG="chromium"
+fi
+if apt_candidate_exists chromium-browser; then
+  CHROME_PKG="${CHROME_PKG:-chromium-browser}"
+fi
+
+if [[ -n "${CHROME_PKG}" ]]; then
+  if [[ "${NET_OK}" -eq 1 ]]; then
+    ensure_pkg "${CHROME_PKG}"
+  fi
+  log "✓ Paquete Chromium seleccionado: ${CHROME_PKG}"
+else
+  fail "No se encontró paquete Chromium disponible en apt-cache"
+fi
+
+POLKIT_PKG=""
+if apt_candidate_exists policykit-1; then
+  POLKIT_PKG="policykit-1"
+fi
+if apt_candidate_exists polkitd; then
+  POLKIT_PKG="${POLKIT_PKG:-polkitd}"
+fi
+
+if [[ -n "${POLKIT_PKG}" && "${NET_OK}" -eq 1 ]]; then
+  ensure_pkg "${POLKIT_PKG}"
+  log "✓ Paquete Polkit seleccionado: ${POLKIT_PKG}"
+elif [[ -n "${POLKIT_PKG}" ]]; then
+  log "✓ Paquete Polkit detectado: ${POLKIT_PKG}"
+else
+  warn "No se encontró paquete Polkit disponible en apt-cache"
+fi
+
+if [[ "${NET_OK}" -eq 1 ]] && apt_candidate_exists pigpiod; then
+  ensure_pkg pigpiod
+fi
+
+STARTX_BIN="$(command -v startx || command -v xinit || true)"
+if [[ -z "${STARTX_BIN}" ]]; then
   fail "Falta startx/xinit tras la instalación"
 fi
+log "✓ Binario X detectado: ${STARTX_BIN}"
 
 if ! command -v openbox >/dev/null 2>&1; then
   fail "Falta openbox tras la instalación"
 fi
 
-if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1; then
+CHROME_BIN="$(command -v chromium || command -v chromium-browser || true)"
+if [[ -z "${CHROME_BIN}" ]]; then
   fail "Falta Chromium tras la instalación"
 fi
+log "✓ Binario Chromium detectado: ${CHROME_BIN}"
 
 log "Configurando pigpio y persistencia de báscula..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-  ensure_pkg pigpio python3-pigpio
+  ensure_pkg python3-pigpio
+  if apt_candidate_exists pigpiod; then
+    ensure_pkg pigpiod
+  fi
 else
-  warn "Sin red: instala pigpio y python3-pigpio manualmente"
+  warn "Sin red: instala python3-pigpio manualmente"
 fi
 
 systemctl_safe enable pigpiod
 systemctl_safe start pigpiod
 
-if getent group pigpio >/dev/null 2>&1; then
-  if ! id -nG "${TARGET_USER}" | tr ' ' '\n' | grep -q '^pigpio$'; then
-    if usermod -aG pigpio "${TARGET_USER}"; then
-      log "Usuario ${TARGET_USER} añadido al grupo pigpio"
-    else
-      warn "No se pudo añadir ${TARGET_USER} al grupo pigpio"
-    fi
-  fi
-fi
+ensure_user_in_group "${TARGET_USER}" pigpio
 
 mkdir -p "${STATE_DIR}"
 chown "${TARGET_USER}:${TARGET_GROUP}" "${STATE_DIR}" 2>/dev/null || true
@@ -424,18 +475,9 @@ log "✓ Xorg configurado para DRM card1"
 log "[9/20] Configurando Polkit..."
 install -d -m 0755 /etc/polkit-1/rules.d
 
-if id -u pi >/dev/null 2>&1; then
-  if id -nG pi | grep -qw netdev; then
-    log "Usuario pi ya pertenece al grupo netdev"
-  else
-    if usermod -aG netdev pi; then
-      log "Añadido usuario pi al grupo netdev"
-    else
-      warn "No se pudo añadir pi al grupo netdev"
-    fi
-  fi
-else
-  warn "Usuario pi no existe; omitiendo adición a netdev"
+ensure_user_in_group "${TARGET_USER}" netdev
+if [[ "${TARGET_USER}" != "pi" ]]; then
+  ensure_user_in_group pi netdev
 fi
 
 POLKIT_RULE_SRC="${PROJECT_ROOT}/packaging/polkit/49-nmcli.rules"
@@ -444,7 +486,7 @@ if [[ -f "${POLKIT_RULE_SRC}" ]]; then
 else
   warn "No se encontró ${POLKIT_RULE_SRC}; creando regla básica"
   install -m 0644 /dev/null /etc/polkit-1/rules.d/49-nmcli.rules
-  cat > /etc/polkit-1/rules.d/49-nmcli.rules <<'EOF'
+    cat > /etc/polkit-1/rules.d/49-nmcli.rules <<'EOF'
 polkit.addRule(function(action, subject) {
   if (subject.isInGroup("netdev") || subject.user == "pi") {
     if (action.id == "org.freedesktop.NetworkManager.settings.modify.system") {
@@ -460,12 +502,6 @@ polkit.addRule(function(action, subject) {
       return polkit.Result.YES;
     }
     if (action.id == "org.freedesktop.NetworkManager.enable-disable-wifi") {
-      return polkit.Result.YES;
-    }
-    if (action.id == "org.freedesktop.NetworkManager.wifi.share.protected") {
-      return polkit.Result.YES;
-    }
-    if (action.id == "org.freedesktop.NetworkManager.wifi.share.open") {
       return polkit.Result.YES;
     }
   }
@@ -491,12 +527,8 @@ polkit.addRule(function(action, subject) {
 });
 EOF
 
-if id -u pi >/dev/null 2>&1; then
-  if id -nG pi | grep -qw netdev; then
-    log "Verificación: pi ∈ netdev"
-  else
-    fail "pi no pertenece a netdev tras la instalación"
-  fi
+if id -u pi >/dev/null 2>&1 && ! id -nG pi | tr ' ' '\n' | grep -qw netdev; then
+  fail "pi no pertenece a netdev tras la instalación"
 fi
 
 if [[ -f /etc/polkit-1/rules.d/49-nmcli.rules ]]; then
@@ -518,6 +550,11 @@ if ! nmcli general status >/dev/null 2>&1; then
   err "ERR: nmcli no responde"
   exit 1
 fi
+
+if ! runuser -l "${TARGET_USER}" -c "nmcli device wifi list" >/dev/null 2>&1; then
+  fail "nmcli device wifi list falló para ${TARGET_USER} sin sudo"
+fi
+log "✓ nmcli usable sin sudo para ${TARGET_USER}"
 
 log "Chequeos rápidos de nmcli (PolicyKit)..."
 set +e
@@ -1127,7 +1164,7 @@ if [[ -f "${BASCULA_CURRENT_LINK}/.xinitrc" ]]; then
   log "✓ .xinitrc copiado desde el proyecto"
 else
   warn ".xinitrc no encontrado en el proyecto, creando uno básico"
-  cat > "${TARGET_HOME}/.xinitrc" <<'EOF'
+  cat > "${TARGET_HOME}/.xinitrc" <<EOF
 #!/bin/sh
 set -e
 xset s off
@@ -1136,8 +1173,8 @@ xset s noblank
 unclutter -idle 0.5 -root &
 openbox &
 sleep 2
-CHROME_BIN="$(command -v chromium || command -v chromium-browser || echo chromium)"
-exec "$CHROME_BIN" \
+CHROME_BIN="\$(command -v ${CHROME_PKG} 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || printf '%s' '${CHROME_BIN}')"
+exec "\${CHROME_BIN}" \
   --kiosk \
   --noerrdialogs \
   --disable-infobars \
@@ -1156,9 +1193,8 @@ EOF
 fi
 
 # Determinar binario startx/xinit disponible
-STARTX_BIN="$(command -v startx || true)"
 if [[ -z "${STARTX_BIN}" ]]; then
-  STARTX_BIN="$(command -v xinit || true)"
+  STARTX_BIN="$(command -v startx || command -v xinit || true)"
 fi
 if [[ -z "${STARTX_BIN}" ]]; then
   fail "No se encontró startx/xinit"

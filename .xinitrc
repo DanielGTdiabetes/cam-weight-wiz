@@ -16,7 +16,8 @@ openbox &
 sleep 2
 
 # Lanzar Chromium en modo kiosk
-chromium \
+CHROME_BIN="$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || command -v ${CHROME_PKG:-chromium} 2>/dev/null || echo chromium)"
+exec "$CHROME_BIN" \
   --kiosk \
   --noerrdialogs \
   --disable-infobars \
