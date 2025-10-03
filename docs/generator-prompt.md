@@ -37,6 +37,31 @@ Quiero que actualices la vista de la báscula para que utilice el hook de WebSoc
 5. Si la petición falla, captura el error y muestra un mensaje adecuado (toast o alerta) indicando que no se pudo obtener la información del código, además de restablecer cualquier estado temporal (spinners, botones deshabilitados).
 6. Restablece el estado de carga independientemente del resultado.
 
+##### Contrato del modal de códigos de barras
+
+El modal que encapsule la lectura de códigos (`BarcodeScannerModal`) debe aceptar un callback `appendFood` que reciba todos los macronutrientes necesarios para poblar la vista sin cálculos adicionales. El contrato compartido está disponible en `@/features/food-scanner/foodItem`:
+
+```ts
+export interface BarcodeScannerSnapshot {
+  name: string;
+  weight: number;
+  carbs: number;
+  proteins: number;
+  fats: number;
+  glycemicIndex: number;
+  confidence?: number;
+  avgColor?: { r: number; g: number; b: number };
+}
+
+export interface BarcodeScannerModalProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  appendFood: (food: BarcodeScannerSnapshot) => void;
+}
+```
+
+Si el backend entrega los macronutrientes normalizados a 100 g, crea primero un `BarcodeScannerSnapshot` ajustando `proteins`, `fats` y `glycemicIndex` antes de invocar `appendFood`. Puedes utilizar los helpers `scaleNutritionByFactor`, `createScannerSnapshot` y `toFoodItem` para mantener el contrato sincronizado con la vista.
+
 ### Notas sobre FatSecret
 
 - Solo utiliza FatSecret si el requisito lo especifica. En ese caso, indica explícitamente en el prompt cómo crear y configurar el cliente antes de usarlo (por ejemplo, instanciando un `FatSecretClient` con claves y tokens válidos o creando un helper `createFatSecretClient` que gestione la autenticación) **antes** de realizar cualquier llamada.

@@ -8,53 +8,16 @@ import { BolusCalculator } from "@/components/BolusCalculator";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { storage } from "@/services/storage";
 import { logger } from "@/services/logger";
-import { api, type FoodAnalysis } from "@/services/api";
+import { api } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
-
-interface FoodItem {
-  id: string;
-  name: string;
-  weight: number;
-  carbs: number;
-  proteins: number;
-  fats: number;
-  glycemicIndex: number;
-  confidence?: number;
-  source: "camera" | "barcode";
-  capturedAt: number;
-  avgColor?: { r: number; g: number; b: number };
-}
-
-const roundMacro = (value: number) => Number(value.toFixed(2));
-
-const buildFoodItem = (
-  analysis: FoodAnalysis,
-  weight: number,
-  source: FoodItem["source"]
-): FoodItem => {
-  const macros = analysis.nutrition ?? { carbs: 0, proteins: 0, fats: 0, glycemic_index: 0 };
-  const color = analysis.avg_color
-    ? {
-        r: analysis.avg_color.r,
-        g: analysis.avg_color.g,
-        b: analysis.avg_color.b,
-      }
-    : undefined;
-
-  return {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    name: analysis.name || "Alimento sin nombre",
-    weight,
-    carbs: roundMacro(macros.carbs ?? 0),
-    proteins: roundMacro(macros.proteins ?? 0),
-    fats: roundMacro(macros.fats ?? 0),
-    glycemicIndex: Math.round(macros.glycemic_index ?? 0),
-    confidence: analysis.confidence,
-    source,
-    capturedAt: Date.now(),
-    avgColor: color,
-  };
-};
+import {
+  buildFoodItem,
+  createScannerSnapshot,
+  scaleNutritionByFactor,
+  toFoodItem,
+  type BarcodeScannerSnapshot,
+  type FoodItem,
+} from "@/features/food-scanner/foodItem";
 
 export const FoodScannerView = () => {
   const { weight: scaleWeight } = useScaleWebSocket();
@@ -198,6 +161,11 @@ export const FoodScannerView = () => {
     }
   };
 
+  const appendBarcodeSnapshot = (snapshot: BarcodeScannerSnapshot) => {
+    const item = toFoodItem(snapshot, "barcode");
+    appendFood(item);
+  };
+
   const handleAnalyze = async () => {
     const validWeight = await ensureWeight();
     if (!validWeight) {
@@ -255,19 +223,10 @@ export const FoodScannerView = () => {
     setIsScanning(true);
     try {
       const analysis = await api.scanBarcode(code.trim());
-      const macros = analysis.nutrition ?? { carbs: 0, proteins: 0, fats: 0, glycemic_index: 0 };
       const factor = validWeight / 100;
-      const normalized: FoodAnalysis = {
-        ...analysis,
-        nutrition: {
-          carbs: roundMacro((macros.carbs ?? 0) * factor),
-          proteins: roundMacro((macros.proteins ?? 0) * factor),
-          fats: roundMacro((macros.fats ?? 0) * factor),
-          glycemic_index: macros.glycemic_index ?? 0,
-        },
-      };
-      const item = buildFoodItem(normalized, validWeight, "barcode");
-      appendFood(item);
+      const normalized = scaleNutritionByFactor(analysis, factor);
+      const snapshot = createScannerSnapshot(normalized, validWeight);
+      appendBarcodeSnapshot(snapshot);
     } catch (error) {
       logger.error("Barcode lookup failed", { error });
       if (error instanceof ApiError) {
