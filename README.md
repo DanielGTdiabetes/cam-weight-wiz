@@ -1,129 +1,75 @@
-# Welcome to your Lovable project
+# Báscula Digital Pro (bascula-cam)
 
-## Project info
+## Visión general
 
-**URL**: https://lovable.dev/projects/315129b0-b47e-4e39-a2bd-640990fb32ef
+Este repositorio contiene la base de software para la báscula digital basada en Raspberry Pi.
+Incluye:
 
-## How can I edit this code?
+- Backend FastAPI/uvicorn que expone la mini-web de configuración y los servicios de la báscula en `http://localhost:8080`.
+- UI web (React/Chromium en modo kiosk) pensada para una pantalla táctil.
+- Scripts de instalación reproducibles y servicios systemd listos para producción en Raspberry Pi OS Bookworm.
+- Automatización del modo AP de NetworkManager para casos sin conectividad Wi-Fi ni Ethernet.
 
-There are several ways of editing your application.
+## Instalación limpia en Raspberry Pi
 
-**Use Lovable**
+> Se asume Raspberry Pi OS Bookworm (64 bits) con el usuario `pi` habilitado y `NetworkManager` instalado.
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/315129b0-b47e-4e39-a2bd-640990fb32ef) and start prompting.
+1. Clona o sincroniza el proyecto en el directorio deseado (por ejemplo `/opt/bascula/current`).
+2. Ejecuta el script principal como root:
 
-Changes made via Lovable will be committed automatically to this repo.
+   ```bash
+   cd /opt/bascula/current
+   sudo ./scripts/install-all.sh
+   ```
 
-**Use your preferred IDE**
+   El script (`scripts/install-all.sh`) realiza las siguientes tareas principales:
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+   - Instala dependencias del sistema, Python, Node.js y Chromium kiosk. 【F:scripts/install-all.sh†L1-L210】
+   - Configura reglas de PolicyKit que permiten al usuario `pi` administrar redes Wi-Fi (escaneo, conexión, y modo compartido). 【F:scripts/install-all.sh†L320-L352】【F:packaging/polkit/49-nmcli.rules†L1-L13】
+   - Despliega el backend mini-web (`bascula-miniweb.service`) escuchando en `:8080`. 【F:packaging/systemd/bascula-miniweb.service†L1-L16】
+   - Configura el servicio kiosk de Chromium apuntando a `http://localhost:8080`. 【F:scripts/install-all.sh†L772-L834】
+   - Instala y habilita el temporizador de fallback (`bascula-net-fallback`) que activa el AP sólo cuando no hay Wi-Fi ni Ethernet disponibles. 【F:scripts/net-fallback.sh†L1-L152】
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+3. Reinicia el dispositivo al finalizar la instalación para cargar todos los servicios y reglas (`sudo reboot`).
 
-Follow these steps:
+Tras el reinicio:
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+- `bascula-miniweb.service` sirve la mini-web y la API en `http://localhost:8080`.
+- `bascula-app.service` lanza Chromium en modo kiosk apuntando a `http://localhost:8080`.
+- El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+## API de configuración de red
 
-# Step 3: Install the necessary dependencies.
-npm i
+La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo` ni edición manual de perfiles de NetworkManager:
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
-```
+| Método | Endpoint                    | Descripción                                                                           |
+|--------|-----------------------------|---------------------------------------------------------------------------------------|
+| GET    | `/api/miniweb/scan-networks`| Escanea redes visibles y devuelve `{ssid, signal, sec, in_use, secured}` por entrada. 【F:backend/miniweb.py†L134-L183】|
+| POST   | `/api/miniweb/connect`      | Crea/actualiza el perfil `BasculaHome` y conecta a la red indicada; programa un reinicio automático. 【F:backend/miniweb.py†L694-L745】|
+| GET    | `/api/miniweb/status`       | Devuelve el estado actual (`connected`, `ssid`, `ip`, `ethernet_connected`, `ap_active`, `should_activate_ap`). 【F:backend/miniweb.py†L531-L575】|
 
-**Edit a file directly in GitHub**
+> El endpoint legado `/api/miniweb/connect-wifi` permanece disponible como alias para compatibilidad.
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+### Reglas de PolicyKit
 
-**Use GitHub Codespaces**
+Las reglas instaladas permiten al usuario `pi` (o miembros de `netdev`) ejecutar `nmcli` para escanear, crear conexiones Wi-Fi y gestionar modo compartido sin `sudo`. 【F:packaging/polkit/49-nmcli.rules†L1-L13】
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+### Modo AP de rescate
 
-## What technologies are used for this project?
+`scripts/net-fallback.sh` se ejecuta periódicamente y sólo levanta el AP `BasculaAP` (`192.168.4.1`) cuando:
 
-This project is built with:
+- No hay conexión Ethernet activa.
+- No se detecta conectividad a Internet mediante Wi-Fi.
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+Si se detecta Ethernet, el AP se desactiva automáticamente para priorizar la red cableada. 【F:scripts/net-fallback.sh†L30-L134】
 
-## How can I deploy this project?
+## Validación recomendada
 
-Simply open [Lovable](https://lovable.dev/projects/315129b0-b47e-4e39-a2bd-640990fb32ef) and click on Share -> Publish.
+1. Tras una instalación limpia y reinicio, abre `http://localhost:8080` desde el propio dispositivo y confirma que se muestra el PIN de acceso.
+2. Desde la mini-web (`/config`) o un navegador en la misma LAN:
+   - Ejecuta un escaneo de redes y verifica que se listan SSID, nivel de señal, seguridad y la red actualmente en uso. 【F:src/pages/MiniWebConfig.tsx†L1-L210】
+   - Conecta a una red protegida y comprueba que el endpoint responde con éxito y programa el reinicio.
+3. Con Ethernet conectada, asegúrate de que el AP `BasculaAP` no se levanta (el timer lo desactivará si estuviera activo). 【F:scripts/net-fallback.sh†L105-L134】
+4. Si desconectas Ethernet y no hay Wi-Fi válida, el AP `BasculaAP` debe activarse automáticamente para permitir la configuración.
 
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
-
-## Mini-Web (AP setup)
-
-### 🚀 Migración rápida (Raspberry Pi con instalación existente)
-
-```bash
-cd /opt/bascula/current
-sudo ./scripts/migrate_2025_10.sh
-```
-
-El script aplica la nueva versión de `backend/miniweb.py`, instala la regla de PolicyKit, actualiza el servicio `bascula-miniweb.service` y crea el perfil `BasculaAP` de NetworkManager si falta. Después reinicia automáticamente el servicio.
-
-### ✅ Pruebas de aceptación rápidas (backend servido en `http://localhost:8080`)
-
-```bash
-# Healthcheck
-curl -s http://127.0.0.1:8080/health
-
-# OpenAPI debe responder 200
-curl -s http://127.0.0.1:8080/openapi.json | jq '.info.title'
-
-# SPA principal (debe devolver HTML, no una página en blanco)
-curl -s http://127.0.0.1:8080/ | head
-
-# Leer PIN (200 desde 127.0.0.1 o si BASCULA_ALLOW_PIN_READ=1 / modo AP)
-curl -s http://127.0.0.1:8080/api/miniweb/pin
-
-# Verificar PIN persistente (200 si coincide, 403 si no)
-curl -s -X POST http://127.0.0.1:8080/api/miniweb/verify-pin \
-  -H 'Content-Type: application/json' \
-  -d '{"pin":"NNNN"}'
-
-# Escanear redes Wi-Fi (403 si falta PolicyKit, 503 si no existe /usr/bin/nmcli)
-curl -s http://127.0.0.1:8080/api/miniweb/scan-networks
-
-# Iniciar conexión Wi-Fi (crea perfil WPA-PSK y agenda reinicio)
-curl -s -X POST http://127.0.0.1:8080/api/miniweb/connect-wifi \
-  -H 'Content-Type: application/json' \
-  -d '{"ssid":"MiRed","password":"secreto"}'
-
-# Estado de red actual
-curl -s http://127.0.0.1:8080/api/network/status
-
-# Activar / desactivar modo AP gestionado por NetworkManager
-curl -s -X POST http://127.0.0.1:8080/api/network/enable-ap
-curl -s -X POST http://127.0.0.1:8080/api/network/disable-ap
-```
-
-Expectativas clave:
-
-- `/api/miniweb/pin` → `200` solo desde `127.0.0.1`/`::1`, con `BASCULA_ALLOW_PIN_READ=1` o si el dispositivo está en modo AP; en STA responde `403`.
-- El PIN permanece tras reinicios gracias a `/var/lib/bascula/miniweb_state.json`.
-- `POST /api/miniweb/verify-pin` permite 10 intentos por IP cada 10 minutos (luego `429`).
-- `GET /api/miniweb/scan-networks` funciona sin `sudo`; si PolicyKit no está aplicado devuelve `403 {"code":"NMCLI_NOT_AUTHORIZED"}`.
-- `POST /api/miniweb/connect-wifi` conecta con NetworkManager, desactiva el AP y programa `shutdown -r +1`.
-- El kiosk Chromium debe abrir `http://localhost:8080/config`, solicitar PIN, listar redes, conectar y tras éxito reiniciar.
+Con este flujo, una Raspberry Pi recién provisionada queda lista para funcionar sin intervenciones manuales en NetworkManager y con la UI limpia de branding antiguo.

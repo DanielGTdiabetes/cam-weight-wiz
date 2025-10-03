@@ -38,33 +38,40 @@ class NetworkDetector {
 
   private async checkNetworkStatus(): Promise<NetworkStatus> {
     const isOnline = navigator.onLine;
-    
+
     // Check if we can reach the backend
     let isWifiConnected = false;
     let ssid: string | undefined;
     let ip: string | undefined;
+    let shouldActivateAP = !isWifiConnected;
 
     if (isOnline) {
       try {
         // Try to ping the backend
-        const response = await fetch('/api/network/status', {
+        const response = await fetch('/api/miniweb/status', {
           method: 'GET',
           signal: AbortSignal.timeout(5000),
         });
-        
+
         if (response.ok) {
           const data = await response.json();
           isWifiConnected = data.connected || false;
           ssid = data.ssid;
           ip = data.ip;
           logger.info('Network status fetched', { isWifiConnected, ssid, ip });
+
+          if (typeof data.should_activate_ap === 'boolean') {
+            shouldActivateAP = data.should_activate_ap;
+          } else {
+            shouldActivateAP = !isWifiConnected;
+          }
         }
       } catch (error) {
         logger.warn('Cannot reach backend, assuming disconnected', { error });
       }
+    } else {
+      shouldActivateAP = !isWifiConnected;
     }
-
-    const shouldActivateAP = !isWifiConnected;
 
     const status: NetworkStatus = {
       isOnline,

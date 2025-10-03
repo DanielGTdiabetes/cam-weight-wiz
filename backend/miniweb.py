@@ -6,7 +6,6 @@ import subprocess
 import ipaddress
 import random
 import string
-import uuid
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
@@ -155,6 +154,11 @@ def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
     return _is_ap_active()
 
 
+def _nm_unescape(value: str) -> str:
+    """Deshace el escaping estilo nmcli (\: y \\)."""
+    return value.replace("\\\\", "\\").replace("\\:", ":").strip()
+
+
 def _list_networks() -> List[Dict[str, Any]]:
     """Devuelve lista de redes Wi-Fi visibles usando nmcli."""
     try:
@@ -163,7 +167,10 @@ def _list_networks() -> List[Dict[str, Any]]:
         except subprocess.TimeoutExpired:
             pass
 
-        result = _nmcli(["-t", "-f", "SSID,SIGNAL,SECURITY", "dev", "wifi", "list"], timeout=10)
+        result = _nmcli(
+            ["-t", "--escape", "yes", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list"],
+            timeout=10,
+        )
         if result.returncode != 0:
             err = (result.stderr or result.stdout).strip()
             if "not authorized" in err.lower():
@@ -175,23 +182,28 @@ def _list_networks() -> List[Dict[str, Any]]:
             if not line:
                 continue
             parts = line.split(":")
-            if len(parts) < 2:
+            if len(parts) < 4:
                 continue
-            ssid = parts[0].strip()
+            in_use_flag, raw_ssid, signal_part, security_part = parts[0], parts[1], parts[2], parts[3]
+            ssid = _nm_unescape(raw_ssid)
             if not ssid:
                 continue
-            signal_part = parts[1].strip()
             try:
-                signal = int(signal_part)
+                signal = int(signal_part.strip())
             except ValueError:
                 signal = 0
-            security = parts[2].strip() if len(parts) > 2 else ""
-            secured = bool(security and security.upper() != "NONE")
-            networks.append({
-                "ssid": ssid,
-                "signal": signal,
-                "secured": secured,
-            })
+            security = _nm_unescape(security_part)
+            normalized_security = security or ""
+            secured = bool(normalized_security and normalized_security.upper() != "NONE")
+            networks.append(
+                {
+                    "ssid": ssid,
+                    "signal": signal,
+                    "sec": normalized_security,
+                    "in_use": in_use_flag.strip() == "*",
+                    "secured": secured,
+                }
+            )
 
         networks.sort(key=lambda item: item["signal"], reverse=True)
         unique: Dict[str, Dict[str, Any]] = {}
@@ -205,17 +217,6 @@ def _list_networks() -> List[Dict[str, Any]]:
         raise
     except Exception as exc:
         raise RuntimeError(str(exc))
-
-
-def _ssid_to_slug(ssid: str) -> str:
-    safe = "".join(c for c in ssid if c.isalnum() or c in ("-", "_", "."))
-    return safe or "wifi"
-
-
-def _escape_nm_value(value: str) -> str:
-    sanitized = value.replace("\x00", "").replace("\r", "").replace("\n", "")
-    sanitized = sanitized.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{sanitized}"'
 
 
 def _remove_profiles_for_ssid(ssid: str) -> None:
@@ -238,69 +239,6 @@ def _remove_profiles_for_ssid(ssid: str) -> None:
                 _remove_connection(connection_id)
             except Exception:
                 pass
-        try:
-            profile_path.unlink()
-        except Exception:
-            pass
-
-
-def _write_nm_profile(ssid: str, password: Optional[str], secured: bool, ifname: str = WIFI_INTERFACE) -> Path:
-    slug = _ssid_to_slug(ssid.lower())
-    profile_path = NM_CONNECTIONS_DIR / f"{slug}.nmconnection"
-
-    quoted_ssid = _escape_nm_value(ssid)
-    content_lines = [
-        "[connection]",
-        f"id={HOME_CONNECTION_ID}",
-        f"uuid={uuid.uuid4()}",
-        "type=wifi",
-        f"interface-name={ifname}",
-        "autoconnect=true",
-        "autoconnect-priority=100",
-        "",
-        "[wifi]",
-        f"ssid={quoted_ssid}",
-        "mode=infrastructure",
-        "",
-    ]
-
-    if secured:
-        quoted_password = _escape_nm_value(password or "")
-        content_lines.extend(
-            [
-                "[wifi-security]",
-                "key-mgmt=wpa-psk",
-                f"psk={quoted_password}",
-                "auth-alg=open",
-                "proto=rsn",
-                "",
-            ]
-        )
-    else:
-        content_lines.extend(
-            [
-                "[wifi-security]",
-                "key-mgmt=none",
-                "",
-            ]
-        )
-
-    content_lines.extend(
-        [
-            "[ipv4]",
-            "method=auto",
-            "",
-            "[ipv6]",
-            "method=ignore",
-            "",
-        ]
-    )
-
-    content = "\n".join(content_lines)
-    NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text(content, encoding="utf-8")
-    os.chmod(profile_path, 0o600)
-    return profile_path
 
 
 def _remove_connection(connection_id: str) -> None:
@@ -325,34 +263,85 @@ def ensure_ap_profile() -> None:
     if not _nmcli_available():
         raise PermissionError("NMCLI_NOT_AVAILABLE")
 
-    NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-    ap_profile = NM_CONNECTIONS_DIR / f"{AP_CONNECTION_ID}.nmconnection"
-    if ap_profile.exists():
-        return
+    try:
+        existing = _nmcli(["con", "show", AP_CONNECTION_ID], timeout=5)
+        if existing.returncode == 0:
+            return
+    except FileNotFoundError:
+        raise PermissionError("NMCLI_NOT_AVAILABLE")
 
-    content = f"""[connection]
-id={AP_CONNECTION_ID}
-uuid={uuid.uuid4()}
-type=wifi
-interface-name={WIFI_INTERFACE}
-autoconnect=false
+    create_res = _nmcli(
+        [
+            "con",
+            "add",
+            "type",
+            "wifi",
+            "ifname",
+            WIFI_INTERFACE,
+            "con-name",
+            AP_CONNECTION_ID,
+            "autoconnect",
+            "no",
+            "ssid",
+            AP_DEFAULT_SSID,
+        ],
+        timeout=10,
+    )
+    if create_res.returncode not in (0, 4):
+        message = (create_res.stderr or create_res.stdout).strip()
+        lower = message.lower()
+        if "already exists" not in lower and "exists" not in lower:
+            raise RuntimeError(message)
 
-[wifi]
-ssid={AP_DEFAULT_SSID}
-mode=ap
+    modify_res = _nmcli(
+        [
+            "con",
+            "modify",
+            AP_CONNECTION_ID,
+            "connection.autoconnect",
+            "no",
+            "connection.autoconnect-priority",
+            "-999",
+            "connection.interface-name",
+            WIFI_INTERFACE,
+            "802-11-wireless.mode",
+            "ap",
+            "802-11-wireless.band",
+            "bg",
+            "ipv4.method",
+            "shared",
+            "ipv4.addresses",
+            "192.168.4.1/24",
+            "ipv6.method",
+            "ignore",
+        ],
+        timeout=10,
+    )
+    if modify_res.returncode != 0:
+        raise RuntimeError((modify_res.stderr or modify_res.stdout).strip())
 
-[wifi-security]
-key-mgmt=wpa-psk
-psk={AP_DEFAULT_PASSWORD}
-
-[ipv4]
-method=shared
-
-[ipv6]
-method=ignore
-"""
-    ap_profile.write_text(content)
-    os.chmod(ap_profile, 0o600)
+    if AP_DEFAULT_PASSWORD:
+        secret_ap_res = _nmcli(
+            [
+                "con",
+                "modify",
+                AP_CONNECTION_ID,
+                "wifi-sec.key-mgmt",
+                "wpa-psk",
+                "wifi-sec.psk",
+                AP_DEFAULT_PASSWORD,
+            ],
+            timeout=5,
+        )
+        if secret_ap_res.returncode != 0:
+            raise RuntimeError((secret_ap_res.stderr or secret_ap_res.stdout).strip())
+    else:
+        open_ap_res = _nmcli(
+            ["con", "modify", AP_CONNECTION_ID, "wifi-sec.key-mgmt", "none"],
+            timeout=5,
+        )
+        if open_ap_res.returncode != 0:
+            raise RuntimeError((open_ap_res.stderr or open_ap_res.stdout).strip())
 
 
 def _connect_wifi(ssid: str, password: Optional[str], secured: bool) -> None:
@@ -375,30 +364,218 @@ def _connect_wifi(ssid: str, password: Optional[str], secured: bool) -> None:
     if not _nmcli_available():
         raise PermissionError("NMCLI_NOT_AVAILABLE")
 
-    _disconnect_connection(AP_CONNECTION_ID)
-    _remove_connection(HOME_CONNECTION_ID)
-    _remove_profiles_for_ssid(ssid)
+    try:
+        try:
+            _nmcli(["radio", "wifi", "on"], timeout=5)
+        except Exception:
+            pass
 
-    profile_path = _write_nm_profile(ssid, sanitized_password, secured)
+        _disconnect_connection(AP_CONNECTION_ID)
+        _remove_connection(HOME_CONNECTION_ID)
+        _remove_profiles_for_ssid(ssid)
 
-    reload_res = _nmcli(["con", "reload"], timeout=5)
-    if reload_res.returncode != 0:
-        raise RuntimeError((reload_res.stderr or reload_res.stdout).strip())
+        add_res = _nmcli(
+            [
+                "con",
+                "add",
+                "type",
+                "wifi",
+                "ifname",
+                WIFI_INTERFACE,
+                "con-name",
+                HOME_CONNECTION_ID,
+                "autoconnect",
+                "yes",
+                "ssid",
+                ssid,
+            ],
+            timeout=10,
+        )
+        if add_res.returncode not in (0, 4):
+            message = (add_res.stderr or add_res.stdout).strip()
+            lower = message.lower()
+            if "already exists" not in lower and "exists" not in lower:
+                raise RuntimeError(message)
 
-    up_res = _nmcli(["con", "up", HOME_CONNECTION_ID], timeout=45)
-    if up_res.returncode != 0:
-        message = (up_res.stderr or up_res.stdout).strip()
-        lower = message.lower()
-        if "secrets were required" in lower:
-            raise PermissionError("NMCLI_SECRETS_REQUIRED")
-        if "not authorized" in lower:
-            raise PermissionError("NMCLI_NOT_AUTHORIZED")
-        raise RuntimeError(message)
+        base_modify = [
+            "con",
+            "modify",
+            HOME_CONNECTION_ID,
+            "connection.autoconnect",
+            "yes",
+            "connection.autoconnect-priority",
+            "100",
+            "connection.interface-name",
+            WIFI_INTERFACE,
+            "ipv4.method",
+            "auto",
+            "ipv6.method",
+            "ignore",
+        ]
+        base_res = _nmcli(base_modify, timeout=10)
+        if base_res.returncode != 0:
+            raise RuntimeError((base_res.stderr or base_res.stdout).strip())
+
+        if secured and sanitized_password:
+            secret_res = _nmcli(
+                [
+                    "con",
+                    "modify",
+                    HOME_CONNECTION_ID,
+                    "wifi-sec.key-mgmt",
+                    "wpa-psk",
+                    "wifi-sec.psk",
+                    sanitized_password,
+                ],
+                timeout=5,
+            )
+            if secret_res.returncode != 0:
+                raise RuntimeError((secret_res.stderr or secret_res.stdout).strip())
+        else:
+            open_res = _nmcli(
+                ["con", "modify", HOME_CONNECTION_ID, "wifi-sec.key-mgmt", "none"],
+                timeout=5,
+            )
+            if open_res.returncode != 0:
+                raise RuntimeError((open_res.stderr or open_res.stdout).strip())
+
+        reload_res = _nmcli(["con", "reload"], timeout=5)
+        if reload_res.returncode != 0:
+            raise RuntimeError((reload_res.stderr or reload_res.stdout).strip())
+
+        up_res = _nmcli(["con", "up", HOME_CONNECTION_ID, "ifname", WIFI_INTERFACE], timeout=45)
+        if up_res.returncode != 0:
+            message = (up_res.stderr or up_res.stdout).strip()
+            lower = message.lower()
+            if "secrets were required" in lower:
+                raise PermissionError("NMCLI_SECRETS_REQUIRED")
+            if "not authorized" in lower:
+                raise PermissionError("NMCLI_NOT_AUTHORIZED")
+            raise RuntimeError(message)
+    except Exception:
+        try:
+            _remove_connection(HOME_CONNECTION_ID)
+        except Exception:
+            pass
+        raise
+
+
+def _ethernet_connected() -> bool:
+    try:
+        res = _nmcli(["-t", "-f", "DEVICE,TYPE,STATE", "device", "status"], timeout=5)
+    except FileNotFoundError:
+        raise PermissionError("NMCLI_NOT_AVAILABLE")
+    except Exception:
+        return False
+
+    if res.returncode != 0:
+        return False
+
+    for line in res.stdout.strip().splitlines():
+        if not line:
+            continue
+        parts = line.split(":")
+        if len(parts) < 3:
+            continue
+        device, dev_type, state = parts[0], parts[1], parts[2]
+        if dev_type == "ethernet" and state.lower().startswith("connected"):
+            return True
+    return False
+
+
+def _connection_ssid(connection_name: str) -> Optional[str]:
+    try:
+        res = _nmcli(["-t", "-f", "802-11-wireless.ssid", "con", "show", connection_name], timeout=5)
+    except Exception:
+        return None
+
+    if res.returncode != 0:
+        return None
+
+    for line in res.stdout.strip().splitlines():
+        if not line:
+            continue
+        parts = line.split(":", 1)
+        if len(parts) == 2:
+            return _nm_unescape(parts[1])
+        return _nm_unescape(parts[0])
+    return None
+
+
+def _current_wifi_ssid() -> Optional[str]:
+    try:
+        res = _nmcli(["-t", "--escape", "yes", "-f", "IN-USE,SSID", "dev", "wifi", "list"], timeout=5)
+    except Exception:
+        return None
+
+    if res.returncode != 0:
+        return None
+
+    for line in res.stdout.strip().splitlines():
+        if not line:
+            continue
+        parts = line.split(":")
+        if len(parts) < 2:
+            continue
+        if parts[0].strip() == "*":
+            return _nm_unescape(parts[1])
+    return None
+
+
+def _get_wifi_status() -> Dict[str, Any]:
+    wlan_ip = _get_iface_ip(WIFI_INTERFACE)
+    ap_active = _is_ap_active()
+    ethernet_active = False
+    try:
+        ethernet_active = _ethernet_connected()
+    except PermissionError:
+        ethernet_active = False
+
+    connected = False
+    ssid: Optional[str] = None
+    active_connection: Optional[str] = None
 
     try:
-        os.chmod(profile_path, 0o600)
+        res = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"], timeout=5)
+        if res.returncode == 0:
+            for line in res.stdout.strip().splitlines():
+                if not line:
+                    continue
+                parts = line.split(":")
+                if len(parts) < 3:
+                    continue
+                name, conn_type, device = parts[0], parts[1], parts[2]
+                if conn_type != "802-11-wireless" or device != WIFI_INTERFACE:
+                    continue
+                active_connection = name
+                if name == AP_CONNECTION_ID:
+                    ssid = AP_DEFAULT_SSID
+                else:
+                    connected = True
+                    ssid = _connection_ssid(name) or _current_wifi_ssid() or name
+                break
+    except FileNotFoundError:
+        raise PermissionError("NMCLI_NOT_AVAILABLE")
     except Exception:
         pass
+
+    if not ssid and ap_active:
+        ssid = AP_DEFAULT_SSID
+    elif not ssid and not connected:
+        ssid = _current_wifi_ssid()
+
+    should_activate_ap = not connected and not ethernet_active
+
+    return {
+        "connected": connected,
+        "ssid": ssid,
+        "ip": wlan_ip,
+        "ap_active": ap_active,
+        "ethernet_connected": ethernet_active,
+        "interface": WIFI_INTERFACE,
+        "active_connection": active_connection,
+        "should_activate_ap": should_activate_ap,
+    }
 
 
 def _schedule_reboot(delay_minutes: int = 1) -> None:
@@ -516,6 +693,7 @@ class WifiCredentials(BaseModel):
     ssid: str
     password: Optional[str] = None
     secured: bool = True
+    sec: Optional[str] = None
 
 
 # ---------- PIN persistente ----------
@@ -579,6 +757,7 @@ async def scan_networks():
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/miniweb/connect")
 @app.post("/api/miniweb/connect-wifi")
 async def connect_wifi(credentials: WifiCredentials):
     try:
@@ -617,6 +796,21 @@ async def connect_wifi(credentials: WifiCredentials):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/miniweb/status")
+async def miniweb_status():
+    try:
+        return _get_wifi_status()
+    except PermissionError as exc:
+        code = str(exc)
+        if code == "NMCLI_NOT_AVAILABLE":
+            raise HTTPException(status_code=503, detail={"code": code}) from exc
+        if code == "NMCLI_NOT_AUTHORIZED":
+            raise HTTPException(status_code=403, detail={"code": code}) from exc
+        raise HTTPException(status_code=400, detail={"code": code}) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/network/enable-ap")
 async def enable_ap():
     try:
@@ -645,30 +839,7 @@ async def disable_ap():
 
 @app.get("/api/network/status")
 async def network_status():
-    wlan_ip = _get_iface_ip(WIFI_INTERFACE)
-    connected = False
-    ssid: Optional[str] = None
-
-    try:
-        res = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"], timeout=5)
-        if res.returncode == 0:
-            for line in res.stdout.splitlines():
-                parts = line.split(":")
-                if len(parts) < 3:
-                    continue
-                name, conn_type, device = parts[0], parts[1], parts[2]
-                if conn_type != "802-11-wireless" or device != WIFI_INTERFACE:
-                    continue
-                ssid = name
-                if name != AP_CONNECTION_ID and wlan_ip:
-                    connected = True
-                    break
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
-
-    return {"connected": connected, "ssid": ssid, "ip": wlan_ip}
+    return await miniweb_status()
 
 
 # ====== (opcional) WebSocket y tare/zero/scale como ya estaban si aplica ======
