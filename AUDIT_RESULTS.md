@@ -1,282 +1,65 @@
-# 🔍 AUDITORÍA COMPLETA - BASCULA UI
+# 🔍 Auditoría técnica - Bascula UI
 
-**Fecha**: 2025-10-02  
-**Estado**: ✅ **TODAS LAS FUNCIONALIDADES IMPLEMENTADAS**
-
----
-
-## ✅ FUNCIONALIDADES 100% OPERATIVAS
-
-### 1. **Báscula - UART/ESP32** ✅ COMPLETO
-- ✅ Conexión serial `/dev/serial0` @ 115200 baud
-- ✅ WebSocket `/ws/scale` para datos en tiempo real
-- ✅ `POST /api/scale/tare` - Comando tara
-- ✅ `POST /api/scale/zero` - Comando zero
-- ✅ `POST /api/scale/calibrate` - Actualizar factor calibración
-- ✅ `GET /api/scale/status` - Estado de conexión
-- ✅ Frontend conecta y muestra peso en vivo
-
-### 2. **WiFi & Network (Mini-Web)** ✅ COMPLETO
-- ✅ Servidor en puerto 8080
-- ✅ Escaneo de redes WiFi
-- ✅ Conexión a redes
-- ✅ Modo AP fallback automático
-- ✅ PIN de acceso aleatorio
-- ✅ Estado de red en tiempo real
-
-### 3. **Escáner de Alimentos** ✅ COMPLETO
-- ✅ `POST /api/scanner/analyze` - Análisis de imagen con IA
-- ✅ `GET /api/scanner/barcode/{barcode}` - OpenFoodFacts API
-- ✅ Captura de cámara (PiCamera2 o USB)
-- ✅ Detección nutricional
-- ✅ Mock AI mientras se integra TFLite
-
-### 4. **Timer/Temporizador** ✅ COMPLETO
-- ✅ `POST /api/timer/start` - Iniciar timer
-- ✅ `POST /api/timer/stop` - Detener timer
-- ✅ `GET /api/timer/status` - Estado actual
-- ✅ Countdown asíncrono con asyncio
-- ✅ Alarma sonora al finalizar
-
-### 5. **Nightscout Integration** ✅ COMPLETO
-- ✅ `GET /api/nightscout/glucose` - Glucosa actual
-- ✅ `POST /api/nightscout/bolus` - Exportar bolo
-- ✅ Autenticación con API-SECRET
-- ✅ Manejo de errores si no configurado
-
-### 6. **Voice/TTS** ✅ COMPLETO
-- ✅ `POST /api/voice/speak` - Text-to-Speech
-- ✅ Integración con Piper TTS (español)
-- ✅ Fallback a espeak si Piper no disponible
-- ✅ Configuración de voz en settings
-
-### 7. **Recetas con IA** ✅ COMPLETO
-- ✅ `POST /api/recipes/generate` - Generar receta
-- ✅ `POST /api/recipes/next` - Siguiente paso
-- ✅ Mock conversacional (preparado para ChatGPT)
-- ✅ Contexto de pasos anteriores
-
-### 8. **Settings Backend** ✅ COMPLETO
-- ✅ `GET /api/settings` - Leer configuración
-- ✅ `PUT /api/settings` - Actualizar configuración
-- ✅ Persistencia en `~/.bascula/config.json`
-- ✅ Validación de datos
-
-### 9. **OTA Updates** ✅ COMPLETO
-- ✅ `GET /api/updates/check` - Verificar actualizaciones GitHub
-- ✅ `POST /api/updates/install` - Instalar actualización
-- ✅ Sistema de releases versionadas
-- ✅ Estructura `/opt/bascula/releases/`
-
-### 10. **Configuración del Sistema** ✅ COMPLETO
-- ✅ X735 v3 Power Management Board
-- ✅ Nginx con proxy reverso
-- ✅ Systemd services (UI + Backend + Mini-Web + OCR)
-- ✅ Kiosk mode con startx + .xinitrc
-- ✅ Configuración HDMI, I2C, UART, I2S
+**Fecha:** 2025-02-14  
+**Auditor:** gpt-5-codex
 
 ---
 
-## 📁 ARCHIVOS BACKEND CREADOS
-
-### Servidor Principal
-- ✅ `backend/main.py` - **Backend completo** con todos los endpoints
-- ✅ `backend/miniweb.py` - Mini-web para configuración WiFi
-
-### Endpoints Implementados (22 total)
-```
-WebSockets:
-  /ws/scale - Peso en tiempo real
-
-Scale:
-  POST   /api/scale/tare
-  POST   /api/scale/zero
-  POST   /api/scale/calibrate
-  GET    /api/scale/status
-
-Scanner:
-  POST   /api/scanner/analyze
-  GET    /api/scanner/barcode/{barcode}
-
-Timer:
-  POST   /api/timer/start
-  POST   /api/timer/stop
-  GET    /api/timer/status
-
-Nightscout:
-  GET    /api/nightscout/glucose
-  POST   /api/nightscout/bolus
-
-Voice:
-  POST   /api/voice/speak
-
-Recipes:
-  POST   /api/recipes/generate
-  POST   /api/recipes/next
-
-Settings:
-  GET    /api/settings
-  PUT    /api/settings
-
-OTA:
-  GET    /api/updates/check
-  POST   /api/updates/install
-
-Health:
-  GET    /health
-  GET    /
-```
+## 1. Resumen ejecutivo
+- ❌ La suite de pruebas unitarias (`vitest`) falla actualmente (3 pruebas rojas), destacando un problema funcional en el flujo de fallback por voz del escáner y validaciones inconsistentes de formularios. 【06e5f4†L1-L33】
+- ❌ El linting (`eslint`) reporta 57 incidencias (47 errores, 10 advertencias), incluyendo dependencias incorrectas de hooks y uso extendido de `any`. 【b459bd†L1-L74】
+- ⚠️ Se detectaron riesgos de seguridad en el instalador OTA (extracción de tar sin saneado) y en la escritura del perfil Wi-Fi (inyección de SSID/PSK sin escape), además de la imposibilidad de conectar a redes abiertas en el mini-portal.
 
 ---
 
-## 🔧 INTEGRACIÓN INSTALL-ALL.SH
+## 2. Resultados de pruebas automatizadas
+| Comando | Estado | Evidencia |
+| --- | --- | --- |
+| `npx vitest run` | ❌ Falla | 3 pruebas rojas (validaciones y fallback por voz). 【06e5f4†L1-L33】 |
+| `npm run lint` | ❌ Falla | 47 errores + 10 advertencias; incluye `no-explicit-any` y dependencias de hooks. 【b459bd†L1-L74】 |
 
-El script `install-all.sh` ya incluye:
-
-✅ **Dependencias Python**:
-- `fastapi`, `uvicorn[standard]`
-- `websockets`, `pyserial`
-- `httpx` (cliente HTTP para Nightscout/APIs)
-- `python-multipart` (upload de archivos)
-- `opencv-python`, `pillow` (procesamiento imágenes)
-- `pytesseract`, `rapidocr-onnxruntime` (OCR)
-- `pyzbar` (códigos de barras)
-- `aiofiles` (archivos asíncronos)
-
-✅ **Servicios Systemd**:
-- `bascula-miniweb.service` - Mini-web WiFi config
-- `bascula-app.service` - Frontend kiosk
-- `ocr-service.service` - Servicio OCR dedicado
-
-✅ **Software del Sistema**:
-- Nginx (proxy reverso)
-- Chromium (kiosk)
-- Piper TTS (voz español)
-- Libcamera (cámara)
-- X735 scripts (power management)
+> **Nota:** `npm test` sin argumentos queda en modo watch; usar `npx vitest run` para CI.
 
 ---
 
-## 📋 CHECKLIST POST-INSTALACIÓN
+## 3. Hallazgos críticos
 
-Después de `sudo bash scripts/install-all.sh` y reiniciar:
+### 3.1 Validaciones permiten valores vacíos
+- `validateUrl` y `validateApiKey` devuelven *válido* cuando la cadena está vacía, lo que contradice las expectativas de los tests y permite guardar URLs/API keys en blanco desde el teclado en pantalla. 【F:src/lib/validation.ts†L11-L28】【F:src/lib/validation.ts†L79-L100】
+- Impacto: ajustes como Nightscout o endpoints remotos pueden persistir en blanco sin alertar al usuario.
+- Recomendación: marcar vacío como inválido y, si es opcional, parametrizar desde el diálogo (`KeyboardDialog`) para no romper casos legítimos.
 
-### Servicios
-- [ ] `sudo systemctl status bascula-miniweb` - ✅ Active
-- [ ] `sudo systemctl status bascula-app` - ✅ Active
-- [ ] `sudo systemctl status ocr-service` - ✅ Active
-- [ ] `sudo systemctl status nginx` - ✅ Active
-- [ ] `sudo systemctl status x735-fan` - ✅ Active
-- [ ] `sudo systemctl status x735-pwr` - ✅ Active
+### 3.2 Flujo de fallback por voz no se activa
+- La prueba `muestra la entrada por voz cuando expira el temporizador de la IA` expira por timeout; el temporizador de 10s no está forzando el cambio de fase a `fallback`. 【06e5f4†L1-L18】【F:src/components/BarcodeScannerModal.tsx†L928-L998】
+- Impacto: ante una IA bloqueada la UI no ofrece la captura por voz/manual automáticamente, dejando al usuario sin salida.
+- Recomendación: revisar `setInterval`/`setTimeout` en `startAIScanning`, asegurando limpieza al hacer `cleanup()` y avanzando a `fallback` incluso con promesas pendientes.
 
-### Funcionalidades
-- [ ] Acceder a `http://localhost/` - UI carga
-- [ ] WebSocket báscula conecta - Peso actualiza
-- [ ] Botón TARA funciona
-- [ ] Botón ZERO funciona
-- [ ] Cámara captura imagen - `libcamera-hello` funciona
-- [ ] Scanner alimentos añade items
-- [ ] Timer cuenta regresivamente
-- [ ] TTS habla en español - `echo "Hola" | piper ...`
-- [ ] Settings se guardan en `~/.bascula/config.json`
-- [ ] Nightscout conecta (si URL configurada)
-- [ ] OTA verifica actualizaciones de GitHub
+### 3.3 Riesgo de path traversal en OTA
+- `install_update` usa `tarfile.extractall` directamente sobre artefactos descargados de GitHub sin validar rutas de salida. 【F:backend/main.py†L1181-L1194】
+- Impacto: un tar malicioso podría sobrescribir archivos arbitrarios (si el repositorio remoto es comprometido o la URL se altera).
+- Recomendación: aplicar extracción segura (filtrado de rutas, `tarfile.TarInfo`) o usar librerías que validen paths antes de escribir.
 
-### Logs
-```bash
-# Backend principal
-journalctl -u bascula-miniweb -f
-
-# Frontend kiosk
-journalctl -u bascula-app -f
-
-# OCR service
-journalctl -u ocr-service -f
-
-# Nginx
-journalctl -u nginx -f
-
-# X735 ventilador
-journalctl -u x735-fan -f
-```
+### 3.4 Escritura insegura de perfiles Wi-Fi
+- `_write_nm_profile` inserta SSID y contraseña sin escape en el `.nmconnection`. Caracteres como saltos de línea o `"` rompen el archivo y pueden permitir inyección de claves. 【F:backend/miniweb.py†L241-L268】
+- Además `_connect_wifi` rechaza contraseñas vacías, bloqueando redes abiertas (sin seguridad) que `nmcli` sí admite. 【F:backend/miniweb.py†L326-L339】
+- Recomendación: sanitizar/entrecomillar los valores al escribir el perfil y permitir redes abiertas mediante detección de `secured` en la UI o parámetro explícito.
 
 ---
 
-## 🚀 PRÓXIMOS PASOS
-
-1. **Reinstalar** en Raspberry Pi:
-   ```bash
-   cd ~/bascula-ui
-   sudo bash scripts/install-all.sh
-   sudo reboot
-   ```
-
-2. **Verificar servicios** con systemctl
-
-3. **Probar cada funcionalidad** desde la UI
-
-4. **Configurar**:
-   - URL Nightscout (si diabetes activo)
-   - API Key ChatGPT (si recetas activas)
-   - Calibración de báscula
-
-5. **Conectar ESP32** a `/dev/serial0`:
-   - Formato JSON: `{"weight":123.45,"stable":true,"unit":"g"}`
-   - O simple número: `123.45`
+## 4. Observaciones adicionales
+- Varias advertencias de React hooks (`react-hooks/exhaustive-deps`) en componentes clave pueden causar estados inconsistentes a futuro. 【b459bd†L1-L18】
+- El repositorio contiene numerosas definiciones `any` en servicios (`api.ts`, `apiWrapper.ts`, `storage.ts`, tests) que reducen la cobertura de TypeScript y complican la detección temprana de errores. 【b459bd†L18-L66】
+- El mini-portal (`MiniWebConfig.tsx`) usa `fetch` directo sin manejar timeouts ni cancelación; evaluar integración con `apiWrapper` para reutilizar manejo de errores.
 
 ---
 
-## 📝 NOTAS TÉCNICAS
-
-### ESP32 Serial Protocol
-- **Puerto**: `/dev/serial0` (UART GPIO14/15)
-- **Baud**: 115200
-- **Formato salida**: JSON o número simple
-- **Comandos entrada**: `TARE\n`, `ZERO\n`
-
-### Cámara
-- **Módulos soportados**: Camera Module 3, USB webcam
-- **Librería**: `picamera2` o `opencv-python`
-- **Ruta temporal**: `/tmp/food_*.jpg`
-
-### Nightscout API
-- **Headers**: `API-SECRET: <token>`
-- **Endpoint glucosa**: `/api/v1/entries/current.json`
-- **Endpoint tratamientos**: `/api/v1/treatments`
-
-### Piper TTS
-- **Binario**: `/usr/local/bin/piper`
-- **Modelos**: `/opt/piper/models/`
-- **Voz español**: `es_ES-mls_10246-medium.onnx`
-
-### OTA Updates
-- **Releases**: `/opt/bascula/releases/vX/`
-- **Symlink actual**: `/opt/bascula/current -> releases/vX`
-- **GitHub API**: `repos/DanielGTdiabetes/bascula-ui/releases/latest`
+## 5. Próximos pasos sugeridos
+1. Corregir funciones de validación y actualizar las pruebas afectadas.
+2. Depurar el flujo de `startAIScanning` para garantizar el fallback automático y añadir cobertura adicional.
+3. Endurecer el instalador OTA (validaciones de tar, verificación de firmas) antes de usarlo en producción.
+4. Ajustar la generación de perfiles Wi-Fi para soportar SSID/PSK arbitrarios y redes abiertas.
+5. Planificar una campaña para eliminar `any` y satisfacer las reglas de `eslint`, evitando regresiones.
 
 ---
 
-## ✅ ESTADO FINAL
-
-| Componente | Estado | Completitud |
-|------------|--------|-------------|
-| **Backend Scale** | ✅ Funcional | 100% |
-| **Backend Scanner** | ✅ Funcional | 100% |
-| **Backend Timer** | ✅ Funcional | 100% |
-| **Backend Nightscout** | ✅ Funcional | 100% |
-| **Backend TTS** | ✅ Funcional | 100% |
-| **Backend Recipes** | ✅ Funcional | 100% |
-| **Backend Settings** | ✅ Funcional | 100% |
-| **Backend OTA** | ✅ Funcional | 100% |
-| **Frontend UI** | ✅ Completo | 100% |
-| **WiFi Mini-Web** | ✅ Completo | 100% |
-| **System Config** | ✅ Completo | 100% |
-| **Install Script** | ✅ Completo | 100% |
-
----
-
-## 🎯 **PROYECTO 100% FUNCIONAL**
-
-**Todos los endpoints declarados en el frontend tienen su implementación en el backend.**
-
-El código nuevo es completamente independiente del antiguo y está listo para producción en Raspberry Pi 5.
+**Conclusión:** El proyecto tiene una base funcional amplia, pero los fallos actuales en pruebas/lint y los riesgos de seguridad detectados impiden considerarlo listo para producción hasta que se apliquen las correcciones indicadas.
