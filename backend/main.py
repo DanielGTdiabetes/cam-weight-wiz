@@ -27,6 +27,192 @@ from datetime import datetime
 import httpx
 import re
 
+
+CHATGPT_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-4.1-mini",
+    "gpt-4.1",
+]
+
+
+def get_chatgpt_api_key() -> Optional[str]:
+    """Return the first available ChatGPT/OpenAI API key."""
+    potential_keys = [
+        os.getenv("OPENAI_API_KEY"),
+        os.getenv("CHATGPT_API_KEY"),
+        os.getenv("CHAT_GPT_API_KEY"),
+    ]
+
+    config = load_config()
+    integrations = config.get("integrations", {}) if isinstance(config, dict) else {}
+    potential_keys.extend(
+        [
+            integrations.get("openai_api_key"),
+            integrations.get("chatgpt_api_key"),
+        ]
+    )
+
+    for key in potential_keys:
+        if key and key.strip():
+            return key.strip()
+    return None
+
+
+def get_chatgpt_model() -> str:
+    """Return the configured ChatGPT model or a sensible default."""
+    configured_model = os.getenv("OPENAI_MODEL") or os.getenv("CHATGPT_MODEL")
+    if configured_model:
+        return configured_model
+    return CHATGPT_MODELS[0]
+
+
+async def invoke_chatgpt(messages: List[Dict[str, str]]) -> Optional[str]:
+    """Send a chat completion request and return the assistant message."""
+
+    api_key = get_chatgpt_api_key()
+    if not api_key:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": get_chatgpt_model(),
+        "messages": messages,
+        "temperature": 0.2,
+        "response_format": {"type": "json_object"},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions"),
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            choices = data.get("choices", [])
+            if not choices:
+                return None
+            message = choices[0].get("message", {})
+            return message.get("content")
+    except httpx.HTTPError as exc:
+        print(f"ChatGPT request failed: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive log
+        print(f"Unexpected ChatGPT error: {exc}")
+
+    return None
+
+
+def parse_chatgpt_json(content: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse JSON content returned by ChatGPT, tolerating extra text."""
+
+    if not content:
+        return None
+
+    content = content.strip()
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt to extract JSON block
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+
+    return None
+
+
+def coerce_float(value: Any, default: float) -> float:
+    """Convert arbitrary values to float, falling back to a default."""
+
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+async def chatgpt_food_analysis(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Ask ChatGPT to identify a food item using the provided context."""
+
+    if not get_chatgpt_api_key():
+        return None
+
+    system_prompt = (
+        "Eres un asistente experto en nutrición. Debes identificar alimentos "
+        "a partir de descripciones de color promedio, candidatos sugeridos y "
+        "peso. Responde únicamente en JSON válido con el formato: "
+        "{\"name\": string, \"confidence\": number, \"nutrition\": {\"carbs\": number, "
+        "\"proteins\": number, \"fats\": number, \"glycemic_index\": number}}. "
+        "Todas las cantidades nutricionales deben estar expresadas en gramos "
+        "para el peso indicado y, si no estás seguro, devuelve valores "
+        "conservadores y fija la confianza a un valor bajo."
+    )
+
+    content = json.dumps(payload, ensure_ascii=False)
+
+    response = await invoke_chatgpt(
+        [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "Analiza la siguiente información y responde solo con el JSON solicitado:\n"
+                    f"{content}"
+                ),
+            },
+        ]
+    )
+
+    return parse_chatgpt_json(response)
+
+
+async def chatgpt_barcode_lookup(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Request ChatGPT assistance for a barcode that is not in the database."""
+
+    if not get_chatgpt_api_key():
+        return None
+
+    system_prompt = (
+        "Eres un asistente que ayuda con información nutricional de productos "
+        "envasados. Cuando no exista un producto exacto para un código de barras, "
+        "proporciona la mejor estimación posible o recomienda una categoría general. "
+        "Responde solo en JSON con el formato: {\"name\": string, \"confidence\": number, "
+        "\"nutrition\": {\"carbs\": number, \"proteins\": number, \"fats\": number, "
+        "\"glycemic_index\": number}}. Si el producto es desconocido, usa un nombre "
+        "genérico como \"Producto desconocido\", fija la confianza por debajo de 0.4 y "
+        "pon valores de macronutrientes prudentes (por ejemplo 0)."
+    )
+
+    content = json.dumps(payload, ensure_ascii=False)
+
+    response = await invoke_chatgpt(
+        [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "Necesito ayuda con este código de barras. Usa tu conocimiento general "
+                    "para orientar al usuario si es posible y responde en JSON válido:\n"
+                    f"{content}"
+                ),
+            },
+        ]
+    )
+
+    return parse_chatgpt_json(response)
+
 # Configuration
 CONFIG_PATH = os.path.expanduser("~/.bascula/config.json")
 DEFAULT_SERIAL_PORT = "/dev/serial0"
@@ -430,14 +616,16 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
         for key, value in best_match["macros_per_100"].items()
     }
 
-    return {
+    avg_color = {
+        "r": round(avg_r, 2),
+        "g": round(avg_g, 2),
+        "b": round(avg_b, 2),
+    }
+
+    heuristics_result = {
         "name": best_match["name"],
         "confidence": round(confidence, 2),
-        "avg_color": {
-            "r": round(avg_r, 2),
-            "g": round(avg_g, 2),
-            "b": round(avg_b, 2),
-        },
+        "avg_color": avg_color,
         "nutrition": {
             "carbs": macros["carbs"],
             "proteins": macros["proteins"],
@@ -446,19 +634,73 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
         },
     }
 
+    if get_chatgpt_api_key():
+        top_candidates = []
+        for profile in ranked[:5]:
+            top_candidates.append(
+                {
+                    "name": profile["name"],
+                    "distance": round(color_distance(profile["rgb"]), 3),
+                    "macros_per_100": profile["macros_per_100"],
+                    "glycemic_index": profile["glycemic_index"],
+                }
+            )
+
+        chatgpt_payload = {
+            "weight_grams": weight,
+            "average_rgb": avg_color,
+            "heuristic_best_match": heuristics_result,
+            "candidates": top_candidates,
+        }
+
+        chatgpt_response = await chatgpt_food_analysis(chatgpt_payload)
+        if isinstance(chatgpt_response, dict):
+            nutrition = heuristics_result["nutrition"].copy()
+            gpt_nutrition = chatgpt_response.get("nutrition", {})
+            for key in ["carbs", "proteins", "fats", "glycemic_index"]:
+                nutrition[key] = round(
+                    coerce_float(gpt_nutrition.get(key), nutrition[key]),
+                    2 if key != "glycemic_index" else 0,
+                )
+
+            confidence_value = coerce_float(
+                chatgpt_response.get("confidence"),
+                heuristics_result["confidence"],
+            )
+
+            return {
+                "name": chatgpt_response.get("name", heuristics_result["name"]),
+                "confidence": round(confidence_value, 2),
+                "avg_color": avg_color,
+                "nutrition": nutrition,
+            }
+
+    return heuristics_result
+
 @app.get("/api/scanner/barcode/{barcode}")
 
 async def scan_barcode(barcode: str):
     """Get food info from barcode using OpenFoodFacts API"""
+    status_code = 404
+    error_detail = "Product not found"
+    chatgpt_context: Dict[str, Any] = {"barcode": barcode}
+
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json")
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json"
+            )
+            response.raise_for_status()
             data = response.json()
-            
+            chatgpt_context["openfoodfacts_status"] = {
+                "status": data.get("status"),
+                "status_verbose": data.get("status_verbose"),
+            }
+
             if data.get("status") == 1:
                 product = data["product"]
                 nutriments = product.get("nutriments", {})
-                
+
                 return {
                     "name": product.get("product_name", "Producto desconocido"),
                     "confidence": 1.0,
@@ -466,13 +708,42 @@ async def scan_barcode(barcode: str):
                         "carbs": nutriments.get("carbohydrates_100g", 0),
                         "proteins": nutriments.get("proteins_100g", 0),
                         "fats": nutriments.get("fat_100g", 0),
-                        "glycemic_index": 50  # Default
-                    }
+                        "glycemic_index": nutriments.get("glycemic_index", 50),
+                    },
                 }
-            else:
-                raise HTTPException(status_code=404, detail="Product not found")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+            status_code = 404
+            error_detail = data.get("status_verbose", "Product not found")
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        error_detail = f"OpenFoodFacts error: {exc.response.text[:200]}"
+        chatgpt_context["error"] = error_detail
+    except Exception as exc:  # pragma: no cover - safety net
+        status_code = 500
+        error_detail = str(exc)
+        chatgpt_context["error"] = error_detail
+
+    chatgpt_response = await chatgpt_barcode_lookup(chatgpt_context)
+    if isinstance(chatgpt_response, dict):
+        nutrition_defaults = {"carbs": 0.0, "proteins": 0.0, "fats": 0.0, "glycemic_index": 50}
+        nutrition = {}
+        gpt_nutrition = chatgpt_response.get("nutrition", {})
+        for key, default in nutrition_defaults.items():
+            digits = 2 if key != "glycemic_index" else 0
+            nutrition[key] = round(coerce_float(gpt_nutrition.get(key), default), digits)
+
+        confidence_value = round(
+            coerce_float(chatgpt_response.get("confidence"), 0.35),
+            2,
+        )
+
+        return {
+            "name": chatgpt_response.get("name", "Producto desconocido"),
+            "confidence": confidence_value,
+            "nutrition": nutrition,
+        }
+
+    raise HTTPException(status_code=status_code, detail=error_detail)
 
 # ============= TIMER =============
 
