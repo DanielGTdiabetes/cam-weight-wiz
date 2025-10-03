@@ -28,19 +28,13 @@ import { logger } from '@/services/logger';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
+import { roundMacro, type FoodScannerConfirmedPayload } from '@/features/food-scanner/foodItem';
 
 interface BarcodeScannerModalProps {
   open: boolean;
   onClose: () => void;
   prefilledBarcode?: string;
-  onFoodConfirmed: (item: {
-    name: string;
-    weight: number;
-    carbs: number;
-    kcal: number;
-    photo?: string;
-    timestamp: Date;
-  }) => void;
+  onFoodConfirmed: (item: FoodScannerConfirmedPayload) => void;
 }
 
 type ScanMode = 'barcode' | 'ai';
@@ -83,6 +77,10 @@ const manualSchema = z.object({
   proteinsPer100g: z.number({ invalid_type_error: 'Ingresa un número' }).min(0, 'Debe ser >= 0'),
   fatsPer100g: z.number({ invalid_type_error: 'Ingresa un número' }).min(0, 'Debe ser >= 0'),
   kcalPer100g: z.number({ invalid_type_error: 'Ingresa un número' }).min(0, 'Debe ser >= 0'),
+  glycemicIndex: z
+    .number({ invalid_type_error: 'Ingresa un número' })
+    .min(0, 'Debe ser >= 0')
+    .max(150, 'Valor fuera de rango'),
 });
 
 const MAX_ATTEMPTS = 3;
@@ -106,6 +104,7 @@ interface ScannerHistoryItem {
   kcalPer100g?: number;
   confidence?: number;
   photo?: string;
+  glycemicIndex?: number;
 }
 
 interface Html5QrcodeScannerLike {
@@ -181,6 +180,7 @@ export function BarcodeScannerModal({
     proteinsPer100g: 0,
     fatsPer100g: 0,
     kcalPer100g: 0,
+    glycemicIndex: 50,
     confidence: 0,
     source: 'barcode',
   });
@@ -210,6 +210,7 @@ export function BarcodeScannerModal({
       proteinsPer100g: 0,
       fatsPer100g: 0,
       kcalPer100g: 0,
+      glycemicIndex: 50,
     },
     mode: 'onChange',
   });
@@ -221,6 +222,7 @@ export function BarcodeScannerModal({
       proteinsPer100g: productData.proteinsPer100g,
       fatsPer100g: productData.fatsPer100g,
       kcalPer100g: productData.kcalPer100g,
+      glycemicIndex: productData.glycemicIndex,
     });
   }, [productData, manualForm]);
 
@@ -274,6 +276,7 @@ export function BarcodeScannerModal({
           proteinsPer100g: result.nutrition.proteins,
           fatsPer100g: result.nutrition.fats,
           kcalPer100g: kcal,
+          glycemicIndex: Math.round(result.nutrition.glycemic_index ?? 0),
           confidence: result.confidence ?? 1,
           source: 'barcode',
           photo: capturedPhoto,
@@ -297,6 +300,7 @@ export function BarcodeScannerModal({
             proteinsPer100g: match.proteinsPer100g || 0,
             fatsPer100g: match.fatsPer100g || 0,
             kcalPer100g: match.kcalPer100g || 0,
+            glycemicIndex: match.glycemicIndex ?? 50,
             confidence: match.confidence || 0,
             source: 'manual',
             photo: match.photo,
@@ -369,6 +373,7 @@ export function BarcodeScannerModal({
         proteinsPer100g: 0,
         fatsPer100g: 0,
         kcalPer100g: 0,
+        glycemicIndex: 50,
         confidence: 0,
         source: 'barcode',
       });
@@ -523,12 +528,18 @@ export function BarcodeScannerModal({
       const inferredKcal =
         result.kcalPer100g ?? Math.round(result.carbsPer100g * 4 + (result.fatsPer100g || 0) * 9);
 
+      const aiRawGlycemicIndex =
+        'glycemicIndex' in result && typeof (result as { glycemicIndex?: number }).glycemicIndex === 'number'
+          ? (result as { glycemicIndex?: number }).glycemicIndex
+          : undefined;
+
       const aiProduct: ProductData = {
         name: result.name,
         carbsPer100g: result.carbsPer100g,
         proteinsPer100g: result.proteinsPer100g || 0,
         fatsPer100g: result.fatsPer100g || 0,
         kcalPer100g: inferredKcal,
+        glycemicIndex: Math.round(aiRawGlycemicIndex ?? 50),
         confidence: result.confidence,
         source: 'ai',
         photo: imageBase64,
@@ -617,13 +628,25 @@ export function BarcodeScannerModal({
     setStatusMessage('Coloca el alimento sobre la báscula y espera estabilización');
   }, [productData, pesoActual, toast]);
 
-  const calculatedCarbs = useMemo(() => {
-    return Math.round((productData.carbsPer100g * pesoActual) / 100);
-  }, [productData.carbsPer100g, pesoActual]);
+  const calculatedCarbs = useMemo(
+    () => roundMacro((productData.carbsPer100g * pesoActual) / 100),
+    [productData.carbsPer100g, pesoActual]
+  );
 
-  const calculatedKcal = useMemo(() => {
-    return Math.round((productData.kcalPer100g * pesoActual) / 100);
-  }, [productData.kcalPer100g, pesoActual]);
+  const calculatedProteins = useMemo(
+    () => roundMacro((productData.proteinsPer100g * pesoActual) / 100),
+    [productData.proteinsPer100g, pesoActual]
+  );
+
+  const calculatedFats = useMemo(
+    () => roundMacro((productData.fatsPer100g * pesoActual) / 100),
+    [productData.fatsPer100g, pesoActual]
+  );
+
+  const calculatedKcal = useMemo(
+    () => Math.round((productData.kcalPer100g * pesoActual) / 100),
+    [productData.kcalPer100g, pesoActual]
+  );
 
   const handleConfirm = useCallback(async () => {
     if (pesoActual <= 0) {
@@ -635,21 +658,25 @@ export function BarcodeScannerModal({
       return;
     }
 
-    const payload = {
+    const payload: FoodScannerConfirmedPayload = {
       name: productData.name,
       weight: pesoActual,
       carbs: calculatedCarbs,
-      kcal: calculatedKcal,
-      photo: productData.photo,
-      timestamp: new Date(),
+      proteins: calculatedProteins,
+      fats: calculatedFats,
+      glycemicIndex: productData.glycemicIndex,
+      kcal: calculatedKcal > 0 ? calculatedKcal : undefined,
+      confidence: productData.confidence || undefined,
     };
 
     storage.addScannerRecord({
       ...payload,
+      photo: productData.photo,
       carbsPer100g: productData.carbsPer100g,
       proteinsPer100g: productData.proteinsPer100g,
       fatsPer100g: productData.fatsPer100g,
       kcalPer100g: productData.kcalPer100g,
+      glycemicIndex: productData.glycemicIndex,
       source: productData.source,
       confidence: productData.confidence,
     });
@@ -706,6 +733,8 @@ export function BarcodeScannerModal({
     pesoActual,
     productData,
     calculatedCarbs,
+    calculatedProteins,
+    calculatedFats,
     calculatedKcal,
     onFoodConfirmed,
     onClose,
@@ -854,6 +883,7 @@ export function BarcodeScannerModal({
       proteinsPer100g: values.proteinsPer100g,
       fatsPer100g: values.fatsPer100g,
       kcalPer100g: values.kcalPer100g,
+      glycemicIndex: values.glycemicIndex,
       source: 'manual',
       photo: capturedPhoto,
     };
@@ -1034,6 +1064,10 @@ export function BarcodeScannerModal({
                 <div>
                   <p className="font-medium">Calorías</p>
                   <p>{productData.kcalPer100g} kcal / 100 g</p>
+                </div>
+                <div>
+                  <p className="font-medium">Índice glucémico</p>
+                  <p>{productData.glycemicIndex}</p>
                 </div>
               </div>
 
@@ -1258,6 +1292,36 @@ export function BarcodeScannerModal({
                     {manualForm.formState.errors.fatsPer100g && (
                       <p className="text-sm text-red-600" role="alert">
                         {manualForm.formState.errors.fatsPer100g.message}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between">
+                      <Label htmlFor="glycemic-index">Índice glucémico</Label>
+                      <Button
+                        type="button"
+                        size="icon"
+                        variant={activeNumericField === 'glycemicIndex' ? 'default' : 'ghost'}
+                        onClick={() =>
+                          setActiveNumericField((prev) => (prev === 'glycemicIndex' ? null : 'glycemicIndex'))
+                        }
+                        aria-pressed={activeNumericField === 'glycemicIndex'}
+                      >
+                        <Keyboard className="h-4 w-4" aria-hidden="true" />
+                        <span className="sr-only">Mostrar teclado para índice glucémico</span>
+                      </Button>
+                    </div>
+                    <Input
+                      id="glycemic-index"
+                      type="number"
+                      step="1"
+                      {...manualForm.register('glycemicIndex', { valueAsNumber: true })}
+                      aria-invalid={manualForm.formState.errors.glycemicIndex ? 'true' : 'false'}
+                    />
+                    {manualForm.formState.errors.glycemicIndex && (
+                      <p className="text-sm text-red-600" role="alert">
+                        {manualForm.formState.errors.glycemicIndex.message}
                       </p>
                     )}
                   </div>
