@@ -28,6 +28,10 @@ if ! command -v nmcli >/dev/null 2>&1; then
   exit 1
 fi
 
+
+: "${AP_ENSURE_CONNECTING_WAIT:=45}"
+: "${AP_ENSURE_CONNECTING_STEP:=3}"
+
 state="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
 case "${state}" in
   connected)
@@ -35,8 +39,30 @@ case "${state}" in
     exit 0
     ;;
   connecting)
-    log "NM=connecting → dejar que conecte"
-    exit 0
+    log "NM=connecting → esperando hasta ${AP_ENSURE_CONNECTING_WAIT}s"
+    t_end=$(( $(date +%s) + AP_ENSURE_CONNECTING_WAIT ))
+    timed_out=1
+    while [ "$(date +%s)" -lt "${t_end}" ]; do
+      if nmcli networking connectivity check 2>/dev/null | grep -qiE 'full|portal|limited'; then
+        log "Conectividad conseguida durante espera → no AP"
+        exit 0
+      fi
+
+      st="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
+      if [ "${st}" = "connected" ]; then
+        log "NM=connected tras espera → no AP"
+        exit 0
+      elif [ "${st}" = "disconnected" ] || [ "${st}" = "asleep" ] || [ "${st}" = "unknown" ]; then
+        log "NM=${st} tras espera → proceder a AP"
+        timed_out=0
+        break
+      fi
+
+      sleep "${AP_ENSURE_CONNECTING_STEP}"
+    done
+    if [ "${timed_out}" -eq 1 ]; then
+      log "Sin conectividad tras ${AP_ENSURE_CONNECTING_WAIT}s adicionales → proceder a AP"
+    fi
     ;;
   *)
     log "NM state=${state}; continuando con validaciones"
