@@ -287,15 +287,24 @@ def _redact_nmcli_args(args: Sequence[str]) -> str:
     return " ".join(shlex.quote(part) for part in redacted)
 
 
+def _prepare_nmcli_args(*cmd_parts: Sequence[str] | str) -> list[str]:
+    if len(cmd_parts) == 1 and isinstance(cmd_parts[0], (list, tuple)):
+        parts = cmd_parts[0]
+    else:
+        parts = cmd_parts
+    return [str(part) for part in parts]
+
+
 def _run_nmcli_command(
-    args: Sequence[str],
-    *,
+    *cmd_parts: Sequence[str] | str,
     check: bool = True,
     ok_codes: Set[int] | None = None,
     timeout: int = 30,
 ) -> subprocess.CompletedProcess:
     if not _nmcli_available():
         raise FileNotFoundError(str(NMCLI_BIN))
+
+    args = _prepare_nmcli_args(*cmd_parts)
 
     if not args:
         raise ValueError("nmcli command requires at least one argument")
@@ -329,12 +338,12 @@ def _run_nmcli_command(
 
 
 async def _run_nmcli_async(
-    args: Sequence[str],
-    *,
+    *cmd_parts: Sequence[str] | str,
     check: bool = True,
     ok_codes: Set[int] | None = None,
     timeout: int = 30,
 ) -> subprocess.CompletedProcess:
+    args = _prepare_nmcli_args(*cmd_parts)
     return await asyncio.to_thread(
         _run_nmcli_command,
         args,
@@ -603,10 +612,6 @@ async def _down_active_wifi_clients() -> None:
                 check=False,
                 ok_codes={0, 10},
             )
-    await _run_nmcli_async(
-        _nmcli_args("dev", "disconnect", WIFI_INTERFACE),
-        check=False,
-    )
 
 
 async def _create_or_update_wifi_profile(
@@ -1346,40 +1351,39 @@ def ensure_ap_profile() -> None:
     if not _nmcli_available():
         raise PermissionError("NMCLI_NOT_AVAILABLE")
 
+    connection_exists = False
     try:
         existing = _run_nmcli_command(
             _nmcli_args("con", "show", AP_CONNECTION_ID),
             timeout=5,
             check=False,
         )
-        if existing.returncode == 0:
-            return
+        connection_exists = existing.returncode == 0
     except FileNotFoundError:
         raise PermissionError("NMCLI_NOT_AVAILABLE")
 
-    create_res = _run_nmcli_command(
-        _nmcli_args(
-            "con",
-            "add",
-            "type",
-            "wifi",
-            "ifname",
-            WIFI_INTERFACE,
-            "con-name",
-            AP_CONNECTION_ID,
-            "autoconnect",
-            "no",
-            "ssid",
-            AP_DEFAULT_SSID,
-        ),
-        timeout=10,
-        check=False,
-    )
-    if create_res.returncode not in (0, 4):
-        message = (create_res.stderr or create_res.stdout).strip()
-        lower = message.lower()
-        if "already exists" not in lower and "exists" not in lower:
-            raise RuntimeError(message)
+    if not connection_exists:
+        create_res = _run_nmcli_command(
+            _nmcli_args(
+                "con",
+                "add",
+                "type",
+                "wifi",
+                "ifname",
+                WIFI_INTERFACE,
+                "con-name",
+                AP_CONNECTION_ID,
+                "ssid",
+                AP_DEFAULT_SSID,
+            ),
+            timeout=10,
+            check=False,
+        )
+        if create_res.returncode not in (0, 4):
+            message = (create_res.stderr or create_res.stdout).strip()
+            lower = message.lower()
+            if "already exists" not in lower and "exists" not in lower:
+                raise RuntimeError(message)
 
     modify_res = _run_nmcli_command(
         _nmcli_args(
@@ -1392,14 +1396,28 @@ def ensure_ap_profile() -> None:
             "0",
             "connection.interface-name",
             WIFI_INTERFACE,
+            "802-11-wireless.ssid",
+            AP_DEFAULT_SSID,
             "802-11-wireless.mode",
             "ap",
             "802-11-wireless.band",
             "bg",
+            "802-11-wireless.channel",
+            "1",
+            "wifi-sec.key-mgmt",
+            "wpa-psk",
+            "wifi-sec.proto",
+            "rsn",
+            "802-11-wireless-security.pmf",
+            "2",
             "ipv4.method",
             "shared",
             "ipv4.addresses",
             "192.168.4.1/24",
+            "ipv4.gateway",
+            "192.168.4.1",
+            "ipv4.never-default",
+            "yes",
             "ipv6.method",
             "ignore",
         ),
@@ -1408,28 +1426,18 @@ def ensure_ap_profile() -> None:
     if modify_res.returncode != 0:
         raise RuntimeError((modify_res.stderr or modify_res.stdout).strip())
 
-    if AP_DEFAULT_PASSWORD:
-        secret_ap_res = _run_nmcli_command(
-            _nmcli_args(
-                "con",
-                "modify",
-                AP_CONNECTION_ID,
-                "wifi-sec.key-mgmt",
-                "wpa-psk",
-                "wifi-sec.psk",
-                AP_DEFAULT_PASSWORD,
-            ),
-            timeout=5,
-        )
-        if secret_ap_res.returncode != 0:
-            raise RuntimeError((secret_ap_res.stderr or secret_ap_res.stdout).strip())
-    else:
-        open_ap_res = _run_nmcli_command(
-            _nmcli_args("con", "modify", AP_CONNECTION_ID, "wifi-sec.key-mgmt", "none"),
-            timeout=5,
-        )
-        if open_ap_res.returncode != 0:
-            raise RuntimeError((open_ap_res.stderr or open_ap_res.stdout).strip())
+    secret_ap_res = _run_nmcli_command(
+        _nmcli_args(
+            "con",
+            "modify",
+            AP_CONNECTION_ID,
+            "wifi-sec.psk",
+            AP_DEFAULT_PASSWORD,
+        ),
+        timeout=5,
+    )
+    if secret_ap_res.returncode != 0:
+        raise RuntimeError((secret_ap_res.stderr or secret_ap_res.stdout).strip())
 
 
 def _ethernet_connected() -> bool:

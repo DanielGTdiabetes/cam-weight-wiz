@@ -235,7 +235,7 @@ log "============================================"
 log "Target user      : $TARGET_USER ($TARGET_GROUP)"
 log "Target home      : $TARGET_HOME"
 log "OTA current link : $BASCULA_CURRENT_LINK"
-log "AP (NM)          : SSID=${AP_SSID} PASS=${AP_PASS} IFACE=${AP_IFACE}"
+log "AP (NM)          : SSID=${AP_SSID} PASS=<oculto> IFACE=${AP_IFACE}"
 
 # Check internet connection
 log "[1/20] Verificando conexión a Internet..."
@@ -704,46 +704,73 @@ polkit.addRule(function(action, subject) {
 EOF
 fi
 
-# Configurar el perfil AP mediante nmcli para garantizar idempotencia
+# Configurar el perfil AP de provisión (persistente y estable)
 if command -v nmcli >/dev/null 2>&1; then
-  log "Recreando perfil AP ${AP_NAME}..."
+  log "Asegurando perfil AP ${AP_NAME} (solo provisión)"
 
   rfkill unblock wifi || true
   nmcli radio wifi on || true
 
-  install -d -m 0755 /etc/NetworkManager/system-connections
+  install -d -m 0700 /etc/NetworkManager/system-connections
   target_ap_path="/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
 
-  nmcli con delete "${AP_NAME}" 2>/dev/null || true
-
-  if ! nmcli con add type wifi ifname "wlan0" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1; then
-    warn "No se pudo crear el perfil ${AP_NAME}"
-    nmcli dev status || true
-    nmcli -t -f NAME,TYPE,DEVICE con show || true
-  fi
-
-  nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 6 >/dev/null 2>&1 || warn "No se pudieron configurar parámetros Wi-Fi en ${AP_NAME}"
-  nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk wifi-sec.proto rsn wifi-sec.pmf 1 wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar la seguridad Wi-Fi"
-  nmcli con modify "${AP_NAME}" ipv4.method shared ipv4.addresses 192.168.4.1/24 ipv4.gateway 192.168.4.1 >/dev/null 2>&1 || warn "No se pudo fijar IPv4 shared en ${AP_NAME}"
-  nmcli con modify "${AP_NAME}" -ipv4.dns >/dev/null 2>&1 || warn "No se pudo limpiar ipv4.dns"
-  nmcli con modify "${AP_NAME}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar ipv4.never-default"
-  nmcli con modify "${AP_NAME}" connection.interface-name wlan0 connection.autoconnect no connection.autoconnect-priority 0 >/dev/null 2>&1 || warn "No se pudo fijar autoconnect"
-
-  if nmcli con export "${AP_NAME}" "${target_ap_path}" >/dev/null 2>&1; then
-    chmod 600 "${target_ap_path}" || warn "No se pudo ajustar permisos en ${target_ap_path}"
-    nmcli con delete "${AP_NAME}" 2>/dev/null || true
-    if ! nmcli con load "${target_ap_path}" >/dev/null 2>&1; then
-      warn "No se pudo recargar ${AP_NAME} desde ${target_ap_path}"
+  if [[ ! -f "${target_ap_path}" ]]; then
+    if command -v uuidgen >/dev/null 2>&1; then
+      ap_uuid="$(uuidgen)"
+    else
+      ap_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
     fi
-    while IFS=: read -r name uuid filename; do
-      [[ "${name}" != "${AP_NAME}" ]] && continue
-      [[ -z "${uuid}" ]] && continue
-      [[ "${filename}" == "${target_ap_path}" ]] && continue
-      nmcli con delete uuid "${uuid}" >/dev/null 2>&1 || true
-    done < <(nmcli -t -f NAME,UUID,FILENAME con show 2>/dev/null || true)
-  else
-    warn "No se pudo exportar ${AP_NAME} a ${target_ap_path}"
+    cat >"${target_ap_path}" <<EOF
+[connection]
+id=${AP_NAME}
+uuid=${ap_uuid}
+type=wifi
+interface-name=${AP_IFACE}
+autoconnect=false
+autoconnect-priority=0
+
+[wifi]
+ssid=${AP_SSID}
+mode=ap
+band=bg
+channel=1
+
+[wifi-security]
+key-mgmt=wpa-psk
+proto=rsn
+pmf=2
+psk=${AP_PASS}
+
+[ipv4]
+method=shared
+address1=${AP_GATEWAY}/24
+gateway=${AP_GATEWAY}
+never-default=true
+
+[ipv6]
+method=ignore
+EOF
+    chmod 600 "${target_ap_path}" || warn "No se pudieron ajustar permisos de ${target_ap_path}"
   fi
+
+  if ! nmcli con load "${target_ap_path}" >/dev/null 2>&1; then
+    warn "No se pudo cargar ${AP_NAME} desde ${target_ap_path}"
+  fi
+
+  chmod 600 "${target_ap_path}" || warn "No se pudieron ajustar permisos de ${target_ap_path}"
+
+  while IFS=: read -r name uuid filename; do
+    [[ "${name}" != "${AP_NAME}" ]] && continue
+    [[ -z "${uuid}" ]] && continue
+    [[ "${filename}" == "${target_ap_path}" ]] && continue
+    nmcli con delete uuid "${uuid}" >/dev/null 2>&1 || true
+  done < <(nmcli -t -f NAME,UUID,FILENAME con show 2>/dev/null || true)
+
+  nmcli con modify "${AP_NAME}" 802-11-wireless.ssid "${AP_SSID}" 802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 1 >/dev/null 2>&1 || warn "No se pudieron fijar parámetros Wi-Fi"
+  nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk wifi-sec.proto rsn 802-11-wireless-security.pmf 2 wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar la seguridad Wi-Fi"
+  nmcli con modify "${AP_NAME}" ipv4.method shared ipv4.addresses "${AP_GATEWAY}/24" ipv4.gateway "${AP_GATEWAY}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar IPv4 compartida"
+  nmcli con modify "${AP_NAME}" ipv6.method ignore >/dev/null 2>&1 || warn "No se pudo fijar IPv6 ignore"
+  nmcli con modify "${AP_NAME}" connection.interface-name "${AP_IFACE}" connection.autoconnect no connection.autoconnect-priority 0 >/dev/null 2>&1 || warn "No se pudieron fijar parámetros de conexión"
 
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     systemctl disable --now dnsmasq 2>/dev/null || true
@@ -775,6 +802,24 @@ if [[ -f "${WPA_SUPP_CONF}" ]] && grep -qE '^\s*network=' "${WPA_SUPP_CONF}"; th
 # Añade nuevas redes mediante la interfaz de usuario.
 EOF
   chmod 600 "${WPA_SUPP_CONF}" || true
+fi
+
+if [[ -f "${WPA_SUPP_CONF}" ]]; then
+  if ! grep -qE '^\s*country=ES\b' "${WPA_SUPP_CONF}"; then
+    if grep -qE '^\s*country=' "${WPA_SUPP_CONF}"; then
+      if sed -i 's/^\s*country=.*/country=ES/' "${WPA_SUPP_CONF}"; then
+        log "Actualizado country=ES en ${WPA_SUPP_CONF}"
+      else
+        warn "No se pudo actualizar la directiva country en ${WPA_SUPP_CONF}"
+      fi
+    else
+      if sed -i '1icountry=ES' "${WPA_SUPP_CONF}"; then
+        log "Añadido country=ES a ${WPA_SUPP_CONF}"
+      else
+        warn "No se pudo añadir country=ES a ${WPA_SUPP_CONF}"
+      fi
+    fi
+  fi
 fi
 
 # Si hay systemd, recargar polkit/NM
@@ -1192,6 +1237,7 @@ if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
   if ! systemctl daemon-reload; then
     warn "systemctl daemon-reload falló"
   fi
+  systemctl disable --now bascula-ap-ensure.timer 2>/dev/null || true
   if [[ "${AP_ENSURE_SERVICE_INSTALLED}" -eq 1 ]]; then
     if systemctl enable bascula-ap-ensure.service; then
       log "✓ Servicio bascula-ap-ensure habilitado"
