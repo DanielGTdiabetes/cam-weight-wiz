@@ -199,10 +199,16 @@ export const MiniWebConfig = () => {
       try {
         console.log('[miniweb] connect', { ssid, secured, pwdLen: wifiPassword.length });
         setUi((prev) => ({ ...prev, connecting: true, error: '' }));
+        const payload = {
+          ssid,
+          password: wifiPassword,
+          secured,
+        };
+
         const res = await fetch('/api/miniweb/connect-wifi', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ssid, password: wifiPassword, secured }),
+          body: JSON.stringify(payload),
         });
         if (!res.ok) {
           const errorBody = (await res.json().catch(() => null)) as
@@ -252,7 +258,10 @@ export const MiniWebConfig = () => {
       }
     };
 
-    const selectedSecured = Boolean(selectedNetwork?.secured ?? requiresPassword);
+    const selectedSecured =
+      typeof selectedNetwork?.secured === 'boolean'
+        ? selectedNetwork.secured
+        : Boolean(selectedNetwork?.sec && selectedNetwork.sec.toUpperCase() !== 'NONE');
 
     void connectWifi(
       selectedSSID,
