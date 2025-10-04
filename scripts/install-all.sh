@@ -612,16 +612,29 @@ fi
 
 # Instalar SIEMPRE el perfil AP (aunque no haya systemd en chroot)
 if [ -f system/os/nm/BasculaAP.nmconnection ]; then
-  # Asegurar UUID
   AP_TMP="$(mktemp)"
+  EXISTING_AP_UUID="$(nmcli -g connection.uuid connection show "${AP_NAME}" 2>/dev/null | head -n1 || true)"
+  if [ -z "$EXISTING_AP_UUID" ] && [ -f "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" ]; then
+    EXISTING_AP_UUID="$(grep -m1 '^uuid=' "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" | cut -d= -f2)"
+  fi
+  if [ -z "$EXISTING_AP_UUID" ]; then
+    UUID_GEN="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
+  else
+    UUID_GEN="$EXISTING_AP_UUID"
+  fi
+
   if grep -q '${GENERATE_UUID}' system/os/nm/BasculaAP.nmconnection; then
-    UUID_GEN="$(uuidgen || cat /proc/sys/kernel/random/uuid)"
-    sed "s#\${GENERATE_UUID}#${UUID_GEN}#g" system/os/nm/BasculaAP.nmconnection > "$AP_TMP"
+    sed "s#\${GENERATE_UUID}#${UUID_GEN}#g" system/os/nm/BasculaAP.nmconnection >"$AP_TMP"
   else
     cp system/os/nm/BasculaAP.nmconnection "$AP_TMP"
   fi
-  install -D -m 0600 "$AP_TMP" /etc/NetworkManager/system-connections/BasculaAP.nmconnection
+
+  install -D -m 0600 "$AP_TMP" "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
   rm -f "$AP_TMP"
+
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli connection load "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" >/dev/null 2>&1 || true
+  fi
 fi
 
 # Si hay systemd, recargar polkit/NM

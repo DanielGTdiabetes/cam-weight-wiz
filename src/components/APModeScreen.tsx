@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Wifi, QrCode, Settings, KeyRound } from "lucide-react";
+import { Wifi, QrCode, Settings, KeyRound, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -9,6 +9,12 @@ export const APModeScreen = () => {
   const miniWebURL = "http://192.168.4.1:8080";
   const [miniWebPin, setMiniWebPin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
+  const [verifyState, setVerifyState] = useState<{
+    status: "idle" | "checking" | "success" | "error";
+    message?: string;
+    code?: string;
+    ip?: string;
+  }>({ status: "idle" });
 
   useEffect(() => {
     let isMounted = true;
@@ -52,6 +58,64 @@ export const APModeScreen = () => {
       window.clearInterval(interval);
     };
   }, []);
+
+  const handleVerifyWifi = async () => {
+    setVerifyState({ status: "checking" });
+    const timeoutMs = 30_000;
+    const started = Date.now();
+    let lastCode: string | undefined;
+
+    while (Date.now() - started < timeoutMs) {
+      try {
+        const response = await fetch("/api/miniweb/status", { cache: "no-store" });
+        if (response.ok) {
+          const status = await response.json();
+          if (status?.connected === true && status?.ap_active === false) {
+            const ssid = typeof status.ssid === "string" && status.ssid ? status.ssid : "tu red WiFi";
+            const ip =
+              (typeof status.ip === "string" && status.ip) ||
+              (typeof status.ip_address === "string" && status.ip_address) ||
+              undefined;
+            setVerifyState({
+              status: "success",
+              message: `Conectado a ${ssid}. Cambia tu Wi-Fi al hogar para seguir usando la báscula.`,
+              ip,
+            });
+            return;
+          }
+          lastCode = undefined;
+        } else {
+          const body = (await response.json().catch(() => null)) as
+            | { detail?: unknown; code?: unknown }
+            | null;
+          const detail =
+            body && typeof body.detail === "object" && body.detail !== null
+              ? (body.detail as { code?: unknown })
+              : undefined;
+          const detailCode =
+            (detail && typeof detail.code === "string" && detail.code) ||
+            (typeof body?.code === "string" ? body.code : undefined);
+          if (detailCode) {
+            lastCode = detailCode;
+          }
+        }
+      } catch (error) {
+        // Ignorar errores de red momentáneos
+      }
+
+      await new Promise<void>((resolve) => {
+        window.setTimeout(() => resolve(), 1_500);
+      });
+    }
+
+    setVerifyState({
+      status: "error",
+      code: lastCode,
+      message: lastCode
+        ? `No se pudo confirmar la conexión (${lastCode}).`
+        : "No se pudo confirmar la conexión Wi-Fi.",
+    });
+  };
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-8">
@@ -148,15 +212,48 @@ export const APModeScreen = () => {
           </div>
         </div>
 
-        <Button
-          onClick={() => window.location.reload()}
-          variant="glow"
-          size="xl"
-          className="w-full text-xl"
-        >
-          <Settings className="mr-2 h-6 w-6" />
-          Verificar Conexión WiFi
-        </Button>
+        <div className="space-y-4">
+          <Button
+            onClick={handleVerifyWifi}
+            variant="glow"
+            size="xl"
+            className="w-full text-xl"
+            disabled={verifyState.status === "checking"}
+          >
+            {verifyState.status === "checking" ? (
+              <Loader2 className="mr-2 h-6 w-6 animate-spin" />
+            ) : (
+              <Settings className="mr-2 h-6 w-6" />
+            )}
+            {verifyState.status === "checking" ? "Verificando…" : "Verificar Conexión WiFi"}
+          </Button>
+
+          {verifyState.status === "success" && (
+            <div className="flex items-start gap-3 rounded-lg border border-emerald-400/40 bg-emerald-500/10 p-4 text-left">
+              <CheckCircle2 className="mt-1 h-5 w-5 text-emerald-400" />
+              <div className="space-y-1">
+                <p className="font-semibold text-emerald-200">Conexión confirmada</p>
+                <p className="text-sm text-emerald-100/80">{verifyState.message}</p>
+                {verifyState.ip && (
+                  <p className="text-xs font-mono text-emerald-100/60">IP asignada: {verifyState.ip}</p>
+                )}
+              </div>
+            </div>
+          )}
+
+          {verifyState.status === "error" && (
+            <div className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-left">
+              <AlertCircle className="mt-1 h-5 w-5 text-destructive" />
+              <div className="space-y-1">
+                <p className="font-semibold text-destructive">Sin confirmación</p>
+                <p className="text-sm text-destructive/90">{verifyState.message}</p>
+                {verifyState.code && (
+                  <p className="text-xs uppercase tracking-wide text-destructive/80">Código: {verifyState.code}</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
 
         <p className="mt-6 text-center text-sm text-muted-foreground">
           El sistema volverá a intentar conectarse automáticamente cada 30 segundos
