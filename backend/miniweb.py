@@ -1716,6 +1716,19 @@ def _get_wifi_status() -> Dict[str, Any]:
     if connected:
         should_activate_ap = False
 
+    auto_ap_requested = False
+    ap_activation_error: Optional[str] = None
+    if should_activate_ap and not ap_active:
+        auto_ap_requested = True
+        try:
+            if _bring_up_ap(debounce_sec=10.0):
+                ap_active = True
+                if not wlan_ip:
+                    wlan_ip = get_iface_ip(WIFI_INTERFACE)
+        except Exception as exc:
+            ap_activation_error = str(exc)
+            LOG_NETWORK.warning("Auto AP activation failed: %s", exc)
+
     ip_address: Optional[str] = None
     if eth_ip:
         ip_address = eth_ip
@@ -1730,6 +1743,8 @@ def _get_wifi_status() -> Dict[str, Any]:
         "ip": wlan_ip,
         "ip_address": ip_address,
         "ap_active": ap_active,
+        "ap_autostart_requested": auto_ap_requested,
+        "ap_autostart_error": ap_activation_error,
         "ethernet_connected": ethernet_active,
         "interface": WIFI_INTERFACE,
         "active_connection": active_connection,
