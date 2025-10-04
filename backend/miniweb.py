@@ -510,6 +510,74 @@ async def _cleanup_nmcli_duplicates(connection_id: str, persistent_path: Path | 
         )
 
 
+async def _list_wifi_client_profiles() -> list[str]:
+    try:
+        res = await _run_nmcli_async(
+            _nmcli_args(
+                "-t",
+                "-f",
+                "NAME,TYPE,802-11-wireless.mode",
+                "con",
+                "show",
+            ),
+            check=False,
+        )
+    except FileNotFoundError:
+        raise
+
+    profiles: list[str] = []
+    seen: set[str] = set()
+    for line in (res.stdout or "").splitlines():
+        if not line:
+            continue
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        name, conn_type, mode = parts
+        if not name or name == AP_CONNECTION_ID:
+            continue
+        if conn_type.lower() != "802-11-wireless":
+            continue
+        if mode.lower() != "infrastructure":
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        profiles.append(name)
+    return profiles
+
+
+async def _disable_client_profiles_temporarily(profiles: Sequence[str]) -> None:
+    for profile in profiles:
+        if not profile:
+            continue
+        await _run_nmcli_async(
+            _nmcli_args(
+                "con",
+                "modify",
+                profile,
+                "connection.autoconnect",
+                "no",
+            ),
+            check=False,
+        )
+        await _run_nmcli_async(
+            _nmcli_args(
+                "con",
+                "modify",
+                profile,
+                "connection.autoconnect-priority",
+                "0",
+            ),
+            check=False,
+        )
+        await _run_nmcli_async(
+            _nmcli_args("con", "down", profile),
+            check=False,
+            ok_codes={0, 10},
+        )
+
+
 async def _create_or_update_wifi_profile(
     ssid: str, password: Optional[str], secured: bool
 ) -> Path:
@@ -1647,6 +1715,11 @@ class WifiCredentials(BaseModel):
     sec: Optional[str] = None
 
 
+class NetworkConnectRequest(BaseModel):
+    ssid: str
+    psk: str
+
+
 # ---------- PIN persistente ----------
 CURRENT_PIN = _get_or_create_pin()
 
@@ -1708,9 +1781,7 @@ async def scan_networks():
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@app.post("/api/miniweb/connect")
-@app.post("/api/miniweb/connect-wifi")
-async def connect_wifi(credentials: WifiCredentials):
+async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
     ssid = credentials.ssid.strip()
     if not ssid:
         raise HTTPException(status_code=422, detail="ssid_required")
@@ -1918,6 +1989,18 @@ async def connect_wifi(credentials: WifiCredentials):
             _LAST_WIFI_CONNECT_REQUEST = None
 
 
+@app.post("/api/miniweb/connect")
+@app.post("/api/miniweb/connect-wifi")
+async def connect_wifi(credentials: WifiCredentials):
+    return await _handle_wifi_connect(credentials)
+
+
+@app.post("/api/network/connect")
+async def network_connect(payload: NetworkConnectRequest):
+    creds = WifiCredentials(ssid=payload.ssid, password=payload.psk, secured=True)
+    return await _handle_wifi_connect(creds)
+
+
 @app.get("/api/miniweb/status")
 async def miniweb_status():
     try:
@@ -1935,6 +2018,39 @@ async def miniweb_status():
 
 @app.post("/api/network/enable-ap")
 async def enable_ap():
+    try:
+        profiles = await _list_wifi_client_profiles()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+
+    try:
+        await _disable_client_profiles_temporarily(profiles)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+    except Exception as exc:
+        LOG_NETWORK.debug("No se pudieron desactivar perfiles cliente: %s", exc)
+
+    await _run_nmcli_async(
+        _nmcli_args(
+            "con",
+            "modify",
+            AP_CONNECTION_ID,
+            "connection.autoconnect",
+            "no",
+        ),
+        check=False,
+    )
+    await _run_nmcli_async(
+        _nmcli_args(
+            "con",
+            "modify",
+            AP_CONNECTION_ID,
+            "connection.autoconnect-priority",
+            "0",
+        ),
+        check=False,
+    )
+
     try:
         res = await _run_nmcli_async(
             _nmcli_args("con", "up", AP_CONNECTION_ID),
