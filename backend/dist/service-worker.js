@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v2025.03.01';
+const CACHE_VERSION = 'v2025.03.02';
 const STATIC_CACHE = `bascula-static-${CACHE_VERSION}`;
 const DYNAMIC_CACHE = `bascula-dynamic-${CACHE_VERSION}`;
 const RECOVERY_CACHE = `bascula-recovery-${CACHE_VERSION}`;
