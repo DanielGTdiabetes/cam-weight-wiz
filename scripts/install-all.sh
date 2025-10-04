@@ -706,13 +706,13 @@ fi
 
 # Configurar el perfil AP mediante nmcli para garantizar idempotencia
 if command -v nmcli >/dev/null 2>&1; then
-  log "Configurando perfil AP ${AP_NAME}..."
+  log "Recreando perfil AP ${AP_NAME}..."
 
   rfkill unblock wifi || true
   nmcli radio wifi on || true
 
-  target_ap_path="/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
   install -d -m 0755 /etc/NetworkManager/system-connections
+  target_ap_path="/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
 
   nmcli con delete "${AP_NAME}" 2>/dev/null || true
 
@@ -722,22 +722,19 @@ if command -v nmcli >/dev/null 2>&1; then
     nmcli -t -f NAME,TYPE,DEVICE con show || true
   fi
 
-  nmcli con modify "${AP_NAME}" connection.interface-name "wlan0" >/dev/null 2>&1 || warn "No se pudo fijar interface-name"
-  nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg >/dev/null 2>&1 || warn "No se pudieron configurar parámetros Wi-Fi en ${AP_NAME}"
-  nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk >/dev/null 2>&1 || warn "No se pudo configurar wifi-sec.key-mgmt para ${AP_NAME}"
-  nmcli con modify "${AP_NAME}" wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar wifi-sec.psk"
-  nmcli con modify "${AP_NAME}" ipv4.method shared >/dev/null 2>&1 || warn "No se pudo establecer ipv4.method=shared en ${AP_NAME}"
-  nmcli con modify "${AP_NAME}" ipv4.addresses "192.168.4.1/24" >/dev/null 2>&1 || warn "No se pudo fijar ipv4.addresses"
-  nmcli con modify "${AP_NAME}" ipv4.gateway "192.168.4.1" >/dev/null 2>&1 || warn "No se pudo fijar ipv4.gateway"
-  nmcli con modify "${AP_NAME}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar ipv4.never-default"
+  nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 6 >/dev/null 2>&1 || warn "No se pudieron configurar parámetros Wi-Fi en ${AP_NAME}"
+  nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk wifi-sec.proto rsn wifi-sec.pmf 1 wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar la seguridad Wi-Fi"
+  nmcli con modify "${AP_NAME}" ipv4.method shared ipv4.addresses 192.168.4.1/24 ipv4.gateway 192.168.4.1 >/dev/null 2>&1 || warn "No se pudo fijar IPv4 shared en ${AP_NAME}"
   nmcli con modify "${AP_NAME}" -ipv4.dns >/dev/null 2>&1 || warn "No se pudo limpiar ipv4.dns"
-  nmcli con modify "${AP_NAME}" ipv6.method ignore >/dev/null 2>&1 || true
-  nmcli con modify "${AP_NAME}" connection.autoconnect no >/dev/null 2>&1 || warn "No se pudo establecer autoconnect en ${AP_NAME}"
-  nmcli con modify "${AP_NAME}" connection.autoconnect-priority 0 >/dev/null 2>&1 || warn "No se pudo establecer prioridad"
+  nmcli con modify "${AP_NAME}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar ipv4.never-default"
+  nmcli con modify "${AP_NAME}" connection.interface-name wlan0 connection.autoconnect no connection.autoconnect-priority 0 >/dev/null 2>&1 || warn "No se pudo fijar autoconnect"
 
   if nmcli con export "${AP_NAME}" "${target_ap_path}" >/dev/null 2>&1; then
     chmod 600 "${target_ap_path}" || warn "No se pudo ajustar permisos en ${target_ap_path}"
-    nmcli con load "${target_ap_path}" >/dev/null 2>&1 || warn "No se pudo recargar ${AP_NAME} desde ${target_ap_path}"
+    nmcli con delete "${AP_NAME}" 2>/dev/null || true
+    if ! nmcli con load "${target_ap_path}" >/dev/null 2>&1; then
+      warn "No se pudo recargar ${AP_NAME} desde ${target_ap_path}"
+    fi
     while IFS=: read -r name uuid filename; do
       [[ "${name}" != "${AP_NAME}" ]] && continue
       [[ -z "${uuid}" ]] && continue
@@ -752,11 +749,12 @@ if command -v nmcli >/dev/null 2>&1; then
     systemctl disable --now dnsmasq 2>/dev/null || true
   fi
 
-  ssid="$(nmcli -g 802-11-wireless.ssid con show "${AP_NAME}" 2>/dev/null || echo '?')"
-  mode="$(nmcli -g 802-11-wireless.mode con show "${AP_NAME}" 2>/dev/null || echo '?')"
-  ipv4m="$(nmcli -g ipv4.method con show "${AP_NAME}" 2>/dev/null || echo '?')"
-  filename="$(nmcli -g connection.filename con show "${AP_NAME}" 2>/dev/null || echo '?')"
-  log "[inst] BasculaAP configurada: ssid=${ssid} mode=${mode} ipv4.method=${ipv4m} file=${filename}"
+  verify_line="$(nmcli -t -f NAME,AUTOCONNECT,AUTOCONNECT-PRIORITY,FILENAME con show 2>/dev/null | grep "^${AP_NAME}:" || true)"
+  if [[ -n "${verify_line}" ]]; then
+    log "[inst] BasculaAP verificada: ${verify_line}"
+  else
+    warn "No se pudo verificar BasculaAP en la salida de nmcli"
+  fi
 else
   warn "nmcli no disponible; no se pudo configurar ${AP_NAME}"
 fi
