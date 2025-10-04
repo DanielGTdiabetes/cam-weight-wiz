@@ -60,9 +60,9 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
         {/* Settings Icon - Top Right */}
         <button
           onClick={() => onNavigate("settings")}
-          className="absolute -top-2 right-0 z-10 rounded-full bg-muted/50 p-3 hover:bg-muted transition-smooth border border-muted"
+          className="absolute -top-12 right-0 z-10 rounded-full bg-muted/50 p-3 hover:bg-muted transition-smooth border border-muted"
         >
-          <SettingsIcon className="h-7 w-7" />
+          <SettingsIcon className="h-8 w-8" />
         </button>
 
         <div className="grid grid-cols-2 gap-4">
