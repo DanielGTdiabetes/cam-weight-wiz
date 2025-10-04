@@ -7,10 +7,13 @@ Wants=network-online.target
 Type=oneshot
 Environment=AP_ENSURE_CONNECTING_WAIT=45
 Environment=AP_ENSURE_CONNECTING_STEP=3
-ExecStartPre=/usr/bin/nm-online -s -q -t 25
+# Ignore nm-online failure so the ensure script can still run
+ExecStartPre=-/usr/bin/nm-online -s -q -t 25
 ExecStart=/opt/bascula/current/scripts/bascula-ap-ensure.sh
 Restart=on-failure
 RestartSec=5s
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
