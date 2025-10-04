@@ -29,6 +29,7 @@ Incluye:
    - Despliega el backend mini-web (`bascula-miniweb.service`) escuchando en `:8080`. 【F:packaging/systemd/bascula-miniweb.service†L1-L16】
    - Configura el servicio kiosk de Chromium apuntando a `http://localhost:8080`. 【F:scripts/install-all.sh†L772-L834】
    - Despliega el servicio `bascula-ap-ensure.service`, que crea y activa el AP `BasculaAP` (wlan0, `192.168.4.1/24`) sólo cuando no hay conectividad previa. 【F:scripts/install-all.sh†L1090-L1185】【F:scripts/bascula-ap-ensure.sh†L1-L150】
+   - El servicio espera hasta 25 segundos a que NetworkManager intente las redes guardadas antes de encender el AP, gracias a `nm-online`. 【F:systemd/bascula-ap-ensure.service†L1-L13】【F:scripts/bascula-ap-ensure.sh†L1-L120】
 
 3. Reinicia el dispositivo al finalizar la instalación para cargar todos los servicios y reglas (`sudo reboot`).
 

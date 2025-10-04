@@ -28,6 +28,26 @@ if ! command -v nmcli >/dev/null 2>&1; then
   exit 1
 fi
 
+state="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
+case "${state}" in
+  connected)
+    log "NM=connected → no AP"
+    exit 0
+    ;;
+  connecting)
+    log "NM=connecting → dejar que conecte"
+    exit 0
+    ;;
+  *)
+    log "NM state=${state}; continuando con validaciones"
+    ;;
+esac
+
+if nmcli networking connectivity check 2>/dev/null | grep -qiE 'full|portal|limited'; then
+  log "Conectividad disponible en último momento → no AP"
+  exit 0
+fi
+
 connectivity="$(nmcli networking connectivity check 2>/dev/null || echo 'unknown')"
 case "${connectivity}" in
   full|internet|portal|limited)
@@ -41,7 +61,7 @@ case "${connectivity}" in
     ;;
 esac
 
-log "Sin conectividad; preparando ${AP_NAME} en ${AP_IFACE}"
+log "Sin conectividad tras espera; preparando ${AP_NAME} en ${AP_IFACE}"
 rfkill unblock wifi 2>/dev/null || true
 nmcli radio wifi on >/dev/null 2>&1 || true
 
