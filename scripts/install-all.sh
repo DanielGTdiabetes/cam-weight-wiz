@@ -601,13 +601,29 @@ else
   fail "No se encontró /etc/polkit-1/rules.d/49-nmcli.rules"
 fi
 
+BASCULA_NM_RULE_SRC="${PROJECT_ROOT}/system/os/10-bascula-nm.rules"
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if ! systemctl restart polkit; then
-    systemctl restart polkitd || true
+  # Instalar regla polkit para NetworkManager (usuario pi)
+  if [[ -f "${BASCULA_NM_RULE_SRC}" ]]; then
+    sudo install -m 0644 "${BASCULA_NM_RULE_SRC}" /etc/polkit-1/rules.d/10-bascula-nm.rules
+    # Recargar polkit y NetworkManager para aplicar la regla
+    if systemctl is-active --quiet polkit; then
+      sudo systemctl reload polkit || true
+    else
+      sudo systemctl restart polkit || sudo systemctl restart polkitd || true
+    fi
+    sudo systemctl restart NetworkManager || sudo systemctl restart NetworkManager.service || true
+  else
+    warn "${BASCULA_NM_RULE_SRC} no encontrado; omitiendo instalación de regla Polkit 10-bascula-nm"
+    if systemctl is-active --quiet polkit; then
+      sudo systemctl reload polkit || true
+    else
+      sudo systemctl restart polkit || sudo systemctl restart polkitd || true
+    fi
+    sudo systemctl restart NetworkManager || sudo systemctl restart NetworkManager.service || true
   fi
-  systemctl restart NetworkManager || true
 else
-  warn "systemd no disponible: omitiendo reinicio de polkit/NetworkManager"
+  warn "systemd no disponible: omitiendo instalación de regla 10-bascula-nm y recarga de polkit/NetworkManager"
 fi
 
 if ! nmcli general status >/dev/null 2>&1; then
