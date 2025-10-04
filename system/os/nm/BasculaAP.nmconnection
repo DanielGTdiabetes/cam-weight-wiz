@@ -2,8 +2,8 @@
 id=BasculaAP
 uuid=${GENERATE_UUID}
 type=wifi
-autoconnect=true
-autoconnect-priority=100
+autoconnect=false
+autoconnect-priority=-999
 interface-name=wlan0
 permissions=
 
@@ -17,6 +17,9 @@ key-mgmt=wpa-psk
 psk=bascula2025
 
 [ipv4]
+address1=192.168.4.1/24
+dns=1.1.1.1;8.8.8.8;
+gateway=192.168.4.1
 method=shared
 
 [ipv6]

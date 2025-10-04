@@ -162,10 +162,13 @@ STATE_DIR="/var/lib/bascula"
 STATE_FILE="${STATE_DIR}/scale.json"
 LOG_DIR="/var/log/bascula"
 
-AP_SSID="${AP_SSID:-Bascula_AP}"
-AP_PASS="${AP_PASS:-bascula1234}"
+AP_SSID="${AP_SSID:-Bascula-AP}"
+AP_PASS="${AP_PASS:-bascula2025}"
 AP_IFACE="${AP_IFACE:-wlan0}"
 AP_NAME="${AP_NAME:-BasculaAP}"
+AP_GATEWAY="${AP_GATEWAY:-192.168.4.1}"
+AP_POOL_START="${AP_POOL_START:-192.168.4.20}"
+AP_POOL_END="${AP_POOL_END:-192.168.4.99}"
 
 BOOTDIR="/boot/firmware"
 [[ ! -d "${BOOTDIR}" ]] && BOOTDIR="/boot"
@@ -221,7 +224,7 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils sox ffmpeg
         libzbar0 gpiod python3-rpi.gpio
-        network-manager dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+        network-manager dnsmasq dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
         uuid-runtime
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
@@ -364,6 +367,7 @@ else
     warn "Sin red: omitiendo reinstalación de NetworkManager"
 fi
 systemctl_safe enable NetworkManager --now
+systemctl_safe enable NetworkManager-wait-online.service
 
 # Install camera dependencies
 log "[4/20] Instalando dependencias de cámara..."
@@ -634,7 +638,65 @@ if [ -f system/os/nm/BasculaAP.nmconnection ]; then
 
   if command -v nmcli >/dev/null 2>&1; then
     nmcli connection load "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" >/dev/null 2>&1 || true
+    if ! nmcli connection modify "${AP_NAME}" \
+      connection.autoconnect no \
+      connection.autoconnect-priority -999 \
+      connection.interface-name "${AP_IFACE}" \
+      802-11-wireless.mode ap \
+      802-11-wireless.band bg \
+      802-11-wireless.ssid "${AP_SSID}" \
+      ipv4.method shared \
+      ipv4.addresses "${AP_GATEWAY}/24" \
+      ipv4.gateway "${AP_GATEWAY}" \
+      ipv4.dns "${AP_GATEWAY}" \
+      ipv6.method ignore >/dev/null 2>&1; then
+      warn "No se pudo ajustar parámetros base de ${AP_NAME}"
+    fi
+    if ! nmcli connection modify "${AP_NAME}" \
+      ipv4.dhcp-server.address-pool-start "${AP_POOL_START}" \
+      ipv4.dhcp-server.address-pool-end "${AP_POOL_END}" \
+      ipv4.dhcp-server.gateway "${AP_GATEWAY}" \
+      ipv4.dhcp-server.default-route yes \
+      ipv4.dhcp-server.dns "${AP_GATEWAY}" >/dev/null 2>&1; then
+      warn "No se pudo fijar el pool DHCP personalizado para ${AP_NAME}"
+    fi
+    if [[ -n "${AP_PASS}" ]]; then
+      nmcli connection modify "${AP_NAME}" \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || true
+    else
+      nmcli connection modify "${AP_NAME}" wifi-sec.key-mgmt none >/dev/null 2>&1 || true
+    fi
   fi
+fi
+
+if command -v nmcli >/dev/null 2>&1; then
+  while IFS= read -r PRECONF_UUID; do
+    [[ -z "${PRECONF_UUID}" ]] && continue
+    NAME=$(nmcli -g connection.id connection show "${PRECONF_UUID}" 2>/dev/null || true)
+    if [[ -n "${NAME}" && "${NAME,,}" == *preconfig* ]]; then
+      log "Eliminando perfil Wi-Fi preconfigurado: ${NAME}"
+      nmcli connection delete "${PRECONF_UUID}" >/dev/null 2>&1 || true
+    fi
+  done < <(nmcli -t -f UUID connection show 2>/dev/null | sed 's/^UUID://')
+fi
+
+WPA_SUPP_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
+if [[ -f "${WPA_SUPP_CONF}" ]] && grep -qE '^\s*network=' "${WPA_SUPP_CONF}"; then
+  BACKUP_PATH="${WPA_SUPP_CONF}.preinstall"
+  if [[ ! -f "${BACKUP_PATH}" ]]; then
+    cp "${WPA_SUPP_CONF}" "${BACKUP_PATH}" || warn "No se pudo crear copia de ${WPA_SUPP_CONF}"
+  fi
+  SOURCE_PATH="${BACKUP_PATH}"
+  [[ -f "${SOURCE_PATH}" ]] || SOURCE_PATH="${WPA_SUPP_CONF}"
+  log "Limpiando redes preconfiguradas en ${WPA_SUPP_CONF}"
+  awk 'BEGIN{network_seen=0} {if($0 ~ /^\s*network=/){network_seen=1;exit} print}' "${SOURCE_PATH}" >"${WPA_SUPP_CONF}" || true
+  cat >>"${WPA_SUPP_CONF}" <<'EOF'
+
+# Redes Wi-Fi preconfiguradas eliminadas por el instalador de Báscula
+# Añade nuevas redes mediante la interfaz de usuario.
+EOF
+  chmod 600 "${WPA_SUPP_CONF}" || true
 fi
 
 # Si hay systemd, recargar polkit/NM

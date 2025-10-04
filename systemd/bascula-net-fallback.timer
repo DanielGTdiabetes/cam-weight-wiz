@@ -3,7 +3,7 @@ Description=Bascula Network Fallback AP Timer
 Requires=bascula-net-fallback.service
 
 [Timer]
-OnBootSec=30s
+OnBootSec=10s
 OnUnitActiveSec=30s
 AccuracySec=5s
 
