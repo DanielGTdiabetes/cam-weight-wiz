@@ -222,6 +222,7 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         alsa-utils sox ffmpeg
         libzbar0 gpiod python3-rpi.gpio
         network-manager dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+        uuid-runtime
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
         log "✓ Dependencias base instaladas"
@@ -606,7 +607,7 @@ set -e
 
 # Instalar siempre la regla polkit (ya creada antes)
 if [ -f system/os/10-bascula-nm.rules ]; then
-  sudo install -D -m 0644 system/os/10-bascula-nm.rules /etc/polkit-1/rules.d/10-bascula-nm.rules
+  install -D -m 0644 system/os/10-bascula-nm.rules /etc/polkit-1/rules.d/10-bascula-nm.rules
 fi
 
 # Instalar SIEMPRE el perfil AP (aunque no haya systemd en chroot)
@@ -619,14 +620,16 @@ if [ -f system/os/nm/BasculaAP.nmconnection ]; then
   else
     cp system/os/nm/BasculaAP.nmconnection "$AP_TMP"
   fi
-  sudo install -D -m 0600 "$AP_TMP" /etc/NetworkManager/system-connections/BasculaAP.nmconnection
+  install -D -m 0600 "$AP_TMP" /etc/NetworkManager/system-connections/BasculaAP.nmconnection
   rm -f "$AP_TMP"
 fi
 
 # Si hay systemd, recargar polkit/NM
-if [ -d /run/systemd/system ]; then
-  systemctl list-unit-files | grep -q '^polkit\.service' && sudo systemctl reload polkit || true
-  systemctl list-unit-files | grep -q '^NetworkManager\.service' && sudo systemctl reload NetworkManager || true
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  systemctl list-unit-files | grep -q '^polkit\.service' && systemctl reload polkit || true
+  systemctl list-unit-files | grep -q '^NetworkManager\.service' && systemctl reload NetworkManager || true
+else
+  warn "systemd no disponible: omitiendo recarga de polkit y NetworkManager"
 fi
 
 # Desactivar autoconnect en TODAS las Wi-Fi de infraestructura, excepto BasculaAP
