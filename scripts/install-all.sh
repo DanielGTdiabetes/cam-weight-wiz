@@ -1169,6 +1169,7 @@ log "✓ Mini-web backend configurado"
 # Install AP ensure service and script
 log "[17a/20] Configurando servicio de arranque de AP..."
 AP_ENSURE_SERVICE_INSTALLED=0
+AP_ENSURE_TIMER_INSTALLED=0
 
 AP_ENSURE_SCRIPT_SRC="${PROJECT_ROOT}/scripts/bascula-ap-ensure.sh"
 AP_ENSURE_SCRIPT_DST="${BASCULA_CURRENT_LINK}/scripts/bascula-ap-ensure.sh"
@@ -1185,6 +1186,10 @@ install -d /etc/systemd/system
 if [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" ]]; then
   install -m 0644 "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
   AP_ENSURE_SERVICE_INSTALLED=1
+  if [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.timer" ]]; then
+    install -m 0644 "${PROJECT_ROOT}/systemd/bascula-ap-ensure.timer" /etc/systemd/system/bascula-ap-ensure.timer
+    AP_ENSURE_TIMER_INSTALLED=1
+  fi
 elif [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" ]]; then
   warn "Usando servicio heredado de system/os/"
   install -m 0644 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
@@ -1198,11 +1203,23 @@ if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     warn "systemctl daemon-reload falló"
   fi
   if [[ "${AP_ENSURE_SERVICE_INSTALLED}" -eq 1 ]]; then
-    if systemctl enable --now bascula-ap-ensure.service; then
-      log "✓ Servicio bascula-ap-ensure habilitado"
+    if ! systemctl enable bascula-ap-ensure.service; then
+      warn "No se pudo habilitar bascula-ap-ensure.service"
     else
-      warn "No se pudo habilitar/iniciar bascula-ap-ensure.service"
-      systemctl status bascula-ap-ensure.service --no-pager || true
+      log "✓ Servicio bascula-ap-ensure habilitado"
+    fi
+    if [[ "${AP_ENSURE_TIMER_INSTALLED}" -eq 1 ]]; then
+      if ! systemctl enable bascula-ap-ensure.timer; then
+        warn "No se pudo habilitar bascula-ap-ensure.timer"
+      fi
+      if systemctl start  bascula-ap-ensure.timer; then
+        log "✓ Timer bascula-ap-ensure habilitado"
+      else
+        warn "No se pudo iniciar bascula-ap-ensure.timer"
+        systemctl status bascula-ap-ensure.timer --no-pager || true
+      fi
+    else
+      warn "Timer bascula-ap-ensure no instalado; omitiendo enable"
     fi
   else
     warn "Servicio bascula-ap-ensure no instalado; omitiendo enable"

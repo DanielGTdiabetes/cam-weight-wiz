@@ -1,0 +1,12 @@
+[Unit]
+Description=Periodic Bascula AP ensure (retries)
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=45
+AccuracySec=1s
+Unit=bascula-ap-ensure.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
