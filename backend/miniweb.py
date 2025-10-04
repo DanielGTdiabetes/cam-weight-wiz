@@ -1199,6 +1199,13 @@ def _is_ap_active() -> bool:
 def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
     if client_host in {"127.0.0.1", "::1"}:
         return True
+    if client_host:
+        try:
+            ip_obj = ipaddress.ip_address(client_host)
+            if ip_obj in ipaddress.ip_network("192.168.4.0/24"):
+                return True
+        except ValueError:
+            pass
     if os.getenv("BASCULA_ALLOW_PIN_READ", "0") == "1":
         return True
     return _is_ap_active()
