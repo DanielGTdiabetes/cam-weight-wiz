@@ -711,48 +711,42 @@ if command -v nmcli >/dev/null 2>&1; then
   rfkill unblock wifi || true
   nmcli radio wifi on || true
 
-  existing_psk="$(nmcli -s -g wifi-sec.psk connection show "${AP_NAME}" 2>/dev/null || echo '')"
+  target_ap_path="/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
+  install -d -m 0755 /etc/NetworkManager/system-connections
 
   nmcli con delete "${AP_NAME}" 2>/dev/null || true
-  sudo rm -f /etc/NetworkManager/system-connections/BasculaAP.nmconnection 2>/dev/null || true
 
   if ! nmcli con add type wifi ifname "wlan0" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1; then
     warn "No se pudo crear el perfil ${AP_NAME}"
     nmcli dev status || true
     nmcli -t -f NAME,TYPE,DEVICE con show || true
-    nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show "${AP_NAME}" || true
   fi
 
   nmcli con modify "${AP_NAME}" connection.interface-name "wlan0" >/dev/null 2>&1 || warn "No se pudo fijar interface-name"
-
-  if ! nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg >/dev/null 2>&1; then
-    warn "No se pudieron configurar parámetros Wi-Fi en ${AP_NAME}"
-  fi
-
-  if ! nmcli con modify "${AP_NAME}" ipv4.method shared >/dev/null 2>&1; then
-    warn "No se pudo establecer ipv4.method=shared en ${AP_NAME}"
-  fi
-
+  nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg >/dev/null 2>&1 || warn "No se pudieron configurar parámetros Wi-Fi en ${AP_NAME}"
+  nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk >/dev/null 2>&1 || warn "No se pudo configurar wifi-sec.key-mgmt para ${AP_NAME}"
+  nmcli con modify "${AP_NAME}" wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar wifi-sec.psk"
+  nmcli con modify "${AP_NAME}" ipv4.method shared >/dev/null 2>&1 || warn "No se pudo establecer ipv4.method=shared en ${AP_NAME}"
   nmcli con modify "${AP_NAME}" ipv4.addresses "192.168.4.1/24" >/dev/null 2>&1 || warn "No se pudo fijar ipv4.addresses"
   nmcli con modify "${AP_NAME}" ipv4.gateway "192.168.4.1" >/dev/null 2>&1 || warn "No se pudo fijar ipv4.gateway"
   nmcli con modify "${AP_NAME}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar ipv4.never-default"
   nmcli con modify "${AP_NAME}" -ipv4.dns >/dev/null 2>&1 || warn "No se pudo limpiar ipv4.dns"
+  nmcli con modify "${AP_NAME}" ipv6.method ignore >/dev/null 2>&1 || true
+  nmcli con modify "${AP_NAME}" connection.autoconnect no >/dev/null 2>&1 || warn "No se pudo establecer autoconnect en ${AP_NAME}"
+  nmcli con modify "${AP_NAME}" connection.autoconnect-priority 0 >/dev/null 2>&1 || warn "No se pudo establecer prioridad"
 
-  if ! nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk >/dev/null 2>&1; then
-    warn "No se pudo configurar wifi-sec.key-mgmt para ${AP_NAME}"
+  if nmcli con export "${AP_NAME}" "${target_ap_path}" >/dev/null 2>&1; then
+    chmod 600 "${target_ap_path}" || warn "No se pudo ajustar permisos en ${target_ap_path}"
+    nmcli con load "${target_ap_path}" >/dev/null 2>&1 || warn "No se pudo recargar ${AP_NAME} desde ${target_ap_path}"
+    while IFS=: read -r name uuid filename; do
+      [[ "${name}" != "${AP_NAME}" ]] && continue
+      [[ -z "${uuid}" ]] && continue
+      [[ "${filename}" == "${target_ap_path}" ]] && continue
+      nmcli con delete uuid "${uuid}" >/dev/null 2>&1 || true
+    done < <(nmcli -t -f NAME,UUID,FILENAME con show 2>/dev/null || true)
+  else
+    warn "No se pudo exportar ${AP_NAME} a ${target_ap_path}"
   fi
-
-  ap_psk="${AP_PASS:-}" 
-  [[ -z "${ap_psk}" ]] && ap_psk="${existing_psk}" 
-  [[ -z "${ap_psk}" ]] && ap_psk="Bascula1234"
-  if [[ -n "${ap_psk}" ]]; then
-    nmcli con modify "${AP_NAME}" wifi-sec.psk "${ap_psk}" >/dev/null 2>&1 || warn "No se pudo configurar wifi-sec.psk"
-  fi
-
-  if ! nmcli con modify "${AP_NAME}" connection.autoconnect no >/dev/null 2>&1; then
-    warn "No se pudo establecer autoconnect en ${AP_NAME}"
-  fi
-  nmcli con modify "${AP_NAME}" connection.autoconnect-priority 100 >/dev/null 2>&1 || warn "No se pudo establecer prioridad"
 
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     systemctl disable --now dnsmasq 2>/dev/null || true
@@ -761,20 +755,10 @@ if command -v nmcli >/dev/null 2>&1; then
   ssid="$(nmcli -g 802-11-wireless.ssid con show "${AP_NAME}" 2>/dev/null || echo '?')"
   mode="$(nmcli -g 802-11-wireless.mode con show "${AP_NAME}" 2>/dev/null || echo '?')"
   ipv4m="$(nmcli -g ipv4.method con show "${AP_NAME}" 2>/dev/null || echo '?')"
-  log "[inst] BasculaAP configurada: ssid=${ssid} mode=${mode} ipv4.method=${ipv4m} HAS_SYSTEMD=${HAS_SYSTEMD}"
+  filename="$(nmcli -g connection.filename con show "${AP_NAME}" 2>/dev/null || echo '?')"
+  log "[inst] BasculaAP configurada: ssid=${ssid} mode=${mode} ipv4.method=${ipv4m} file=${filename}"
 else
   warn "nmcli no disponible; no se pudo configurar ${AP_NAME}"
-fi
-
-if command -v nmcli >/dev/null 2>&1; then
-  while IFS= read -r PRECONF_UUID; do
-    [[ -z "${PRECONF_UUID}" ]] && continue
-    NAME=$(nmcli -g connection.id connection show "${PRECONF_UUID}" 2>/dev/null || true)
-    if [[ -n "${NAME}" && "${NAME,,}" == *preconfig* ]]; then
-      log "Eliminando perfil Wi-Fi preconfigurado: ${NAME}"
-      nmcli connection delete "${PRECONF_UUID}" >/dev/null 2>&1 || true
-    fi
-  done < <(nmcli -t -f UUID connection show 2>/dev/null | sed 's/^UUID://')
 fi
 
 WPA_SUPP_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
@@ -803,28 +787,23 @@ else
   warn "systemd no disponible: omitiendo recarga de polkit y NetworkManager"
 fi
 
-# Desactivar autoconnect en TODAS las Wi-Fi de infraestructura, excepto BasculaAP
-# (Evita que NM tumbe la AP por una Wi-Fi antigua)
-if command -v nmcli >/dev/null 2>&1; then
-  log "Desactivando autoconnect de conexiones Wi-Fi heredadas..."
-  while IFS=: read -r uuid type; do
-    [[ -z "${uuid}" ]] && continue
-    [[ "${type}" != "802-11-wireless" ]] && continue
-
-    mode="$(nmcli -g 802-11-wireless.mode connection show "${uuid}" 2>/dev/null || true)"
-    name="$(nmcli -g connection.id connection show "${uuid}" 2>/dev/null || true)"
-
-    if [[ "${mode}" == "infrastructure" ]] && [[ "${name}" != "${AP_NAME}" ]]; then
-      log "  Desactivando autoconnect: ${name} (${uuid})"
-      nmcli connection modify "${uuid}" connection.autoconnect no connection.autoconnect-priority 0 || true
-    fi
-  done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null | sed '/^$/d')
-  log "✓ Autoconnect desactivado en perfiles Wi-Fi heredados"
-fi
-
 # Nota: La UI, al conectar a una nueva Wi-Fi, deberá:
 #  - crear/actualizar esa conexión con autoconnect=yes y prioridad 120
 #  - mantener BasculaAP con autoconnect=no (para no competir)
+
+if command -v nmcli >/dev/null 2>&1; then
+  while IFS= read -r PRECONF_UUID; do
+    [[ -z "${PRECONF_UUID}" ]] && continue
+    NAME=$(nmcli -g connection.id connection show "${PRECONF_UUID}" 2>/dev/null || true)
+    if [[ -n "${NAME}" && "${NAME,,}" == *preconfig* ]]; then
+      log "Eliminando perfil Wi-Fi preconfigurado: ${NAME}"
+      nmcli connection delete "${PRECONF_UUID}" >/dev/null 2>&1 || true
+    fi
+  done < <(nmcli -t -f UUID connection show 2>/dev/null | sed 's/^UUID://')
+
+  nmcli dev status || true
+  nmcli -t -f NAME,AUTOCONNECT,AUTOCONNECT-PRIORITY,FILENAME con show | grep -E 'BasculaAP|802-11-wireless' || true
+fi
 
 if ! nmcli general status >/dev/null 2>&1; then
   err "ERR: nmcli no responde"

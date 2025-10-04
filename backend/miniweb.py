@@ -465,20 +465,68 @@ def _ip_is_ap_subnet(ip: str) -> bool:
         return False
 
 
-def _ensure_wifi_profile(ssid: str, password: Optional[str], secured: bool) -> None:
-    LOG_NETWORK.info("Creating NetworkManager profile for '%s'", ssid)
-
+async def _cleanup_nmcli_duplicates(connection_id: str, persistent_path: Path | None) -> None:
     try:
-        _run_nmcli_command(
-            _nmcli_args("con", "delete", ssid),
+        res = await _run_nmcli_async(
+            _nmcli_args("-t", "-f", "NAME,UUID,FILENAME", "con", "show"),
             check=False,
-            ok_codes={0, 10},
         )
     except FileNotFoundError as exc:
         raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
 
+    if res.returncode not in {0}:
+        txt = f"{res.stdout or ''}\n{res.stderr or ''}".lower()
+        if "not authorized" in txt:
+            raise PermissionError("NMCLI_NOT_AUTHORIZED")
+
+    stdout = (res.stdout or "").strip()
+    if not stdout:
+        return
+
+    persistent_resolved: Path | None = None
+    if persistent_path is not None:
+        try:
+            persistent_resolved = persistent_path.resolve()
+        except Exception:
+            persistent_resolved = None
+
+    for line in stdout.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        name, uuid, filename = parts
+        if name != connection_id:
+            continue
+        if persistent_resolved is not None and filename:
+            try:
+                if Path(filename).resolve() == persistent_resolved:
+                    continue
+            except Exception:
+                pass
+        await _run_nmcli_async(
+            _nmcli_args("con", "delete", "uuid", uuid),
+            check=False,
+            ok_codes={0, 10},
+        )
+
+
+async def _create_or_update_wifi_profile(
+    ssid: str, password: Optional[str], secured: bool
+) -> Path:
+    LOG_NETWORK.info("Creating NetworkManager profile for '%s'", ssid)
+
+    if secured and not password:
+        raise RuntimeError("password_required")
+
     try:
-        _run_nmcli_command(
+        await _run_nmcli_async(
+            _nmcli_args("con", "delete", ssid),
+            check=False,
+            ok_codes={0, 10},
+        )
+        await _cleanup_nmcli_duplicates(ssid, None)
+
+        await _run_nmcli_async(
             _nmcli_args(
                 "con",
                 "add",
@@ -494,26 +542,24 @@ def _ensure_wifi_profile(ssid: str, password: Optional[str], secured: bool) -> N
         )
 
         if secured:
-            if not password:
-                raise RuntimeError("password_required")
-            _run_nmcli_command(
+            await _run_nmcli_async(
                 _nmcli_args("con", "modify", ssid, "wifi-sec.key-mgmt", "wpa-psk")
             )
-            _run_nmcli_command(
-                _nmcli_args("con", "modify", ssid, "wifi-sec.psk", password)
+            await _run_nmcli_async(
+                _nmcli_args("con", "modify", ssid, "wifi-sec.psk", password or "")
             )
         else:
-            _run_nmcli_command(
+            await _run_nmcli_async(
                 _nmcli_args("con", "modify", ssid, "wifi-sec.key-mgmt", "none")
             )
-            _run_nmcli_command(
+            await _run_nmcli_async(
                 _nmcli_args("con", "modify", ssid, "wifi-sec.psk", "")
             )
 
-        _run_nmcli_command(
+        await _run_nmcli_async(
             _nmcli_args("con", "modify", ssid, "connection.autoconnect", "yes")
         )
-        _run_nmcli_command(
+        await _run_nmcli_async(
             _nmcli_args(
                 "con",
                 "modify",
@@ -522,6 +568,24 @@ def _ensure_wifi_profile(ssid: str, password: Optional[str], secured: bool) -> N
                 "120",
             )
         )
+        await _run_nmcli_async(
+            _nmcli_args("con", "modify", ssid, "connection.permissions", "")
+        )
+        await _run_nmcli_async(
+            _nmcli_args(
+                "con", "modify", ssid, "connection.interface-name", WIFI_INTERFACE
+            )
+        )
+
+        NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+        target = NM_CONNECTIONS_DIR / f"{ssid}.nmconnection"
+        await _run_nmcli_async(
+            _nmcli_args("con", "export", ssid, str(target))
+        )
+        await _run_nmcli_async(["/bin/chmod", "600", str(target)], check=False)
+        await _run_nmcli_async(_nmcli_args("con", "load", str(target)))
+        await _cleanup_nmcli_duplicates(ssid, target)
+        return target
     except FileNotFoundError as exc:
         raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
 
@@ -535,6 +599,8 @@ async def _prepare_ap_for_wifi_connection() -> Optional[str]:
                 AP_CONNECTION_ID,
                 "connection.autoconnect",
                 "no",
+                "connection.autoconnect-priority",
+                "0",
             ),
             timeout=5,
             check=False,
@@ -580,6 +646,8 @@ async def _prepare_ap_for_wifi_connection() -> Optional[str]:
                     uuid,
                     "connection.autoconnect",
                     "no",
+                    "connection.autoconnect-priority",
+                    "0",
                 ),
                 timeout=5,
                 check=False,
@@ -634,7 +702,15 @@ async def _ensure_ap_autoconnect_disabled(keep_uuid: Optional[str]) -> None:
     targets.append([AP_CONNECTION_ID])
 
     for target in targets:
-        args = ["connection", "modify", *target, "connection.autoconnect", "no"]
+        args = [
+            "connection",
+            "modify",
+            *target,
+            "connection.autoconnect",
+            "no",
+            "connection.autoconnect-priority",
+            "0",
+        ]
         try:
             res = await _run_nmcli_async(
                 _nmcli_args(*args),
@@ -711,7 +787,7 @@ async def _reactivate_ap_after_failure() -> None:
                 "connection.autoconnect",
                 "no",
                 "connection.autoconnect-priority",
-                "100",
+                "0",
             ),
             timeout=5,
             check=False,
@@ -1659,8 +1735,7 @@ async def connect_wifi(credentials: WifiCredentials):
     _LAST_WIFI_CONNECT_REQUEST = ssid
 
     try:
-        await asyncio.to_thread(
-            _ensure_wifi_profile,
+        await _create_or_update_wifi_profile(
             ssid,
             sanitized_password if credentials.secured else None,
             credentials.secured,
@@ -1673,25 +1748,24 @@ async def connect_wifi(credentials: WifiCredentials):
                 status_code=503,
                 detail={"code": code, "message": "nmcli no está instalado"},
             ) from exc
+        if code == "NMCLI_NOT_AUTHORIZED":
+            raise HTTPException(status_code=403, detail={"code": code}) from exc
         raise HTTPException(status_code=400, detail={"code": code}) from exc
     except RuntimeError as exc:
         _LAST_WIFI_CONNECT_REQUEST = None
-        message = str(exc)
-        lower = message.lower()
-        if "not authorized" in lower:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "NMCLI_NOT_AUTHORIZED", "message": message},
-            ) from exc
-        if "secrets were required" in lower:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "NMCLI_SECRETS_REQUIRED",
-                    "message": "NetworkManager requiere secretos adicionales (comprueba la contraseña WPA).",
-                },
-            ) from exc
-        raise HTTPException(status_code=400, detail={"code": "wifi_profile_failed", "message": message}) from exc
+        raise HTTPException(status_code=400, detail={"code": "wifi_profile_failed", "message": str(exc)}) from exc
+    except subprocess.CalledProcessError as exc:
+        _LAST_WIFI_CONNECT_REQUEST = None
+        LOG_NETWORK.warning(
+            "Fallo al preparar perfil Wi-Fi %s: rc=%s err=%r", ssid, exc.returncode, (exc.stderr or exc.output or "")[-400:]
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "wifi_profile_failed",
+                "message": (exc.stderr or exc.output or str(exc))[:500],
+            },
+        ) from exc
     except FileNotFoundError as exc:
         _LAST_WIFI_CONNECT_REQUEST = None
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
@@ -1862,11 +1936,21 @@ async def miniweb_status():
 @app.post("/api/network/enable-ap")
 async def enable_ap():
     try:
-        # Desactiva autoconnect de Wi-Fi cliente si procede (opcional)
-        _bring_up_ap(debounce_sec=0.0)
-        return {"success": True, "ap_active": _ap_active()}
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"AP error: {exc}") from exc
+        res = await _run_nmcli_async(
+            _nmcli_args("con", "up", AP_CONNECTION_ID),
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+
+    if res.returncode != 0:
+        message = (res.stderr or res.stdout or "nmcli falló al activar la AP").strip()
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "AP_ENABLE_FAILED", "message": message[:500]},
+        )
+
+    return {"ok": True}
 
 
 @app.post("/api/network/disable-ap")
@@ -1879,8 +1963,6 @@ async def disable_ap():
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {"ok": True}
 
