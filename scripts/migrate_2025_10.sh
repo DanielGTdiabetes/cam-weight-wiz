@@ -48,7 +48,7 @@ mode=ap
 
 [wifi-security]
 key-mgmt=wpa-psk
-psk=bascula2025
+psk=Bascula1234
 
 [ipv4]
 method=shared

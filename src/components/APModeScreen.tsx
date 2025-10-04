@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 
 export const APModeScreen = () => {
   const apSSID = "Bascula-AP";
-  const apPassword = "bascula2025";
+  const apPassword = "Bascula1234";
   const miniWebURL = "http://192.168.4.1:8080";
   const [miniWebPin, setMiniWebPin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);

@@ -9,6 +9,7 @@
 #
 
 set -euo pipefail
+trap 'echo "[install] error en línea $LINENO"' ERR
 
 # Colors for output
 RED='\033[0;31m'
@@ -202,7 +203,7 @@ STATE_FILE="${STATE_DIR}/scale.json"
 LOG_DIR="/var/log/bascula"
 
 AP_SSID="${AP_SSID:-Bascula-AP}"
-AP_PASS="${AP_PASS:-bascula2025}"
+AP_PASS="${AP_PASS:-Bascula1234}"
 AP_IFACE="${AP_IFACE:-wlan0}"
 AP_NAME="${AP_NAME:-BasculaAP}"
 AP_GATEWAY="${AP_GATEWAY:-192.168.4.1}"
@@ -698,27 +699,26 @@ if command -v nmcli >/dev/null 2>&1; then
     while IFS= read -r line; do warn "[nmcli] ${line}"; done < <(nmcli connection show "${AP_NAME}" 2>&1 || true)
   }
 
-  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-    systemctl disable --now dnsmasq 2>/dev/null || true
-  fi
+  rfkill unblock wifi || true
+  nmcli radio wifi on >/dev/null 2>&1 || true
 
-  AP_UUIDS="$(nmcli -t -f NAME,UUID,TYPE con show | awk -F: -v name="${AP_NAME}" '$1==name && $3=="802-11-wireless"{print $2}')"
-  printf '%s\n' "${AP_UUIDS}" | sed -n '2,$p' | xargs -r -I{} nmcli con delete uuid "{}" || true
+  nmcli con delete "${AP_NAME}" >/dev/null 2>&1 || true
+  rm -f /etc/NetworkManager/system-connections/BasculaAP.nmconnection || true
 
-  if ! nmcli con show "${AP_NAME}" >/dev/null 2>&1; then
-    if ! nmcli con add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1; then
-      warn "No se pudo crear el perfil ${AP_NAME}"
-      nmcli_diag_ap
-    fi
+  if ! nmcli con add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1; then
+    warn "No se pudo crear el perfil ${AP_NAME}"
+    nmcli_diag_ap
   fi
 
   if ! nmcli con modify "${AP_NAME}" \
     connection.interface-name "${AP_IFACE}" \
     802-11-wireless.mode ap \
     802-11-wireless.band bg \
-    802-11-wireless.channel 6 \
-    802-11-wireless.ssid "${AP_SSID}" \
     ipv4.method shared \
+    ipv4.addresses "${AP_GATEWAY}/24" \
+    ipv4.gateway "${AP_GATEWAY}" \
+    ipv4.never-default yes \
+    -ipv4.dns \
     ipv6.method ignore >/dev/null 2>&1; then
     warn "No se pudieron aplicar todos los parámetros básicos de ${AP_NAME}"
     nmcli_diag_ap
@@ -726,31 +726,25 @@ if command -v nmcli >/dev/null 2>&1; then
 
   if [[ -n "${AP_PASS}" ]]; then
     if ! nmcli con modify "${AP_NAME}" \
-      802-11-wireless-security.key-mgmt wpa-psk \
-      802-11-wireless-security.proto rsn \
-      802-11-wireless-security.pairwise ccmp \
-      802-11-wireless-security.group ccmp \
-      802-11-wireless-security.psk "${AP_PASS}" >/dev/null 2>&1; then
+      wifi-sec.key-mgmt wpa-psk \
+      wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1; then
       warn "No se pudo configurar la seguridad WPA2 en ${AP_NAME}"
       nmcli_diag_ap
     fi
   else
-    if ! nmcli con modify "${AP_NAME}" 802-11-wireless-security.key-mgmt none >/dev/null 2>&1; then
+    if ! nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt none >/dev/null 2>&1; then
       warn "No se pudo dejar ${AP_NAME} sin clave"
       nmcli_diag_ap
     fi
   fi
 
-  AP_AUTOCONNECT_VALUE="no"
-  AP_AUTOCONNECT_PRIORITY=0
-  if [[ "${HAS_SYSTEMD}" -eq 0 ]]; then
-    AP_AUTOCONNECT_VALUE="yes"
-    AP_AUTOCONNECT_PRIORITY=100
-  fi
-
-  if ! nmcli con modify "${AP_NAME}" connection.autoconnect "${AP_AUTOCONNECT_VALUE}" connection.autoconnect-priority "${AP_AUTOCONNECT_PRIORITY}" >/dev/null 2>&1; then
+  if ! nmcli con modify "${AP_NAME}" connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1; then
     warn "No se pudo ajustar autoconnect de ${AP_NAME}"
     nmcli_diag_ap
+  fi
+
+  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+    systemctl disable --now dnsmasq 2>/dev/null || true
   fi
 
   ssid="$(nmcli -g 802-11-wireless.ssid con show "${AP_NAME}" 2>/dev/null || echo '?')"
@@ -1181,24 +1175,26 @@ log "✓ Mini-web backend configurado"
 
 # Install AP ensure service and script
 log "[17a/20] Configurando servicio de arranque de AP..."
-install -d /usr/local/sbin
-AP_ENSURE_DEPLOYED=0
+AP_ENSURE_SERVICE_INSTALLED=0
 
-if [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.sh" ]]; then
-  install -m 0755 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.sh" /usr/local/sbin/bascula-ap-ensure.sh
-  log "✓ Script bascula-ap-ensure.sh instalado"
+AP_ENSURE_SCRIPT_SRC="${PROJECT_ROOT}/scripts/bascula-ap-ensure.sh"
+AP_ENSURE_SCRIPT_DST="${BASCULA_CURRENT_LINK}/scripts/bascula-ap-ensure.sh"
+if [[ -f "${AP_ENSURE_SCRIPT_SRC}" ]]; then
+  install -d "${BASCULA_CURRENT_LINK}/scripts"
+  install -m 0755 "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}"
+  chown "${TARGET_USER}:${TARGET_GROUP}" "${AP_ENSURE_SCRIPT_DST}" || true
+  log "✓ Script bascula-ap-ensure.sh desplegado en ${AP_ENSURE_SCRIPT_DST}"
 else
-  warn "No se encontró system/os/bascula-ap-ensure.sh"
+  warn "No se encontró scripts/bascula-ap-ensure.sh"
 fi
 
-AP_ENSURE_SERVICE_INSTALLED=0
 install -d /etc/systemd/system
-if [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" ]]; then
-  install -m 0644 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
-  AP_ENSURE_SERVICE_INSTALLED=1
-elif [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" ]]; then
-  warn "Usando servicio heredado de systemd/"
+if [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" ]]; then
   install -m 0644 "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
+  AP_ENSURE_SERVICE_INSTALLED=1
+elif [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" ]]; then
+  warn "Usando servicio heredado de system/os/"
+  install -m 0644 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
   AP_ENSURE_SERVICE_INSTALLED=1
 else
   warn "No se encontró definición de servicio bascula-ap-ensure"
@@ -1207,34 +1203,17 @@ fi
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
   systemctl daemon-reload
   if [[ "${AP_ENSURE_SERVICE_INSTALLED}" -eq 1 ]]; then
-    if systemctl enable bascula-ap-ensure.service; then
-      if systemctl start bascula-ap-ensure.service; then
-        AP_ENSURE_DEPLOYED=1
-        log "✓ Servicio bascula-ap-ensure habilitado y arrancado"
-      else
-        warn "No se pudo iniciar bascula-ap-ensure.service"
-        systemctl status bascula-ap-ensure.service --no-pager || true
-      fi
+    if systemctl enable --now bascula-ap-ensure.service; then
+      log "✓ Servicio bascula-ap-ensure habilitado"
     else
-      warn "No se pudo habilitar bascula-ap-ensure.service"
+      warn "No se pudo habilitar/iniciar bascula-ap-ensure.service"
+      systemctl status bascula-ap-ensure.service --no-pager || true
     fi
   else
     warn "Servicio bascula-ap-ensure no instalado; omitiendo enable"
   fi
 else
-  warn "systemd no disponible: bascula-ap-ensure.service se activará tras el primer arranque"
-fi
-
-if [[ "${HAS_SYSTEMD}" -eq 1 && "${AP_ENSURE_DEPLOYED}" -ne 1 ]]; then
-  warn "bascula-ap-ensure no quedó activo; activando autoconnect directo de ${AP_NAME} como respaldo"
-  if command -v nmcli >/dev/null 2>&1; then
-    if ! nmcli con modify "${AP_NAME}" connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1; then
-      warn "No se pudo forzar autoconnect de respaldo en ${AP_NAME}"
-      if declare -f nmcli_diag_ap >/dev/null 2>&1; then
-        nmcli_diag_ap
-      fi
-    fi
-  fi
+  warn "systemd no disponible: BasculaAP dependerá de connection.autoconnect"
 fi
 
 # Setup UI kiosk service
@@ -1356,6 +1335,16 @@ log "[20/20] Ajustando permisos finales..."
 install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /var/log/bascula
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}" /opt/ocr-service
 log "✓ Permisos ajustados"
+
+# Quick nmcli verification (logging only)
+if command -v nmcli >/dev/null 2>&1; then
+  log "Verificación rápida NetworkManager (no bloqueante)..."
+  nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status || true
+  nmcli -t -f NAME,TYPE,DEVICE con show | grep -E 'BasculaAP|wlan' || true
+  nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show "${AP_NAME}" || true
+else
+  warn "nmcli no disponible para verificación rápida"
+fi
 
 # Final message
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"

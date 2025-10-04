@@ -174,9 +174,26 @@ Editar `systemd/bascula-backend.service` para incluir mini-web si es necesario, 
 
 ### Red AP
 - **SSID**: `Bascula-AP`
-- **Password**: `bascula2025` (WPA2)
+- **Password**: `Bascula1234` (WPA2)
 - **IP Range**: 192.168.4.2 - 192.168.4.20
 - **Aislada**: No accede a internet hasta conectar WiFi
+
+### Flujo esperado
+1. Sin redes conocidas → `BasculaAP` se levanta automáticamente en `wlan0` (`192.168.4.1/24`).
+2. Conecta al AP y abre `http://192.168.4.1:8080` para guardar una Wi-Fi.
+3. Al tener conectividad STA el AP se baja; si se pierde la red, vuelve a aparecer.
+
+### Verificación rápida
+
+```bash
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status || true
+nmcli -t -f NAME,TYPE,DEVICE con show | grep -E 'BasculaAP|wlan' || true
+nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show BasculaAP || true
+journalctl -u bascula-ap-ensure -b | tail -n 20
+ss -lntu | grep ':53' || true
+```
+
+> Recuerda personalizar la contraseña WPA2 (`Bascula1234` por defecto) tras la primera puesta en marcha.
 
 ### Validación
 - Validación de SSID y contraseña en backend
@@ -189,7 +206,7 @@ Editar `systemd/bascula-backend.service` para incluir mini-web si es necesario, 
 
 1. **Conectar al AP**:
    - Red: `Bascula-AP`
-   - Contraseña: `bascula2025`
+   - Contraseña: `Bascula1234`
 
 2. **Acceder a mini-web**:
    - Automático: Algunos dispositivos abren portal captivo

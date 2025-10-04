@@ -51,7 +51,7 @@ NM_CONNECTIONS_DIR = Path("/etc/NetworkManager/system-connections")
 HOME_CONNECTION_ID = "BasculaHome"
 AP_CONNECTION_ID = "BasculaAP"
 AP_DEFAULT_SSID = "Bascula-AP"
-AP_DEFAULT_PASSWORD = "bascula2025"
+AP_DEFAULT_PASSWORD = "Bascula1234"
 WIFI_INTERFACE = "wlan0"
 
 CFG_DIR.mkdir(parents=True, exist_ok=True)
