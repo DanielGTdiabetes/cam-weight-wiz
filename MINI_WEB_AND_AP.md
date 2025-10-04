@@ -178,6 +178,9 @@ Editar `systemd/bascula-backend.service` para incluir mini-web si es necesario, 
 - **IP Range**: 192.168.4.2 - 192.168.4.20
 - **Aislada**: No accede a internet hasta conectar WiFi
 
+> Personaliza la contraseña exportando `AP_PASS="<tu_clave>"` antes de ejecutar el instalador o con
+> `nmcli con modify BasculaAP wifi-sec.psk <nueva_clave>` tras la instalación.
+
 ### Flujo esperado
 1. Sin redes conocidas → `BasculaAP` se levanta automáticamente en `wlan0` (`192.168.4.1/24`).
 2. Conecta al AP y abre `http://192.168.4.1:8080` para guardar una Wi-Fi.
@@ -186,9 +189,8 @@ Editar `systemd/bascula-backend.service` para incluir mini-web si es necesario, 
 ### Verificación rápida
 
 ```bash
-nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status || true
-nmcli -t -f NAME,TYPE,DEVICE con show | grep -E 'BasculaAP|wlan' || true
-nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show BasculaAP || true
+nmcli dev status
+nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway con show BasculaAP
 journalctl -u bascula-ap-ensure -b | tail -n 20
 ss -lntu | grep ':53' || true
 ```
