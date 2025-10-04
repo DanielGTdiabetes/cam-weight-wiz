@@ -60,7 +60,8 @@ Las reglas instaladas permiten al usuario `pi` (o miembros de `netdev`) ejecutar
 El modo AP está gestionado íntegramente por NetworkManager:
 
 - **SSID**: `Bascula-AP`
-- **Contraseña WPA2**: `Bascula1234`
+- **Contraseña WPA2**: `Bascula1234` (puedes personalizarla exportando `AP_PASS="<tu_clave>"` antes de ejecutar el instalador o con
+  `nmcli con modify BasculaAP wifi-sec.psk <nueva_clave>` tras la instalación).
 - **IP de la báscula**: `192.168.4.1/24`
 - **Miniweb**: `http://192.168.4.1:8080`
 
@@ -75,9 +76,8 @@ Flujo esperado:
 Verificación rápida (no bloqueante):
 
 ```bash
-nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status || true
-nmcli -t -f NAME,TYPE,DEVICE con show | grep -E 'BasculaAP|wlan' || true
-nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show BasculaAP || true
+nmcli dev status
+nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway con show BasculaAP
 journalctl -u bascula-ap-ensure -b | tail -n 20
 ss -lntu | grep ':53' || true   # No debe aparecer dnsmasq.service
 ```

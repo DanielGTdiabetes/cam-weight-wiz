@@ -9,7 +9,7 @@
 #
 
 set -euo pipefail
-trap 'echo "[install] error en línea $LINENO"' ERR
+trap 'echo "[inst][err] línea $LINENO"; exit 1' ERR
 
 # Colors for output
 RED='\033[0;31m'
@@ -124,6 +124,21 @@ systemctl_safe() {
   fi
 }
 
+safe_install() {
+  local src="$1"
+  local dst="$2"
+  if [ -e "${src}" ] && [ -e "${dst}" ]; then
+    local src_real dst_real
+    src_real=$(readlink -f "${src}" 2>/dev/null || echo "")
+    dst_real=$(readlink -f "${dst}" 2>/dev/null || echo "")
+    if [[ -n "${src_real}" && -n "${dst_real}" && "${src_real}" == "${dst_real}" ]]; then
+      echo "[inst][info] skip install: ${dst} ya es el mismo fichero"
+      return 0
+    fi
+  fi
+  install -m 0755 "${src}" "${dst}"
+}
+
 install_x735() {
   echo "[inst] [X735] Configurando soporte x735 (fan/power)…"
 
@@ -202,11 +217,11 @@ STATE_DIR="/var/lib/bascula"
 STATE_FILE="${STATE_DIR}/scale.json"
 LOG_DIR="/var/log/bascula"
 
+AP_IFACE="wlan0"
+AP_GATEWAY="192.168.4.1"
 AP_SSID="${AP_SSID:-Bascula-AP}"
 AP_PASS="${AP_PASS:-Bascula1234}"
-AP_IFACE="${AP_IFACE:-wlan0}"
 AP_NAME="${AP_NAME:-BasculaAP}"
-AP_GATEWAY="${AP_GATEWAY:-192.168.4.1}"
 AP_POOL_START="${AP_POOL_START:-192.168.4.20}"
 AP_POOL_END="${AP_POOL_END:-192.168.4.99}"
 
@@ -693,55 +708,51 @@ fi
 if command -v nmcli >/dev/null 2>&1; then
   log "Configurando perfil AP ${AP_NAME}..."
 
-  nmcli_diag_ap() {
-    warn "Diagnóstico nmcli tras fallo configurando ${AP_NAME}"
-    while IFS= read -r line; do warn "[nmcli] ${line}"; done < <(nmcli -f GENERAL,IP4,CONNECTION device show "${AP_IFACE}" 2>&1 || true)
-    while IFS= read -r line; do warn "[nmcli] ${line}"; done < <(nmcli connection show "${AP_NAME}" 2>&1 || true)
-  }
-
   rfkill unblock wifi || true
-  nmcli radio wifi on >/dev/null 2>&1 || true
+  nmcli radio wifi on || true
 
-  nmcli con delete "${AP_NAME}" >/dev/null 2>&1 || true
-  rm -f /etc/NetworkManager/system-connections/BasculaAP.nmconnection || true
+  existing_psk="$(nmcli -s -g wifi-sec.psk connection show "${AP_NAME}" 2>/dev/null || echo '')"
 
-  if ! nmcli con add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1; then
+  nmcli con delete "${AP_NAME}" 2>/dev/null || true
+  sudo rm -f /etc/NetworkManager/system-connections/BasculaAP.nmconnection 2>/dev/null || true
+
+  if ! nmcli con add type wifi ifname "wlan0" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1; then
     warn "No se pudo crear el perfil ${AP_NAME}"
-    nmcli_diag_ap
+    nmcli dev status || true
+    nmcli -t -f NAME,TYPE,DEVICE con show || true
+    nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show "${AP_NAME}" || true
   fi
 
-  if ! nmcli con modify "${AP_NAME}" \
-    connection.interface-name "${AP_IFACE}" \
-    802-11-wireless.mode ap \
-    802-11-wireless.band bg \
-    ipv4.method shared \
-    ipv4.addresses "${AP_GATEWAY}/24" \
-    ipv4.gateway "${AP_GATEWAY}" \
-    ipv4.never-default yes \
-    -ipv4.dns \
-    ipv6.method ignore >/dev/null 2>&1; then
-    warn "No se pudieron aplicar todos los parámetros básicos de ${AP_NAME}"
-    nmcli_diag_ap
+  nmcli con modify "${AP_NAME}" connection.interface-name "wlan0" >/dev/null 2>&1 || warn "No se pudo fijar interface-name"
+
+  if ! nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg >/dev/null 2>&1; then
+    warn "No se pudieron configurar parámetros Wi-Fi en ${AP_NAME}"
   fi
 
-  if [[ -n "${AP_PASS}" ]]; then
-    if ! nmcli con modify "${AP_NAME}" \
-      wifi-sec.key-mgmt wpa-psk \
-      wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1; then
-      warn "No se pudo configurar la seguridad WPA2 en ${AP_NAME}"
-      nmcli_diag_ap
-    fi
-  else
-    if ! nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt none >/dev/null 2>&1; then
-      warn "No se pudo dejar ${AP_NAME} sin clave"
-      nmcli_diag_ap
-    fi
+  if ! nmcli con modify "${AP_NAME}" ipv4.method shared >/dev/null 2>&1; then
+    warn "No se pudo establecer ipv4.method=shared en ${AP_NAME}"
   fi
 
-  if ! nmcli con modify "${AP_NAME}" connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1; then
-    warn "No se pudo ajustar autoconnect de ${AP_NAME}"
-    nmcli_diag_ap
+  nmcli con modify "${AP_NAME}" ipv4.addresses "192.168.4.1/24" >/dev/null 2>&1 || warn "No se pudo fijar ipv4.addresses"
+  nmcli con modify "${AP_NAME}" ipv4.gateway "192.168.4.1" >/dev/null 2>&1 || warn "No se pudo fijar ipv4.gateway"
+  nmcli con modify "${AP_NAME}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar ipv4.never-default"
+  nmcli con modify "${AP_NAME}" -ipv4.dns >/dev/null 2>&1 || warn "No se pudo limpiar ipv4.dns"
+
+  if ! nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk >/dev/null 2>&1; then
+    warn "No se pudo configurar wifi-sec.key-mgmt para ${AP_NAME}"
   fi
+
+  ap_psk="${AP_PASS:-}" 
+  [[ -z "${ap_psk}" ]] && ap_psk="${existing_psk}" 
+  [[ -z "${ap_psk}" ]] && ap_psk="Bascula1234"
+  if [[ -n "${ap_psk}" ]]; then
+    nmcli con modify "${AP_NAME}" wifi-sec.psk "${ap_psk}" >/dev/null 2>&1 || warn "No se pudo configurar wifi-sec.psk"
+  fi
+
+  if ! nmcli con modify "${AP_NAME}" connection.autoconnect yes >/dev/null 2>&1; then
+    warn "No se pudo establecer autoconnect en ${AP_NAME}"
+  fi
+  nmcli con modify "${AP_NAME}" connection.autoconnect-priority 100 >/dev/null 2>&1 || warn "No se pudo establecer prioridad"
 
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     systemctl disable --now dnsmasq 2>/dev/null || true
@@ -1181,7 +1192,7 @@ AP_ENSURE_SCRIPT_SRC="${PROJECT_ROOT}/scripts/bascula-ap-ensure.sh"
 AP_ENSURE_SCRIPT_DST="${BASCULA_CURRENT_LINK}/scripts/bascula-ap-ensure.sh"
 if [[ -f "${AP_ENSURE_SCRIPT_SRC}" ]]; then
   install -d "${BASCULA_CURRENT_LINK}/scripts"
-  install -m 0755 "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}"
+  safe_install "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}"
   chown "${TARGET_USER}:${TARGET_GROUP}" "${AP_ENSURE_SCRIPT_DST}" || true
   log "✓ Script bascula-ap-ensure.sh desplegado en ${AP_ENSURE_SCRIPT_DST}"
 else
@@ -1339,8 +1350,8 @@ log "✓ Permisos ajustados"
 # Quick nmcli verification (logging only)
 if command -v nmcli >/dev/null 2>&1; then
   log "Verificación rápida NetworkManager (no bloqueante)..."
-  nmcli -t -f DEVICE,TYPE,STATE,CONNECTION dev status || true
-  nmcli -t -f NAME,TYPE,DEVICE con show | grep -E 'BasculaAP|wlan' || true
+  nmcli dev status || true
+  nmcli -t -f NAME,TYPE,DEVICE con show || true
   nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show "${AP_NAME}" || true
 else
   warn "nmcli no disponible para verificación rápida"
