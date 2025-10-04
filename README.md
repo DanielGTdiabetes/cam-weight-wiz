@@ -72,7 +72,7 @@ Flujo esperado:
 
 1. Sin credenciales conocidas → `bascula-ap-ensure.sh` crea/activa la red compartida en `wlan0` con DHCP interno de NetworkManager.
 2. El usuario accede a `http://192.168.4.1:8080`, introduce el PIN y guarda una Wi-Fi doméstica.
-3. Al enviar SSID y clave desde la miniweb, la Pi recrea el perfil Wi-Fi (prioridad `120`), desconecta `BasculaAP` y conmuta a la red doméstica; si más tarde se pierde la conectividad, el AP reaparece.
+3. Al enviar SSID y clave desde la miniweb, la Pi recrea el perfil Wi-Fi, lo exporta a `/etc/NetworkManager/system-connections/<SSID>.nmconnection` (permisos `600`, `autoconnect=yes`, prioridad `120`), desconecta `BasculaAP`, activa la red doméstica y reinicia el kiosk. Si más tarde se pierde la conectividad, el AP reaparece.
 
 Verificación rápida (no bloqueante):
 
