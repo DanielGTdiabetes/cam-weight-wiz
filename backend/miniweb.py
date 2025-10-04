@@ -274,6 +274,44 @@ async def _nmcli_async(args: list[str], timeout: int = 15) -> subprocess.Complet
     return await asyncio.to_thread(_nmcli, args, timeout)
 
 
+def _classify_nmcli_failure(res: subprocess.CompletedProcess) -> tuple[int, str, str]:
+    """
+    Mapea el error de nmcli a (status_http, code_api, msg_humano).
+    Conserva compatibilidad con códigos previos.
+    """
+
+    out = (res.stdout or "").strip()
+    err = (res.stderr or "").strip()
+    txt = f"{out}\n{err}".lower()
+
+    # Autorización / polkit
+    if "not authorized" in txt or "requires authorization" in txt or "not privileged" in txt:
+        return 403, "NMCLI_NOT_AUTHORIZED", "Acceso denegado por PolicyKit/NetworkManager."
+
+    # Secretos/PSK requeridos (WPA)
+    if "secrets were required" in txt or "secrets are required" in txt or "no key available" in txt:
+        return 400, "NMCLI_SECRETS_REQUIRED", "La red requiere contraseña (WPA/WPA2)."
+
+    # SSID no encontrado
+    if "no network with ssid" in txt or "no suitable device found to create connection" in txt:
+        return 404, "NMCLI_SSID_NOT_FOUND", "No se encontró el SSID en el escaneo."
+
+    # Dispositivo no disponible
+    if "no such device" in txt or "device not managed" in txt:
+        return 500, "NM_DEVICE_UNAVAILABLE", "Interfaz Wi-Fi no disponible."
+
+    # Ya hay conexión activa / conflicto de estado
+    if "already a connection active" in txt or "connection is already active" in txt:
+        return 409, "NM_ALREADY_ACTIVE", "La conexión ya está activa."
+
+    # Tiempo de espera DHCP/IP
+    if "activation failed" in txt and "dhcp" in txt:
+        return 504, "NM_DHCP_TIMEOUT", "Timeout obteniendo IP por DHCP."
+
+    # Genérico
+    return 400, "WIFI_UP_FAILED", (err or out or "Fallo al activar la conexión Wi-Fi.")
+
+
 def _nmcli_get_values(args: List[str], timeout: int = 5) -> List[str]:
     try:
         res = _nmcli(args, timeout=timeout)
@@ -1254,13 +1292,17 @@ async def connect_wifi(credentials: WifiCredentials):
                 ssid,
                 (up_res.stderr or up_res.stdout or "").strip(),
             )
-            await _reactivate_ap_after_failure()
+            await _nmcli_async(["connection", "modify", AP_CONNECTION_ID, "connection.autoconnect", "yes"])
+            await _nmcli_async(["connection", "up", AP_CONNECTION_ID])
+
+            status, code, msg = _classify_nmcli_failure(up_res)
             raise HTTPException(
-                status_code=400,
+                status_code=status,
                 detail={
-                    "code": "wifi_up_failed",
-                    "stdout": up_res.stdout,
-                    "stderr": up_res.stderr,
+                    "code": code,
+                    "message": msg,
+                    "stdout": (up_res.stdout or "").strip(),
+                    "stderr": (up_res.stderr or "").strip(),
                 },
             )
 
@@ -1270,11 +1312,9 @@ async def connect_wifi(credentials: WifiCredentials):
             return {"connected": True, "ssid": ssid, "ip": ip_address, "ap_active": False}
 
         LOG_NETWORK.warning("Timed out waiting for Wi-Fi '%s' activation", ssid)
-        await _reactivate_ap_after_failure()
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "wifi_activation_timeout", "ssid": ssid},
-        )
+        await _nmcli_async(["connection", "modify", AP_CONNECTION_ID, "connection.autoconnect", "yes"])
+        await _nmcli_async(["connection", "up", AP_CONNECTION_ID])
+        raise HTTPException(status_code=504, detail={"code": "WIFI_ACTIVATION_TIMEOUT", "ssid": ssid})
     except HTTPException:
         raise
     except PermissionError as exc:
