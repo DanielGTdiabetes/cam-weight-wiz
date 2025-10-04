@@ -47,7 +47,7 @@ La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo
 | Método | Endpoint                    | Descripción                                                                           |
 |--------|-----------------------------|---------------------------------------------------------------------------------------|
 | GET    | `/api/miniweb/scan-networks`| Escanea redes visibles y devuelve `{ssid, signal, sec, in_use, secured}` por entrada. 【F:backend/miniweb.py†L134-L183】|
-| POST   | `/api/miniweb/connect`      | Crea/actualiza el perfil `BasculaHome` y conecta a la red indicada; programa un reinicio automático. 【F:backend/miniweb.py†L694-L745】|
+| POST   | `/api/miniweb/connect`      | Recrea el perfil Wi-Fi con el SSID indicado, fija `autoconnect` (prioridad 120), baja `BasculaAP` y activa la nueva red. 【F:backend/miniweb.py†L1446-L1573】|
 | GET    | `/api/miniweb/status`       | Devuelve el estado actual (`connected`, `ssid`, `ip`, `ethernet_connected`, `ap_active`, `should_activate_ap`). 【F:backend/miniweb.py†L531-L575】|
 
 > El endpoint legado `/api/miniweb/connect-wifi` permanece disponible como alias para compatibilidad.
@@ -72,11 +72,12 @@ Flujo esperado:
 
 1. Sin credenciales conocidas → `bascula-ap-ensure.sh` crea/activa la red compartida en `wlan0` con DHCP interno de NetworkManager.
 2. El usuario accede a `http://192.168.4.1:8080`, introduce el PIN y guarda una Wi-Fi doméstica.
-3. Al conectar en modo estación, el AP se baja automáticamente; si la Pi vuelve a quedarse sin conectividad, el AP reaparece.
+3. Al enviar SSID y clave desde la miniweb, la Pi recrea el perfil Wi-Fi (prioridad `120`), desconecta `BasculaAP` y conmuta a la red doméstica; si más tarde se pierde la conectividad, el AP reaparece.
 
 Verificación rápida (no bloqueante):
 
 ```bash
+nmcli con show --active
 nmcli dev status
 nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway con show BasculaAP
 journalctl -u bascula-ap-ensure -b | tail -n 20
