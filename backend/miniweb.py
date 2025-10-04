@@ -700,20 +700,25 @@ async def _wait_for_wifi_activation(timeout_s: float = 45.0) -> tuple[bool, Opti
 
 async def _reactivate_ap_after_failure() -> None:
     try:
-        LOG_NETWORK.info("Restoring autoconnect=yes for '%s'", AP_CONNECTION_ID)
+        LOG_NETWORK.info(
+            "Reactivating '%s' tras fallo y manteniendo autoconnect=no", AP_CONNECTION_ID
+        )
         await _run_nmcli_async(
             _nmcli_args(
                 "connection",
                 "modify",
                 AP_CONNECTION_ID,
                 "connection.autoconnect",
-                "yes",
+                "no",
+                "connection.autoconnect-priority",
+                "100",
             ),
             timeout=5,
             check=False,
+            ok_codes={0, 10},
         )
     except Exception as exc:
-        LOG_NETWORK.warning("Failed to set BasculaAP autoconnect back to yes: %s", exc)
+        LOG_NETWORK.debug("Could not enforce autoconnect=no on %s: %s", AP_CONNECTION_ID, exc)
 
     try:
         LOG_NETWORK.info("Bringing up '%s' after failure", AP_CONNECTION_ID)
@@ -1755,6 +1760,15 @@ async def connect_wifi(credentials: WifiCredentials):
             except PermissionError as exc:
                 LOG_NETWORK.warning("Could not persist BasculaAP autoconnect=no: %s", exc)
             success = True
+            try:
+                await asyncio.to_thread(
+                    subprocess.run,
+                    ["systemctl", "restart", "bascula-app"],
+                    check=False,
+                )
+                LOG_NETWORK.info("Servicio bascula-app reiniciado tras conexión Wi-Fi exitosa")
+            except Exception as exc:
+                LOG_NETWORK.debug("No se pudo reiniciar bascula-app: %s", exc)
             _LAST_WIFI_CONNECT_REQUEST = None
             return {
                 "success": True,
@@ -1857,98 +1871,18 @@ async def enable_ap():
 
 @app.post("/api/network/disable-ap")
 async def disable_ap():
-    global _LAST_WIFI_CONNECT_REQUEST
-
-    target_ssid = _LAST_WIFI_CONNECT_REQUEST or _current_wifi_ssid()
-    LOG_NETWORK.info(
-        "Disabling '%s' and switching to Wi-Fi profile '%s'", AP_CONNECTION_ID, target_ssid or "<none>"
-    )
-
-    ap_was_disabled = False
-
     try:
         await _run_nmcli_async(
             _nmcli_args("con", "down", AP_CONNECTION_ID),
             check=False,
             ok_codes={0, 10},
         )
-        ap_was_disabled = True
-
-        wifi_payload: Dict[str, Any] = {"connected": False, "ssid": target_ssid, "ip": None}
-
-        if target_ssid:
-            LOG_NETWORK.info("Bringing Wi-Fi profile '%s' up after disabling AP", target_ssid)
-            await _run_nmcli_async(_nmcli_args("con", "up", target_ssid))
-
-            ok, ip_address = await _wait_for_wifi_activation(timeout_s=30.0)
-            if not ok or not ip_address:
-                raise HTTPException(
-                    status_code=504,
-                    detail={"code": "WIFI_ACTIVATION_TIMEOUT", "ssid": target_ssid},
-                )
-
-            if _ip_is_ap_subnet(ip_address):
-                raise HTTPException(
-                    status_code=502,
-                    detail={
-                        "code": "WIFI_IP_AP_SUBNET",
-                        "message": "NetworkManager asignó una IP de la red AP (192.168.4.x).",
-                        "ip": ip_address,
-                    },
-                )
-
-            wifi_payload.update({"connected": True, "ip": ip_address})
-            _LAST_WIFI_CONNECT_REQUEST = target_ssid
-
-        try:
-            status = _get_wifi_status()
-        except PermissionError:
-            status = {
-                "ap_active": _ap_active(),
-                "connected": wifi_payload.get("connected", False),
-                "ssid": wifi_payload.get("ssid"),
-                "ip": wifi_payload.get("ip"),
-            }
-        wifi_payload.setdefault("connected", status.get("connected", False))
-        wifi_payload.setdefault("ip", status.get("ip"))
-        wifi_payload.setdefault("ssid", status.get("ssid"))
-
-        return {
-            "success": True,
-            "ap_active": status.get("ap_active", False),
-            "wifi": wifi_payload,
-        }
-    except HTTPException:
-        if ap_was_disabled:
-            await _reactivate_ap_after_failure()
-        _LAST_WIFI_CONNECT_REQUEST = target_ssid if target_ssid else _LAST_WIFI_CONNECT_REQUEST
-        raise
-    except RuntimeError as exc:
-        if ap_was_disabled:
-            await _reactivate_ap_after_failure()
-        message = str(exc)
-        lower = message.lower()
-        if "not authorized" in lower:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "NMCLI_NOT_AUTHORIZED", "message": message},
-            ) from exc
-        if "secrets were required" in lower:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "NMCLI_SECRETS_REQUIRED",
-                    "message": "NetworkManager requiere una contraseña válida.",
-                },
-            ) from exc
-        raise HTTPException(status_code=400, detail={"code": "wifi_up_failed", "message": message}) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
     except Exception as exc:
-        if ap_was_disabled:
-            await _reactivate_ap_after_failure()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    return {"ok": True}
 
 @app.get("/api/network/status")
 async def network_status():
