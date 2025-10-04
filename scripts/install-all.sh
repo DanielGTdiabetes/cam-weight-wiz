@@ -601,28 +601,53 @@ else
   fail "No se encontró /etc/polkit-1/rules.d/49-nmcli.rules"
 fi
 
-# === NetworkManager polkit rule (usuario pi) ===
-# Instalar SIEMPRE el archivo; las recargas solo si hay systemd
-if [ -f system/os/10-bascula-nm.rules ]; then
-  echo "[install] polkit rule for NetworkManager (pi)"
-  sudo install -D -m 0644 system/os/10-bascula-nm.rules /etc/polkit-1/rules.d/10-bascula-nm.rules
+# === Bascula AP profile + polkit + recargas ===
+set -e
 
-  # Detecta systemd
-  if [ -d /run/systemd/system ]; then
-    # Recargar polkit si existe el servicio
-    if systemctl list-unit-files | grep -q '^polkit\.service'; then
-      sudo systemctl reload polkit 2>/dev/null || true
-    fi
-    # Reiniciar NetworkManager si está disponible
-    if systemctl list-unit-files | grep -q -E '^NetworkManager\.service'; then
-      sudo systemctl restart NetworkManager 2>/dev/null || true
-    elif systemctl list-unit-files | grep -q -E '^NetworkManager\.service'; then
-      sudo systemctl restart NetworkManager.service 2>/dev/null || true
-    fi
-  else
-    echo "[install] systemd no disponible (chroot/imagen). La regla ya está instalada y tomará efecto al primer arranque."
-  fi
+# Instalar siempre la regla polkit (ya creada antes)
+if [ -f system/os/10-bascula-nm.rules ]; then
+  sudo install -D -m 0644 system/os/10-bascula-nm.rules /etc/polkit-1/rules.d/10-bascula-nm.rules
 fi
+
+# Instalar SIEMPRE el perfil AP (aunque no haya systemd en chroot)
+if [ -f system/os/nm/BasculaAP.nmconnection ]; then
+  # Asegurar UUID
+  AP_TMP="$(mktemp)"
+  if grep -q '${GENERATE_UUID}' system/os/nm/BasculaAP.nmconnection; then
+    UUID_GEN="$(uuidgen || cat /proc/sys/kernel/random/uuid)"
+    sed "s#\${GENERATE_UUID}#${UUID_GEN}#g" system/os/nm/BasculaAP.nmconnection > "$AP_TMP"
+  else
+    cp system/os/nm/BasculaAP.nmconnection "$AP_TMP"
+  fi
+  sudo install -D -m 0600 "$AP_TMP" /etc/NetworkManager/system-connections/BasculaAP.nmconnection
+  rm -f "$AP_TMP"
+fi
+
+# Si hay systemd, recargar polkit/NM
+if [ -d /run/systemd/system ]; then
+  systemctl list-unit-files | grep -q '^polkit\.service' && sudo systemctl reload polkit || true
+  systemctl list-unit-files | grep -q '^NetworkManager\.service' && sudo systemctl reload NetworkManager || true
+fi
+
+# Desactivar autoconnect de TODAS las wifi de infraestructura, excepto BasculaAP
+# (Evita que NM tumbe la AP para ir a una Wi-Fi antigua sin que el usuario lo pida)
+if command -v nmcli >/dev/null 2>&1; then
+  while IFS= read -r NAME; do
+    [ -z "$NAME" ] && continue
+    [ "$NAME" = "BasculaAP" ] && continue
+    TYPE="$(nmcli -t -f connection.type connection show "$NAME" 2>/dev/null || echo)"
+    if [ "$TYPE" = "802-11-wireless" ]; then
+      MODE="$(nmcli -t -f 802-11-wireless.mode connection show "$NAME" 2>/dev/null || echo)"
+      if [ "$MODE" != "ap" ]; then
+        nmcli connection modify "$NAME" connection.autoconnect no connection.autoconnect-priority 0 || true
+      fi
+    fi
+  done < <(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^NAME://;s/^[[:space:]]*//;s/[[:space:]]*$//')
+fi
+
+# Nota: La UI, al conectar a una nueva Wi-Fi, deberá:
+#  - crear/actualizar esa conexión con autoconnect=yes y prioridad 200
+#  - poner BasculaAP autoconnect=no (para no competir)
 
 if ! nmcli general status >/dev/null 2>&1; then
   err "ERR: nmcli no responde"
