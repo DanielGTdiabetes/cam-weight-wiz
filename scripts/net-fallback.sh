@@ -14,6 +14,22 @@ AP_SSID="${AP_SSID:-Bascula-AP}"
 AP_PASS="${AP_PASS:-bascula2025}"
 AP_IFACE="${AP_IFACE:-wlan0}"
 AP_NAME="${AP_NAME:-BasculaAP}"
+AP_GATEWAY="${AP_GATEWAY:-192.168.4.1}"
+AP_POOL_START="${AP_POOL_START:-192.168.4.20}"
+AP_POOL_END="${AP_POOL_END:-192.168.4.99}"
+
+set_ap_autoconnect() {
+  local enabled="$1"
+  local priority="$2"
+  local value="no"
+  if [[ "${enabled}" == "yes" ]]; then
+    value="yes"
+  fi
+  nmcli connection modify "${AP_NAME}" \
+    connection.autoconnect "${value}" \
+    connection.autoconnect-priority "${priority}" \
+    connection.interface-name "${AP_IFACE}" >/dev/null 2>&1 || true
+}
 
 # Verificar si hay conexión a Internet
 have_inet() {
@@ -53,18 +69,30 @@ ap_profile_exists() {
 # Crear perfil AP si no existe
 create_ap_profile() {
   log "Creando perfil AP: ${AP_NAME}"
-  
+
   nmcli connection add type wifi ifname "${AP_IFACE}" \
     con-name "${AP_NAME}" \
     autoconnect no \
     ssid "${AP_SSID}" 2>/dev/null || return 1
-    
-  nmcli connection modify "${AP_NAME}" \
+
+  if ! nmcli connection modify "${AP_NAME}" \
     802-11-wireless.mode ap \
     802-11-wireless.band bg \
     ipv4.method shared \
-    ipv4.address 192.168.4.1/24 2>/dev/null || return 1
-    
+    ipv4.addresses "${AP_GATEWAY}/24" \
+    ipv4.gateway "${AP_GATEWAY}" \
+    ipv4.dns "${AP_GATEWAY}" \
+    ipv6.method ignore 2>/dev/null; then
+    return 1
+  fi
+
+  nmcli connection modify "${AP_NAME}" \
+    ipv4.dhcp-server.address-pool-start "${AP_POOL_START}" \
+    ipv4.dhcp-server.address-pool-end "${AP_POOL_END}" \
+    ipv4.dhcp-server.gateway "${AP_GATEWAY}" \
+    ipv4.dhcp-server.default-route yes \
+    ipv4.dhcp-server.dns "${AP_GATEWAY}" >/dev/null 2>&1 || true
+
   if [[ -n "${AP_PASS}" ]]; then
     nmcli connection modify "${AP_NAME}" \
       802-11-wireless-security.key-mgmt wpa-psk \
@@ -78,11 +106,13 @@ create_ap_profile() {
 # Activar AP mode
 activate_ap() {
   log "Activando AP mode: ${AP_SSID}"
-  
+
   # Asegurarse de que WiFi está habilitado
   rfkill unblock wifi 2>/dev/null || true
   nmcli radio wifi on >/dev/null 2>&1 || true
-  
+
+  set_ap_autoconnect yes 50
+
   # Activar el perfil AP
   if nmcli connection up "${AP_NAME}" ifname "${AP_IFACE}" 2>/dev/null; then
     log "AP mode activado exitosamente"
@@ -97,6 +127,7 @@ activate_ap() {
 deactivate_ap() {
   log "Desactivando AP mode"
   nmcli connection down "${AP_NAME}" 2>/dev/null || true
+  set_ap_autoconnect no -999
 }
 
 # Intentar reconectar WiFi
@@ -125,7 +156,7 @@ main() {
     log "ERROR: NetworkManager no está activo"
     exit 1
   fi
-  
+
   # Crear perfil AP si no existe
   if ! ap_profile_exists; then
     if ! create_ap_profile; then
@@ -134,11 +165,18 @@ main() {
     fi
   fi
 
+  if wifi_active || ethernet_active; then
+    set_ap_autoconnect no -999
+  else
+    set_ap_autoconnect yes 50
+  fi
+
   if ethernet_active; then
     log "Ethernet activa detectada; no se activará el AP"
     if ap_active; then
       deactivate_ap
     fi
+    set_ap_autoconnect no -999
     exit 0
   fi
 
@@ -149,6 +187,7 @@ main() {
       log "Internet disponible, desactivando AP"
       deactivate_ap
     fi
+    set_ap_autoconnect no -999
     # Todo OK
     exit 0
   fi

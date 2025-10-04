@@ -1,6 +1,7 @@
 [Unit]
 Description=Bascula Mini-Web Backend
-After=network.target NetworkManager.service
+After=NetworkManager.service network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
