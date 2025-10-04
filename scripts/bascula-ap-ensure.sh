@@ -106,17 +106,8 @@ run_nmcli() {
 }
 
 has_saved_wifi_profiles() {
-  local line
-  while IFS= read -r line; do
-    [[ -z "${line}" ]] && continue
-    local type="${line%%:*}"
-    local rest="${line#*:}"
-    local autocon="${rest%%:*}"
-    if [[ "${type}" == "802-11-wireless" && "${autocon,,}" == "yes" ]]; then
-      return 0
-    fi
-  done < <("${NMCLI_BIN}" -t -f TYPE,AUTOCONNECT,NAME connection show 2>/dev/null || true)
-  return 1
+  "${NMCLI_BIN}" -t -f TYPE,AUTOCONNECT connection show 2>/dev/null \
+    | awk -F: '$1=="802-11-wireless" && tolower($2)=="yes"{found=1} END{exit(found?0:1)}'
 }
 
 disable_client_connections() {
@@ -143,29 +134,21 @@ ensure_ap_profile() {
   run_nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap || true
   run_nmcli con modify "${AP_NAME}" 802-11-wireless.band bg || true
   run_nmcli con modify "${AP_NAME}" 802-11-wireless.channel 1 || true
+
   run_nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk || true
   run_nmcli con modify "${AP_NAME}" wifi-sec.proto rsn || true
-  run_nmcli con modify "${AP_NAME}" wifi-sec.pmf 2 || run_nmcli con modify "${AP_NAME}" 802-11-wireless-security.pmf 2 || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless-security.pmf 2 || true
   run_nmcli con modify "${AP_NAME}" wifi-sec.psk "${AP_PSK}" || true
+
   run_nmcli con modify "${AP_NAME}" ipv4.method shared || true
   run_nmcli con modify "${AP_NAME}" ipv4.addresses "${AP_CIDR}" || true
   run_nmcli con modify "${AP_NAME}" ipv4.gateway "${AP_GATEWAY}" || true
   run_nmcli con modify "${AP_NAME}" ipv4.never-default yes || true
+  run_nmcli con modify "${AP_NAME}" ipv6.method ignore || true
+
   run_nmcli con modify "${AP_NAME}" connection.interface-name "${AP_IFACE}" || true
   run_nmcli con modify "${AP_NAME}" connection.autoconnect no || true
   run_nmcli con modify "${AP_NAME}" connection.autoconnect-priority 0 || true
-  run_nmcli con modify "${AP_NAME}" ipv6.method ignore || true
-
-  install -d -m 700 "${AP_PROFILE_DIR}"
-  local tmp_profile
-  tmp_profile="$(mktemp)"
-  if run_nmcli con export "${AP_NAME}" "${tmp_profile}"; then
-    install -D -m 600 "${tmp_profile}" "${AP_PROFILE_PATH}" || log_warn "No se pudo instalar ${AP_PROFILE_PATH}"
-    run_nmcli con load "${AP_PROFILE_PATH}" || true
-  else
-    log_warn "No se pudo exportar el perfil ${AP_NAME}"
-  fi
-  rm -f "${tmp_profile}"
 }
 
 ap_is_active() {
@@ -188,7 +171,7 @@ restart_miniweb() {
 main() {
   log_info "=== Ejecutando ensure AP (provision-only) ==="
 
-  iw reg set ES >/dev/null 2>&1 || log_warn "No se pudo fijar dominio regulatorio ES"
+  iw reg set ES >/dev/null 2>&1 || log_warn "regdomain ES no aplicado"
   rfkill unblock wifi >/dev/null 2>&1 || log_warn "No se pudo desbloquear rfkill"
   run_nmcli radio wifi on || true
 
@@ -196,24 +179,24 @@ main() {
   [[ -f "${FORCE_AP_FLAG}" ]] && force_ap=1
 
   if has_saved_wifi_profiles && (( force_ap == 0 )); then
-    log_info "Hay perfiles Wi-Fi guardados con autoconnect; NO se activa AP"
+    log_info "Hay perfiles Wi-Fi guardados: no se activa AP"
     if ap_is_active; then
-      log_info "AP activo con perfiles presentes; bajando AP"
+      log_info "AP activa con perfiles presentes; bajando AP"
       run_nmcli con down "${AP_NAME}" || true
     fi
-    return 0
+    exit 0
   fi
 
-  log_info "Sin perfiles Wi-Fi guardados (o force_ap activo); asegurando AP de provisión"
+  log_info "Sin perfiles guardados (o force_ap): asegurando AP de provisión"
   ensure_ap_profile
   disable_client_connections
   if run_nmcli con up "${AP_NAME}"; then
-    log_info "${AP_NAME} activo en ${AP_IFACE} (${AP_CIDR})"
+    log_info "${AP_NAME} activa en ${AP_IFACE} (${AP_CIDR})"
     restart_miniweb
-    return 0
+    exit 0
   fi
   log_error "No se pudo activar ${AP_NAME}"
-  return 1
+  exit 1
 }
 
 main "$@"
