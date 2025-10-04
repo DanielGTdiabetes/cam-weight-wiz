@@ -36,7 +36,7 @@ export const MiniWebConfig = () => {
   const [selectedSSID, setSelectedSSID] = useState("");
   const [password, setPassword] = useState("");
   const [isScanning, setIsScanning] = useState(false);
-  const [isConnecting, setIsConnecting] = useState(false);
+  const [ui, setUi] = useState({ connecting: false, error: '' });
   const [pinInput, setPinInput] = useState("");
   const [devicePin, setDevicePin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
@@ -106,6 +106,7 @@ export const MiniWebConfig = () => {
   };
 
   const loadNetworks = async () => {
+    setUi((prev) => ({ ...prev, error: '' }));
     setIsScanning(true);
     try {
       const response = await fetch('/api/miniweb/scan-networks');
@@ -194,50 +195,78 @@ export const MiniWebConfig = () => {
       return;
     }
 
-    setIsConnecting(true);
-    try {
-      const response = await fetch('/api/miniweb/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ssid: selectedSSID,
-          password: requiresPassword ? password : '',
-          secured: requiresPassword,
-          sec: selectedNetwork?.sec ?? undefined,
-        }),
-      });
-
-      if (response.ok) {
-        toast({
-          title: "¡Conectado!",
-          description: "El dispositivo se reiniciará en modo normal",
+    const connectWifi = async (ssid: string, wifiPassword: string) => {
+      try {
+        console.log('[miniweb] click connect', { ssid, pwdLen: wifiPassword.length });
+        setUi((prev) => ({ ...prev, connecting: true, error: '' }));
+        console.log('[miniweb] POST /api/miniweb/connect-wifi');
+        const res = await fetch('/api/miniweb/connect-wifi', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ssid, password: wifiPassword }),
         });
+        let data: unknown = null;
+        try {
+          data = await res.json();
+        } catch (parseError) {
+          logger.warn('Failed to parse connect response', { parseError });
+        }
+        if (!res.ok) {
+          let detailMessage: string | undefined;
+          let errorMessage: string | undefined;
+          if (data && typeof data === 'object') {
+            const responseData = data as Record<string, unknown>;
+            const detail = responseData['detail'];
+            if (typeof detail === 'string') {
+              detailMessage = detail;
+            } else if (detail && typeof detail === 'object') {
+              const detailRecord = detail as Record<string, unknown>;
+              const messageValue = detailRecord['message'];
+              if (typeof messageValue === 'string') {
+                detailMessage = messageValue;
+              }
+            }
+            const errorValue = responseData['error'];
+            if (typeof errorValue === 'string') {
+              errorMessage = errorValue;
+            }
+          }
+          throw new Error(detailMessage || errorMessage || `HTTP ${res.status}`);
+        }
 
-        // Wait 3 seconds then reload
-        setTimeout(() => {
-          window.location.href = '/';
-        }, 3000);
-      } else {
-        const error = (await response.json().catch(() => ({}))) as ApiErrorResponse;
-        const detail =
-          typeof error.detail === 'string'
-            ? error.detail
-            : error.detail?.message ?? error.message;
-        toast({
-          title: "Error al conectar",
-          description: detail || "Verifica la contraseña",
-          variant: "destructive",
-        });
+        const started = Date.now();
+        const timeoutMs = 60_000;
+        const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        while (Date.now() - started < timeoutMs) {
+          try {
+            const st = await fetch('/api/miniweb/status', { cache: 'no-store' }).then((r) => r.json());
+            console.log('[miniweb] status', st);
+            if (st && (st.connected === true || st.ap_active === false)) {
+              const targetIp = st.ip || st.ip_address || window.location.hostname;
+              window.location.href = `http://${targetIp}:8080/`;
+              return;
+            }
+          } catch (statusError) {
+            logger.error('Failed to fetch status during connect', { error: statusError });
+          }
+          await delay(1000);
+        }
+        throw new Error('Tiempo de espera agotado esperando la conexión Wi-Fi');
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.error('Failed to connect WiFi', { error });
+        const message = err.message || 'Error conectando a la Wi-Fi';
+        setUi((prev) => ({ ...prev, connecting: false, error: message }));
+      } finally {
+        setUi((prev) => ({ ...prev, connecting: false }));
       }
-    } catch (error) {
-      logger.error('Failed to connect WiFi', { error });
-      toast({
-        title: "Error de conexión",
-        variant: "destructive",
-      });
-    } finally {
-      setIsConnecting(false);
-    }
+    };
+
+    void connectWifi(
+      selectedSSID,
+      requiresPassword ? password : ''
+    );
   };
 
   // PIN Entry Screen
@@ -315,7 +344,7 @@ export const MiniWebConfig = () => {
                 onClick={loadNetworks}
                 variant="outline"
                 size="lg"
-                disabled={isScanning}
+                disabled={isScanning || ui.connecting}
               >
                 <RefreshCw className={`mr-2 h-5 w-5 ${isScanning ? 'animate-spin' : ''}`} />
                 {isScanning ? 'Escaneando...' : 'Escanear'}
@@ -339,6 +368,7 @@ export const MiniWebConfig = () => {
                       if (!network.secured) {
                         setPassword('');
                       }
+                      setUi((prev) => ({ ...prev, error: '' }));
                     }}
                     className={`w-full p-4 rounded-lg border-2 text-left transition-smooth hover:bg-accent ${
                       selectedSSID === network.ssid
@@ -386,7 +416,10 @@ export const MiniWebConfig = () => {
                   <Input
                     type="password"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
+                    onChange={(e) => {
+                      setPassword(e.target.value);
+                      setUi((prev) => ({ ...prev, error: '' }));
+                    }}
                     placeholder="Ingresa la contraseña"
                     className="text-lg h-14"
                     onKeyPress={(e) => e.key === 'Enter' && handleConnect()}
@@ -405,9 +438,9 @@ export const MiniWebConfig = () => {
               variant="glow"
               size="xl"
               className="w-full text-xl"
-              disabled={!selectedSSID || (requiresPassword && password.trim().length === 0) || isConnecting}
+              disabled={!selectedSSID || (requiresPassword && password.trim().length === 0) || ui.connecting}
             >
-              {isConnecting ? (
+              {ui.connecting ? (
                 <>
                   <RefreshCw className="mr-2 h-6 w-6 animate-spin" />
                   Conectando...
@@ -419,6 +452,12 @@ export const MiniWebConfig = () => {
                 </>
               )}
             </Button>
+
+            {ui.error && (
+              <div className="text-sm text-destructive text-center" role="alert">
+                {ui.error}
+              </div>
+            )}
 
             {/* Info Alert */}
             <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 flex gap-3">
