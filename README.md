@@ -86,6 +86,13 @@ ss -lntu | grep ':53' || true   # No debe aparecer dnsmasq.service
 
 Todos estos pasos quedan automatizados por `scripts/bascula-ap-ensure.sh`, ejecutado como servicio `oneshot` con reintentos. 【F:scripts/bascula-ap-ensure.sh†L1-L150】【F:systemd/bascula-ap-ensure.service†L1-L16】
 
+Checklist posterior a la instalación:
+
+1. Tras ejecutar el instalador, confirma que `BasculaAP` no tiene autoconexión: `nmcli con show | grep BasculaAP` debe mostrar `autoconnect=no`.
+2. Arranca sin cable Ethernet ni Wi-Fi guardada y verifica que el ensure levanta `BasculaAP` (SSID `Bascula-AP`).
+3. Usa la miniweb para guardar una Wi-Fi válida; la AP debe bajar y la interfaz cambiar al modo normal tras obtener IP del router.
+4. En un arranque posterior con esa Wi-Fi guardada, NetworkManager debe conectar al perfil cliente (prioridad 120) sin levantar la AP; si por cualquier motivo `BasculaAP` aparece activa, el ensure la apagará automáticamente al detectar conectividad.
+
 ## Validación recomendada
 
 1. Tras una instalación limpia y reinicio, abre `http://localhost:8080` desde el propio dispositivo y confirma que se muestra el PIN de acceso.

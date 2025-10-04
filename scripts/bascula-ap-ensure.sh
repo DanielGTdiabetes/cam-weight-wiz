@@ -32,45 +32,69 @@ fi
 : "${AP_ENSURE_CONNECTING_WAIT:=45}"
 : "${AP_ENSURE_CONNECTING_STEP:=3}"
 
-state="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
-case "${state}" in
-  connected)
-    log "NM=connected → no AP"
-    exit 0
-    ;;
-  connecting)
-    log "NM=connecting → esperando hasta ${AP_ENSURE_CONNECTING_WAIT}s"
-    t_end=$(( $(date +%s) + AP_ENSURE_CONNECTING_WAIT ))
-    timed_out=1
-    while [ "$(date +%s)" -lt "${t_end}" ]; do
-      if nmcli networking connectivity check 2>/dev/null | grep -qiE 'full|portal|limited'; then
-        log "Conectividad conseguida durante espera → no AP"
-        exit 0
-      fi
+state_raw="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
+state_lc="$(printf '%s' "${state_raw}" | tr '[:upper:]' '[:lower:]')"
 
-      st="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
-      if [ "${st}" = "connected" ]; then
-        log "NM=connected tras espera → no AP"
-        exit 0
-      elif [ "${st}" = "disconnected" ] || [ "${st}" = "asleep" ] || [ "${st}" = "unknown" ]; then
-        log "NM=${st} tras espera → proceder a AP"
-        timed_out=0
-        break
+if [[ "${state_lc}" == connected* ]]; then
+  connectivity_lc="$(nmcli networking connectivity check 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo unknown)"
+  active_conn="$(nmcli -t -f DEVICE,STATE,CONNECTION device status 2>/dev/null | awk -F: -v iface="${AP_IFACE}" '$1==iface {print $4; exit}')"
+  if [[ "${active_conn}" == "${AP_NAME}" ]]; then
+    client_profile="$(nmcli -t -f NAME,TYPE,802-11-wireless.mode,connection.autoconnect connection show 2>/dev/null | awk -F: 'tolower($2)=="802-11-wireless" && tolower($3)=="infrastructure" && tolower($4)=="yes" {print $1; exit}')"
+    if [[ -n "${client_profile}" ]]; then
+      log "Conectividad ${connectivity_lc:-unknown} con ${AP_NAME} activo; intentando conmutar a perfil cliente (${client_profile})"
+      nmcli connection down "${AP_NAME}" >/dev/null 2>&1 || true
+      nmcli device wifi rescan >/dev/null 2>&1 || true
+      sleep 5
+      new_state="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
+      if printf '%s' "${new_state}" | grep -qi '^connected'; then
+        log "Perfil cliente asumió la conectividad; ${AP_NAME} permanece desactivada"
+      else
+        log "No se consiguió conectividad tras conmutar; reactivando ${AP_NAME}"
+        nmcli connection up "${AP_NAME}" >/dev/null 2>&1 || true
       fi
-
-      sleep "${AP_ENSURE_CONNECTING_STEP}"
-    done
-    if [ "${timed_out}" -eq 1 ]; then
-      log "Sin conectividad tras ${AP_ENSURE_CONNECTING_WAIT}s adicionales → proceder a AP"
+    else
+      log "Conectividad ${connectivity_lc:-unknown} con ${AP_NAME} activo pero sin perfiles cliente autoconnect=yes; sin cambios"
     fi
-    ;;
-  *)
-    log "NM state=${state}; continuando con validaciones"
-    ;;
-esac
+  else
+    log "Conectividad ${connectivity_lc:-unknown} con conexión activa en ${AP_IFACE}=${active_conn:-<ninguna>}; no se requiere AP"
+  fi
+  exit 0
+fi
 
-if nmcli networking connectivity check 2>/dev/null | grep -qiE 'full|portal|limited'; then
-  log "Conectividad disponible en último momento → no AP"
+if [[ "${state_lc}" == connecting* ]]; then
+  log "NM=connecting → esperando hasta ${AP_ENSURE_CONNECTING_WAIT}s"
+  t_end=$(( $(date +%s) + AP_ENSURE_CONNECTING_WAIT ))
+  while [ "$(date +%s)" -lt "${t_end}" ]; do
+    connectivity_now="$(nmcli networking connectivity check 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo unknown)"
+    if printf '%s' "${connectivity_now}" | grep -qiE '^(full|portal|limited|local)$'; then
+      log "Conectividad ${connectivity_now} conseguida durante espera → no AP"
+      exit 0
+    fi
+
+    state_now="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
+    if printf '%s' "${state_now}" | grep -qi '^connected'; then
+      log "NM=connected tras espera → no AP"
+      exit 0
+    fi
+
+    if printf '%s' "${state_now}" | grep -qiE '^(disconnected|asleep|unknown)'; then
+      log "NM=${state_now} tras espera → proceder a AP"
+      break
+    fi
+
+    sleep "${AP_ENSURE_CONNECTING_STEP}"
+  done
+fi
+
+connectivity_final="$(nmcli networking connectivity check 2>/dev/null | tr '[:upper:]' '[:lower:]' || echo unknown)"
+if printf '%s' "${connectivity_final}" | grep -qiE '^(full|portal|limited|local)$'; then
+  log "Conectividad ${connectivity_final} detectada → no AP"
+  exit 0
+fi
+
+state_after_wait="$(nmcli -t -f STATE g 2>/dev/null || echo disconnected)"
+if printf '%s' "${state_after_wait}" | grep -qi '^connected'; then
+  log "NM=${state_after_wait}; conectividad presente → no AP"
   exit 0
 fi
 
@@ -118,7 +142,14 @@ ensure_profile() {
     local existing_psk
     existing_psk="$(nmcli -s -g wifi-sec.psk connection show "${AP_NAME}" 2>/dev/null || echo '')"
     [[ -n "${existing_psk}" ]] && effective_psk="${existing_psk}"
-    nmcli connection modify "${AP_NAME}" connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" connection.interface-name "${AP_IFACE}" >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" ipv4.method shared ipv4.addresses "${AP_CIDR}" ipv4.gateway "${AP_GATEWAY}" >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" ipv4.never-default yes >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" -ipv4.dns >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" ipv6.method ignore >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk >/dev/null 2>&1 || true
+    nmcli connection modify "${AP_NAME}" connection.autoconnect no connection.autoconnect-priority 100 >/dev/null 2>&1 || true
     return 0
   fi
 
@@ -147,7 +178,7 @@ ensure_profile() {
 
   [[ -z "${effective_psk}" ]] && effective_psk="${AP_PASS_DEFAULT}"
   nmcli connection modify "${AP_NAME}" wifi-sec.psk "${effective_psk}" >/dev/null 2>&1 || return 1
-  nmcli connection modify "${AP_NAME}" connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1 || return 1
+  nmcli connection modify "${AP_NAME}" connection.autoconnect no connection.autoconnect-priority 100 >/dev/null 2>&1 || return 1
   return 0
 }
 

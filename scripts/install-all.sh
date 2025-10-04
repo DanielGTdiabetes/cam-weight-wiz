@@ -749,7 +749,7 @@ if command -v nmcli >/dev/null 2>&1; then
     nmcli con modify "${AP_NAME}" wifi-sec.psk "${ap_psk}" >/dev/null 2>&1 || warn "No se pudo configurar wifi-sec.psk"
   fi
 
-  if ! nmcli con modify "${AP_NAME}" connection.autoconnect yes >/dev/null 2>&1; then
+  if ! nmcli con modify "${AP_NAME}" connection.autoconnect no >/dev/null 2>&1; then
     warn "No se pudo establecer autoconnect en ${AP_NAME}"
   fi
   nmcli con modify "${AP_NAME}" connection.autoconnect-priority 100 >/dev/null 2>&1 || warn "No se pudo establecer prioridad"
@@ -823,8 +823,8 @@ if command -v nmcli >/dev/null 2>&1; then
 fi
 
 # Nota: La UI, al conectar a una nueva Wi-Fi, deberá:
-#  - crear/actualizar esa conexión con autoconnect=yes y prioridad 200
-#  - poner BasculaAP autoconnect=no (para no competir)
+#  - crear/actualizar esa conexión con autoconnect=yes y prioridad 120
+#  - mantener BasculaAP con autoconnect=no (para no competir)
 
 if ! nmcli general status >/dev/null 2>&1; then
   err "ERR: nmcli no responde"
