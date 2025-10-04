@@ -1212,7 +1212,9 @@ else
 fi
 
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  systemctl daemon-reload
+  if ! systemctl daemon-reload; then
+    warn "systemctl daemon-reload falló"
+  fi
   if [[ "${AP_ENSURE_SERVICE_INSTALLED}" -eq 1 ]]; then
     if systemctl enable --now bascula-ap-ensure.service; then
       log "✓ Servicio bascula-ap-ensure habilitado"
