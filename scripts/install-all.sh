@@ -135,73 +135,28 @@ install_x735() {
   fi
 
   # Sello de idempotencia
-  local STAMP="/var/lib/x735-setup.done"
   install -d -m 0755 /var/lib
 
   # Script ensure (se reintenta en cada boot hasta ver PWM)
   install -d -m 0755 /usr/local/sbin
-  cat > /usr/local/sbin/x735-ensure.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-STAMP=/var/lib/x735-setup.done
-LOG(){ printf "[x735] %s\n" "$*"; }
+  install -d -m 0755 /etc/systemd/system
 
-# Detectar pwmchip disponible (orden común en Pi)
-PWMCHIP=
-for c in /sys/class/pwm/pwmchip2 /sys/class/pwm/pwmchip1 /sys/class/pwm/pwmchip0; do
-  if [[ -d "$c" ]]; then PWMCHIP="${c##*/}"; break; fi
-done
+  # X735 ensure: instalar, habilitar y EJECUTAR ahora
+  install -m 0755 system/os/x735-ensure.sh /usr/local/sbin/x735-ensure.sh
+  install -m 0644 system/os/x735-ensure.service /etc/systemd/system/x735-ensure.service || true
+  chmod +x /usr/local/sbin/x735-ensure.sh
 
-if [[ -z "${PWMCHIP}" ]]; then
-  LOG "PWM no disponible todavía; reintentar en próximo arranque"
-  exit 0
-fi
-
-# Clonar/actualizar scripts oficiales
-if [[ ! -d /opt/x735-script/.git ]]; then
-  git clone https://github.com/geekworm-com/x735-script /opt/x735-script || true
-fi
-cd /opt/x735-script || exit 0
-chmod +x *.sh || true
-
-# Parchear pwmchip en el script de ventilador
-sed -i "s/pwmchip[0-9]\\+/${PWMCHIP}/g" x735-fan.sh 2>/dev/null || true
-
-# Instalar servicios
-./install-fan-service.sh || true
-./install-pwr-service.sh || true
-
-# Habilitar/arrancar si hay systemd
-if [[ -d /run/systemd/system ]]; then
-  systemctl enable --now x735-fan.service x735-pwr.service 2>/dev/null || true
-fi
-
-touch "${STAMP}"
-LOG "X735 listo (pwmchip=${PWMCHIP})"
-exit 0
-EOF
-  chmod 0755 /usr/local/sbin/x735-ensure.sh
-
-  # Unidad systemd “ensure” (oneshot) que se ejecuta hasta que deje el sello
-  cat > /etc/systemd/system/x735-ensure.service <<'EOF'
-[Unit]
-Description=Ensure X735 fan/power services
-After=multi-user.target local-fs.target
-ConditionPathExists=!/var/lib/x735-setup.done
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/x735-ensure.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  # Recarga/enable solo si hay systemd en ejecución
-  if [[ -d /run/systemd/system ]]; then
+  if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
     systemctl enable x735-ensure.service || true
+    systemctl start x735-ensure.service || true
+    systemctl enable --now x735-fan.service 2>/dev/null || true
+    systemctl enable --now x735-pwr.service 2>/dev/null || true
+    systemctl is-active --quiet x735-ensure.service && echo "[inst] ✓ X735 ensure ejecutado (sin reboot)"
+    systemctl is-active --quiet x735-fan.service && echo "[inst] ✓ X735 fan activo"
+    systemctl is-active --quiet x735-pwr.service && echo "[inst] ✓ X735 power activo"
+  else
+    /usr/local/sbin/x735-ensure.sh --oneshot || /usr/local/sbin/x735-ensure.sh || true
   fi
 
   echo "[inst] ✓ X735 configurado (ensure service instalado)"
