@@ -629,20 +629,27 @@ if [ -d /run/systemd/system ]; then
   systemctl list-unit-files | grep -q '^NetworkManager\.service' && sudo systemctl reload NetworkManager || true
 fi
 
-# Desactivar autoconnect de TODAS las wifi de infraestructura, excepto BasculaAP
-# (Evita que NM tumbe la AP para ir a una Wi-Fi antigua sin que el usuario lo pida)
+# Desactivar autoconnect en TODAS las Wi-Fi de infraestructura, excepto BasculaAP
+# (Evita que NM tumbe la AP por una Wi-Fi antigua)
 if command -v nmcli >/dev/null 2>&1; then
-  while IFS= read -r NAME; do
-    [ -z "$NAME" ] && continue
-    [ "$NAME" = "BasculaAP" ] && continue
-    TYPE="$(nmcli -t -f connection.type connection show "$NAME" 2>/dev/null || echo)"
-    if [ "$TYPE" = "802-11-wireless" ]; then
-      MODE="$(nmcli -t -f 802-11-wireless.mode connection show "$NAME" 2>/dev/null || echo)"
-      if [ "$MODE" != "ap" ]; then
-        nmcli connection modify "$NAME" connection.autoconnect no connection.autoconnect-priority 0 || true
-      fi
+  # Recorremos por UUID para evitar problemas con NAMES con espacios/:“:”
+  while IFS= read -r UUID; do
+    [ -z "$UUID" ] && continue
+
+    NAME="$(nmcli -g connection.id connection show "$UUID" 2>/dev/null || true)"
+    TYPE="$(nmcli -g connection.type connection show "$UUID" 2>/dev/null || true)"
+
+    # Saltar perfiles no Wi-Fi y la propia BasculaAP
+    if [ "$TYPE" != "802-11-wireless" ] || [ "$NAME" = "BasculaAP" ]; then
+      continue
     fi
-  done < <(nmcli -t -f NAME connection show 2>/dev/null | sed 's/^NAME://;s/^[[:space:]]*//;s/[[:space:]]*$//')
+
+    MODE="$(nmcli -g 802-11-wireless.mode connection show "$UUID" 2>/dev/null || true)"
+    # Si no es AP (es cliente/infrastructure), desactiva autoconnect
+    if [ "$MODE" != "ap" ]; then
+      nmcli connection modify "$UUID" connection.autoconnect no connection.autoconnect-priority 0 || true
+    fi
+  done < <(nmcli -t -f UUID connection show 2>/dev/null | sed 's/^UUID://')
 fi
 
 # Nota: La UI, al conectar a una nueva Wi-Fi, deberá:
