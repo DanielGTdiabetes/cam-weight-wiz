@@ -89,8 +89,25 @@ bring_down_ap() {
   fi
 }
 
+disable_client_connections() {
+  local -a active
+  mapfile -t active < <("${NMCLI_BIN}" -t -f NAME,DEVICE connection show --active 2>/dev/null || true)
+  local entry name device
+  for entry in "${active[@]}"; do
+    [[ -z "${entry}" ]] && continue
+    name="${entry%%:*}"
+    device="${entry##*:}"
+    [[ "${device}" != "${AP_IFACE}" ]] && continue
+    [[ "${name}" == "${AP_NAME}" ]] && continue
+    log "Desactivando conexión cliente ${name} en ${device}"
+    "${NMCLI_BIN}" connection down "${name}" >/dev/null 2>&1 || true
+  done
+}
+
 bring_up_ap() {
   ensure_ap_profile
+
+  disable_client_connections
 
   "${NMCLI_BIN}" radio wifi on >/dev/null 2>&1 || true
   "${NMCLI_BIN}" device disconnect "${AP_IFACE}" >/dev/null 2>&1 || true
