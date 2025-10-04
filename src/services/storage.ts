@@ -23,6 +23,7 @@ export interface AppSettings {
   // Scale settings
   calibrationFactor: number;
   defaultUnit: 'g' | 'ml';
+  decimals: number;
   
   // API settings
   chatGptKey: string;
@@ -265,6 +266,7 @@ const MAX_HISTORY_ITEMS = 100;
 const DEFAULT_SETTINGS: AppSettings = {
   calibrationFactor: 1,
   defaultUnit: 'g',
+  decimals: 1,
   chatGptKey: '',
   // Dispositivo: usar loopback 127.0.0.1 por defecto
   apiUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8080',

@@ -13,7 +13,6 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
       icon: Scale,
       title: "Báscula",
       description: "Pesar alimentos",
-      color: "cyan",
       borderColor: "border-primary/30",
       hoverBorder: "hover:border-primary",
       iconBg: "bg-primary/20",
@@ -25,7 +24,6 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
       icon: Camera,
       title: "Escáner",
       description: "Identificar alimentos",
-      color: "magenta",
       borderColor: "border-secondary/30",
       hoverBorder: "hover:border-secondary",
       iconBg: "bg-secondary/20",
@@ -37,7 +35,6 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
       icon: Timer,
       title: "Temporizador",
       description: "Temporizador de cocina",
-      color: "green",
       borderColor: "border-success/30",
       hoverBorder: "hover:border-success",
       iconBg: "bg-success/20",
@@ -49,31 +46,26 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
       icon: Book,
       title: "Recetas",
       description: "Asistente de recetas",
-      color: "amber",
       borderColor: "border-warning/30",
       hoverBorder: "hover:border-warning",
       iconBg: "bg-warning/20",
       iconHoverBg: "group-hover:bg-warning",
       glowClass: "group-hover:shadow-[0_0_20px_hsl(40_100%_55%/0.3)]",
     },
-    {
-      id: "settings",
-      icon: SettingsIcon,
-      title: "Ajustes",
-      description: "Configuración",
-      color: "muted",
-      borderColor: "border-muted/30",
-      hoverBorder: "hover:border-muted",
-      iconBg: "bg-muted/30",
-      iconHoverBg: "group-hover:bg-muted",
-      glowClass: "group-hover:shadow-[0_0_15px_hsl(220_15%_20%/0.5)]",
-    },
   ];
 
   return (
-    <div className="flex min-h-screen items-start justify-center bg-background p-6">
-      <div className="w-full max-w-5xl">
-        <div className="grid grid-cols-2 gap-5">
+    <div className="flex h-[600px] items-center justify-center bg-background p-3">
+      <div className="w-full max-w-5xl relative">
+        {/* Settings Icon - Top Right */}
+        <button
+          onClick={() => onNavigate("settings")}
+          className="absolute -top-2 right-0 z-10 rounded-full bg-muted/50 p-3 hover:bg-muted transition-smooth border border-muted"
+        >
+          <SettingsIcon className="h-7 w-7" />
+        </button>
+
+        <div className="grid grid-cols-2 gap-4">
           {menuItems.map(({ id, icon: Icon, title, description, borderColor, hoverBorder, iconBg, iconHoverBg, glowClass }) => {
             const handleClick = (e: React.MouseEvent) => {
               e.preventDefault();
@@ -89,14 +81,14 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
                 onClick={handleClick}
               >
                 <div className="gradient-holographic absolute inset-0 opacity-0 transition-smooth group-hover:opacity-20 pointer-events-none" />
-                <div className="relative p-6 text-center pointer-events-none">
-                  <div className="mb-3 flex justify-center">
-                    <div className={`rounded-2xl ${iconBg} ${iconHoverBg} p-5 transition-smooth group-hover:text-primary-foreground`}>
-                      <Icon className="h-14 w-14" />
+                <div className="relative py-5 px-4 text-center pointer-events-none">
+                  <div className="mb-2 flex justify-center">
+                    <div className={`rounded-2xl ${iconBg} ${iconHoverBg} p-4 transition-smooth group-hover:text-primary-foreground`}>
+                      <Icon className="h-12 w-12" />
                     </div>
                   </div>
-                  <h2 className="mb-2 text-3xl font-bold">{title}</h2>
-                  <p className="text-lg text-muted-foreground">{description}</p>
+                  <h2 className="mb-1 text-2xl font-bold leading-tight">{title}</h2>
+                  <p className="text-base text-muted-foreground leading-tight">{description}</p>
                 </div>
               </Card>
             );

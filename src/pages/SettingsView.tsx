@@ -25,6 +25,7 @@ export const SettingsView = () => {
     setVoiceEnabled(settings.isVoiceActive);
     setDiabetesMode(settings.diabetesMode);
     setCalibrationFactor(settings.calibrationFactor.toString());
+    setDecimals(settings.decimals?.toString() || "1");
     setApiUrl(settings.apiUrl);
     setWsUrl(settings.wsUrl);
     setChatGptKey(settings.chatGptKey);
@@ -35,6 +36,15 @@ export const SettingsView = () => {
     setTargetGlucose(settings.targetGlucose.toString());
     setHypoAlarm(settings.hypoAlarm.toString());
     setHyperAlarm(settings.hyperAlarm.toString());
+
+    // Fetch network IP
+    api.getNetworkStatus().then(status => {
+      if (status.ip) {
+        setNetworkIP(status.ip);
+      }
+    }).catch(err => {
+      console.error("Failed to get network status", err);
+    });
   }, []);
   
   const [voiceEnabled, setVoiceEnabled] = useState(true);
@@ -53,6 +63,7 @@ export const SettingsView = () => {
   }>({ title: "", type: "text", field: "" });
   
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
+  const [decimals, setDecimals] = useState("1");
   const [apiUrl, setApiUrl] = useState("http://127.0.0.1:8080");
   const [wsUrl, setWsUrl] = useState("ws://127.0.0.1:8080");
   const [chatGptKey, setChatGptKey] = useState("");
@@ -63,11 +74,15 @@ export const SettingsView = () => {
   const [targetGlucose, setTargetGlucose] = useState("100");
   const [hypoAlarm, setHypoAlarm] = useState("70");
   const [hyperAlarm, setHyperAlarm] = useState("180");
+  const [networkIP, setNetworkIP] = useState<string>("");
   
   const [tempValue, setTempValue] = useState("");
   const [isTestingAudio, setIsTestingAudio] = useState(false);
   const [isTestingChatGPT, setIsTestingChatGPT] = useState(false);
   const [isTestingNightscout, setIsTestingNightscout] = useState(false);
+  const [availableUpdates, setAvailableUpdates] = useState<{ available: boolean; version?: string } | null>(null);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
 
   // Save settings when they change
   useEffect(() => {
@@ -96,6 +111,7 @@ export const SettingsView = () => {
   const getCurrentValue = (field: string): string => {
     const values: Record<string, string> = {
       calibrationFactor,
+      decimals,
       apiUrl,
       wsUrl,
       chatGptKey,
@@ -113,6 +129,7 @@ export const SettingsView = () => {
   const handleKeyboardConfirm = () => {
     const setters: Record<string, (value: string) => void> = {
       calibrationFactor: setCalibrationFactor,
+      decimals: setDecimals,
       chatGptKey: setChatGptKey,
       nightscoutUrl: setNightscoutUrl,
       nightscoutToken: setNightscoutToken,
@@ -133,6 +150,8 @@ export const SettingsView = () => {
       const field = keyboardConfig.field;
       if (field === 'calibrationFactor') {
         storage.saveSettings({ calibrationFactor: parseFloat(tempValue) || 1 });
+      } else if (field === 'decimals') {
+        storage.saveSettings({ decimals: parseInt(tempValue) || 1 });
       } else if (field === 'chatGptKey') {
         storage.saveSettings({ chatGptKey: tempValue });
       } else if (field === 'nightscoutUrl') {
@@ -297,6 +316,57 @@ export const SettingsView = () => {
     }
   };
 
+  const handleCheckUpdates = async () => {
+    setIsCheckingUpdates(true);
+    try {
+      const result = await api.checkUpdates();
+      setAvailableUpdates(result);
+      if (result.available) {
+        toast({
+          title: "Actualización disponible",
+          description: `Versión ${result.version} disponible`,
+        });
+      } else {
+        toast({
+          title: "Sistema actualizado",
+          description: "No hay actualizaciones disponibles",
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo verificar actualizaciones",
+        variant: "destructive",
+      });
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  };
+
+  const handleInstallUpdate = async () => {
+    if (!availableUpdates?.available) return;
+    
+    if (!confirm("El dispositivo se reiniciará después de la actualización. ¿Continuar?")) {
+      return;
+    }
+
+    setIsInstallingUpdate(true);
+    try {
+      await api.installUpdate();
+      toast({
+        title: "Actualización iniciada",
+        description: "El dispositivo se reiniciará en unos momentos",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo instalar la actualización",
+        variant: "destructive",
+      });
+      setIsInstallingUpdate(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-y-auto p-4">
       <Tabs defaultValue="general" className="w-full">
@@ -361,41 +431,6 @@ export const SettingsView = () => {
                 <Volume2 className="mr-2 h-5 w-5" />
                 {isTestingAudio ? "Probando..." : "Probar Audio"}
               </Button>
-
-              <div className="border-t border-border pt-6">
-                <h4 className="text-lg font-semibold mb-4">Gestión de Datos</h4>
-                <div className="space-y-3">
-                  <Button 
-                    variant="outline" 
-                    size="lg" 
-                    className="w-full justify-start"
-                    onClick={handleExportData}
-                  >
-                    <Save className="mr-2 h-5 w-5" />
-                    Exportar Configuración y Datos
-                  </Button>
-                  
-                  <Button 
-                    variant="outline" 
-                    size="lg" 
-                    className="w-full justify-start"
-                    onClick={handleImportData}
-                  >
-                    <Upload className="mr-2 h-5 w-5" />
-                    Importar Configuración
-                  </Button>
-                  
-                  <Button 
-                    variant="destructive" 
-                    size="lg" 
-                    className="w-full justify-start"
-                    onClick={handleResetSettings}
-                  >
-                    <Trash2 className="mr-2 h-5 w-5" />
-                    Restablecer a Valores por Defecto
-                  </Button>
-                </div>
-              </div>
             </div>
           </Card>
         </TabsContent>
@@ -408,7 +443,18 @@ export const SettingsView = () => {
             <div className="space-y-6">
               <div className="space-y-2">
                 <Label className="text-lg font-medium">Decimales</Label>
-                <select className="w-full rounded-lg border border-input bg-background px-4 py-3 text-lg">
+                <select 
+                  className="w-full rounded-lg border border-input bg-background px-4 py-3 text-lg"
+                  value={decimals}
+                  onChange={(e) => {
+                    setDecimals(e.target.value);
+                    storage.saveSettings({ decimals: parseInt(e.target.value) });
+                    toast({
+                      title: "Guardado",
+                      description: "Preferencia de decimales actualizada",
+                    });
+                  }}
+                >
                   <option value="0">Sin decimales (0)</option>
                   <option value="1">Un decimal (0.0)</option>
                 </select>
@@ -496,14 +542,22 @@ export const SettingsView = () => {
 
               <div>
                 <Label className="text-lg font-medium mb-2 block">Acceso Mini-Web</Label>
-                <div className="rounded-lg border border-border p-4 space-y-2">
-                  <p className="text-sm text-muted-foreground">URL:</p>
-                  <p className="text-lg font-mono">http://192.168.1.100:8080</p>
-                  <p className="text-sm text-muted-foreground">PIN:</p>
-                  <p className="text-2xl font-bold text-primary">1234</p>
-                  <Button variant="secondary" size="sm" className="w-full">
-                    Generar QR
-                  </Button>
+                <div className="rounded-lg border border-border p-4 space-y-3">
+                  <div>
+                    <p className="text-sm text-muted-foreground">URL:</p>
+                    <p className="text-lg font-mono break-all">
+                      {networkIP ? `http://${networkIP}:8080` : "Obteniendo..."}
+                    </p>
+                  </div>
+                  {networkIP && (
+                    <div className="flex justify-center py-3 bg-white rounded">
+                      <img 
+                        src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=http://${networkIP}:8080`}
+                        alt="QR Code"
+                        className="w-48 h-48"
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
@@ -666,19 +720,41 @@ export const SettingsView = () => {
                 <p className="text-4xl font-bold text-primary">v2.5.0</p>
               </div>
 
-              <Button variant="glow" size="xl" className="w-full text-xl">
+              <Button 
+                variant="glow" 
+                size="xl" 
+                className="w-full text-xl"
+                onClick={handleCheckUpdates}
+                disabled={isCheckingUpdates}
+              >
                 <Download className="mr-2 h-6 w-6" />
-                Buscar Actualizaciones
+                {isCheckingUpdates ? "Verificando..." : "Buscar Actualizaciones"}
               </Button>
 
-              <div className="rounded-lg border border-border p-4">
-                <p className="text-sm text-muted-foreground">
-                  Última comprobación: Hoy a las 10:30
-                </p>
-                <p className="mt-2 font-medium text-success">
-                  ✓ El sistema está actualizado
-                </p>
-              </div>
+              {availableUpdates && (
+                <div className={`rounded-lg border p-4 ${availableUpdates.available ? "border-primary bg-primary/5" : "border-success bg-success/5"}`}>
+                  {availableUpdates.available ? (
+                    <>
+                      <p className="font-medium text-primary mb-2">
+                        📦 Nueva versión disponible: {availableUpdates.version}
+                      </p>
+                      <Button
+                        variant="glow"
+                        size="lg"
+                        className="w-full"
+                        onClick={handleInstallUpdate}
+                        disabled={isInstallingUpdate}
+                      >
+                        {isInstallingUpdate ? "Instalando..." : "Instalar Actualización"}
+                      </Button>
+                    </>
+                  ) : (
+                    <p className="font-medium text-success">
+                      ✓ El sistema está actualizado
+                    </p>
+                  )}
+                </div>
+              )}
 
               <div className="rounded-lg border-warning/50 border bg-warning/5 p-4">
                 <p className="text-sm font-medium text-warning">

@@ -209,6 +209,11 @@ class ApiService {
   async installUpdate(): Promise<void> {
     await apiWrapper.post('/api/updates/install');
   }
+
+  // Network endpoints
+  async getNetworkStatus(): Promise<{ ip: string; ssid?: string }> {
+    return apiWrapper.get<{ ip: string; ssid?: string }>('/api/network/status');
+  }
 }
 
 export const api = new ApiService();

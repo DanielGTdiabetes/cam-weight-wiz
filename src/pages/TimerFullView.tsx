@@ -165,25 +165,25 @@ export const TimerFullView = () => {
 
   if (showPresets) {
     return (
-      <div className="flex h-full items-center justify-center p-8">
-        <Card className="w-full max-w-3xl p-8">
-          <h2 className="mb-8 text-center text-4xl font-bold">
+      <div className="flex h-full items-center justify-center p-4">
+        <Card className="w-full max-w-2xl max-h-[560px] overflow-y-auto p-5">
+          <h2 className="mb-4 text-center text-2xl font-bold leading-tight">
             Configurar Temporizador
           </h2>
           
           {/* Entrada manual */}
-          <div className="mb-8 space-y-4">
+          <div className="mb-4 space-y-3">
             <div className="text-center">
-              <p className="mb-2 text-lg text-muted-foreground">Minutos</p>
-              <div className="mx-auto w-64 rounded-lg border-2 border-primary/30 bg-card p-4">
-                <p className="text-5xl font-bold text-primary">
+              <p className="mb-2 text-base text-muted-foreground">Minutos</p>
+              <div className="mx-auto w-48 rounded-lg border-2 border-primary/30 bg-card p-3">
+                <p className="text-4xl font-bold text-primary">
                   {customInput || "0"}
                 </p>
               </div>
             </div>
             
             {/* Teclado numérico */}
-            <div className="mx-auto max-w-xs">
+            <div className="mx-auto max-w-sm">
               <div className="grid gap-2">
                 {[["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["", "0", "⌫"]].map((row, rowIndex) => (
                   <div key={rowIndex} className="grid grid-cols-3 gap-2">
@@ -195,9 +195,9 @@ export const TimerFullView = () => {
                           <Button
                             key={keyIndex}
                             variant="outline"
-                            size="xl"
+                            size="lg"
                             onClick={handleBackspace}
-                            className="h-16 text-2xl"
+                            className="h-12 text-lg"
                           >
                             ←
                           </Button>
@@ -208,9 +208,9 @@ export const TimerFullView = () => {
                         <Button
                           key={keyIndex}
                           variant="outline"
-                          size="xl"
+                          size="lg"
                           onClick={() => handleKeyPress(key)}
-                          className="h-16 text-2xl font-bold"
+                          className="h-12 text-lg font-bold"
                         >
                           {key}
                         </Button>
@@ -222,17 +222,17 @@ export const TimerFullView = () => {
               <div className="mt-2 grid grid-cols-2 gap-2">
                 <Button
                   variant="destructive"
-                  size="xl"
+                  size="lg"
                   onClick={handleClearInput}
-                  className="h-16 text-xl"
+                  className="h-12 text-base"
                 >
                   Borrar
                 </Button>
                 <Button
                   variant="glow"
-                  size="xl"
+                  size="lg"
                   onClick={handleStartCustom}
-                  className="h-16 text-xl"
+                  className="h-12 text-base"
                   disabled={!customInput || parseInt(customInput) === 0}
                 >
                   Iniciar
@@ -242,15 +242,15 @@ export const TimerFullView = () => {
           </div>
 
           {/* Presets */}
-          <div className="border-t border-border pt-6">
-            <p className="mb-4 text-center text-lg text-muted-foreground">O elige un preset:</p>
-            <div className="grid grid-cols-3 gap-4">
+          <div className="border-t border-border pt-4">
+            <p className="mb-3 text-center text-base text-muted-foreground">O elige un preset:</p>
+            <div className="grid grid-cols-3 gap-2">
               {presets.map((preset) => (
                 <Button
                   key={preset.value}
                   onClick={() => handleStart(preset.value)}
                   variant="outline"
-                  className="h-20 text-xl"
+                  className="h-14 text-base"
                 >
                   {preset.label}
                 </Button>
@@ -263,15 +263,15 @@ export const TimerFullView = () => {
   }
 
   return (
-    <div className="flex h-full flex-col items-center justify-center p-8">
-      <Card className="relative w-full max-w-2xl overflow-hidden border-primary/30 p-12 glow-cyan">
+    <div className="flex h-full flex-col items-center justify-center p-4">
+      <Card className="relative w-full max-w-xl max-h-[560px] overflow-hidden border-primary/30 p-6 glow-cyan">
         <div className="gradient-holographic absolute inset-0 opacity-20" />
         
         <div className="relative text-center">
           {/* Timer Display */}
-          <div className="mb-8">
+          <div className="mb-4">
             <div className={cn(
-              "mb-6 text-9xl font-bold tracking-tight transition-smooth",
+              "mb-3 text-7xl font-bold tracking-tight transition-smooth",
               isRunning ? "text-primary text-glow-cyan" : "text-muted-foreground"
             )}>
               {formatTime(seconds)}
@@ -279,26 +279,26 @@ export const TimerFullView = () => {
           </div>
 
           {/* Progress Ring */}
-          <div className="mx-auto mb-8 h-64 w-64">
+          <div className="mx-auto mb-4 h-48 w-48">
             <svg className="h-full w-full -rotate-90 transform">
               <circle
-                cx="128"
-                cy="128"
-                r="120"
+                cx="96"
+                cy="96"
+                r="88"
                 stroke="currentColor"
-                strokeWidth="16"
+                strokeWidth="12"
                 fill="none"
                 className="text-muted"
               />
               <circle
-                cx="128"
-                cy="128"
-                r="120"
+                cx="96"
+                cy="96"
+                r="88"
                 stroke="currentColor"
-                strokeWidth="16"
+                strokeWidth="12"
                 fill="none"
-                strokeDasharray={`${2 * Math.PI * 120}`}
-                strokeDashoffset={`${2 * Math.PI * 120 * (1 - progress / 100)}`}
+                strokeDasharray={`${2 * Math.PI * 88}`}
+                strokeDashoffset={`${2 * Math.PI * 88 * (1 - progress / 100)}`}
                 className={cn(
                   "transition-all duration-1000",
                   isRunning ? "text-primary" : "text-warning"
@@ -309,32 +309,32 @@ export const TimerFullView = () => {
           </div>
 
           {/* Control Buttons */}
-          <div className="flex justify-center gap-4">
+          <div className="flex justify-center gap-3">
             <Button
               onClick={handlePause}
-              size="xl"
+              size="lg"
               variant={isRunning ? "warning" : "glow"}
-              className="h-20 w-40 text-xl"
+              className="h-14 w-32 text-base"
             >
               {isRunning ? (
                 <>
-                  <Pause className="mr-2 h-6 w-6" />
+                  <Pause className="mr-2 h-5 w-5" />
                   Pausar
                 </>
               ) : (
                 <>
-                  <Play className="mr-2 h-6 w-6" />
+                  <Play className="mr-2 h-5 w-5" />
                   Reanudar
                 </>
               )}
             </Button>
             <Button
               onClick={handleReset}
-              size="xl"
+              size="lg"
               variant="outline"
-              className="h-20 w-40 text-xl"
+              className="h-14 w-32 text-base"
             >
-              <RotateCcw className="mr-2 h-6 w-6" />
+              <RotateCcw className="mr-2 h-5 w-5" />
               Reiniciar
             </Button>
           </div>

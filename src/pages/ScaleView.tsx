@@ -1,13 +1,12 @@
 import { useState, useEffect } from "react";
-import { Scale, Zap, Droplets, History, Save } from "lucide-react";
+import { Scale, Droplets } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
-import { useWeightHistory } from "@/hooks/useWeightHistory";
 import { api } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
-import { WeightHistoryDialog } from "@/components/WeightHistoryDialog";
+import { storage } from "@/services/storage";
 
 interface ScaleViewProps {
   onNavigate: (view: string) => void;
@@ -15,10 +14,15 @@ interface ScaleViewProps {
 
 export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   const { weight, isStable, unit, isConnected, error, reconnectAttempts } = useScaleWebSocket();
-  const { addRecord } = useWeightHistory();
   const [displayUnit, setDisplayUnit] = useState<"g" | "ml">("g");
-  const [showHistory, setShowHistory] = useState(false);
+  const [decimals, setDecimals] = useState(1);
   const { toast } = useToast();
+
+  // Load decimals preference
+  useEffect(() => {
+    const settings = storage.getSettings();
+    setDecimals(settings.decimals || 1);
+  }, []);
 
   useEffect(() => {
     if (error) {
@@ -43,19 +47,6 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
     }
   };
 
-  const handleZero = async () => {
-    try {
-      await api.scaleZero();
-      toast({ title: "Zero realizado" });
-    } catch (err) {
-      toast({
-        title: "Error",
-        description: "No se pudo realizar el zero",
-        variant: "destructive",
-      });
-    }
-  };
-
   const toggleUnit = () => {
     setDisplayUnit(prev => prev === "g" ? "ml" : "g");
     // Haptic feedback
@@ -64,24 +55,18 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
     }
   };
 
-  const handleSaveWeight = () => {
-    if (weight > 0) {
-      addRecord(displayWeight, displayUnit, isStable);
-      toast({ 
-        title: "Guardado", 
-        description: `Peso: ${displayWeight.toFixed(1)} ${displayUnit}` 
-      });
-      // Haptic feedback
-      if (navigator.vibrate) {
-        navigator.vibrate([30, 50, 30]);
-      }
-    }
-  };
-
   // Display weight in selected unit
   const displayWeight = displayUnit === "ml" && unit === "g" 
     ? weight // Simple 1:1 conversion for water, can be improved
     : weight;
+
+  // Format weight according to decimals preference
+  const formatWeight = (w: number) => {
+    if (decimals === 0) {
+      return Math.round(w).toString();
+    }
+    return w.toFixed(1);
+  };
 
   return (
     <div className="flex h-full flex-col bg-background p-4">
@@ -99,43 +84,43 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
 
       {/* Weight Display - Pantalla grande y clara */}
       <Card className={cn(
-        "relative mb-6 flex-1 overflow-hidden transition-smooth",
+        "relative mb-4 flex-1 overflow-hidden transition-smooth",
         isStable ? "border-success/50 glow-green" : "border-primary/30"
       )}>
         <div className="gradient-holographic absolute inset-0 opacity-30" />
         <div className="relative flex h-full flex-col items-center justify-center">
           <div className={cn(
-            "mb-4 rounded-full p-6 transition-smooth",
+            "mb-3 rounded-full p-4 transition-smooth",
             isStable ? "bg-success/20" : "bg-primary/20"
           )}>
             <Scale className={cn(
-              "h-16 w-16 transition-smooth",
+              "h-12 w-12 transition-smooth",
               isStable ? "text-success" : "text-primary animate-pulse"
             )} />
           </div>
           
           <div className={cn(
-            "mb-4 text-9xl font-bold tracking-tight transition-smooth",
+            "mb-3 min-h-[140px] flex items-center text-8xl font-bold tracking-tight transition-smooth",
             isStable ? "text-success text-glow-green" : "text-primary text-glow-cyan"
           )}>
-            {displayWeight.toFixed(1)}
+            {formatWeight(displayWeight)}
           </div>
           
           <Button
             onClick={toggleUnit}
             variant="ghost"
-            size="xl"
-            className="text-3xl"
+            size="lg"
+            className="text-2xl mb-2"
           >
             {displayUnit}
           </Button>
           
           <div className={cn(
-            "mt-4 inline-flex items-center gap-3 rounded-full px-6 py-3 text-xl font-medium transition-smooth",
+            "inline-flex items-center gap-2 rounded-full px-4 py-2 text-base font-medium transition-smooth",
             isStable ? "bg-success/20 text-success" : "bg-primary/20 text-primary"
           )}>
             <span className={cn(
-              "h-3 w-3 rounded-full",
+              "h-2 w-2 rounded-full",
               isStable ? "bg-success animate-pulse" : "bg-primary animate-pulse"
             )} />
             {isStable ? "Peso Estable" : "Estabilizando..."}
@@ -144,62 +129,27 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
       </Card>
 
       {/* Control Buttons - Botones grandes para táctil */}
-      <div className="grid grid-cols-2 gap-5 mb-5">
+      <div className="grid grid-cols-2 gap-4">
         <Button
           onClick={handleTare}
-          size="xxl"
+          size="lg"
           variant="outline"
           disabled={!isConnected}
+          className="h-16 text-xl"
         >
-          <Zap className="mr-3" />
           TARA
         </Button>
         
         <Button
-          onClick={handleZero}
-          size="xxl"
-          variant="outline"
-          disabled={!isConnected}
-        >
-          <Scale className="mr-3" />
-          ZERO
-        </Button>
-      </div>
-
-      <div className="grid grid-cols-3 gap-5">
-        <Button
           onClick={toggleUnit}
-          size="xxl"
+          size="lg"
           variant="secondary"
+          className="h-16 text-xl"
         >
-          <Droplets className="mr-3" />
+          <Droplets className="mr-2 h-6 w-6" />
           g ↔ ml
         </Button>
-
-        <Button
-          onClick={handleSaveWeight}
-          size="xxl"
-          variant="success"
-          disabled={weight === 0}
-        >
-          <Save className="mr-3" />
-          Guardar
-        </Button>
-
-        <Button
-          onClick={() => setShowHistory(true)}
-          size="xxl"
-          variant="outline"
-        >
-          <History className="mr-3" />
-          Historial
-        </Button>
       </div>
-
-      <WeightHistoryDialog 
-        open={showHistory}
-        onClose={() => setShowHistory(false)}
-      />
     </div>
   );
 };
