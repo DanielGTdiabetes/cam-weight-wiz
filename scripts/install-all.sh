@@ -601,29 +601,27 @@ else
   fail "No se encontró /etc/polkit-1/rules.d/49-nmcli.rules"
 fi
 
-BASCULA_NM_RULE_SRC="${PROJECT_ROOT}/system/os/10-bascula-nm.rules"
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  # Instalar regla polkit para NetworkManager (usuario pi)
-  if [[ -f "${BASCULA_NM_RULE_SRC}" ]]; then
-    sudo install -m 0644 "${BASCULA_NM_RULE_SRC}" /etc/polkit-1/rules.d/10-bascula-nm.rules
-    # Recargar polkit y NetworkManager para aplicar la regla
-    if systemctl is-active --quiet polkit; then
-      sudo systemctl reload polkit || true
-    else
-      sudo systemctl restart polkit || sudo systemctl restart polkitd || true
+# === NetworkManager polkit rule (usuario pi) ===
+# Instalar SIEMPRE el archivo; las recargas solo si hay systemd
+if [ -f system/os/10-bascula-nm.rules ]; then
+  echo "[install] polkit rule for NetworkManager (pi)"
+  sudo install -D -m 0644 system/os/10-bascula-nm.rules /etc/polkit-1/rules.d/10-bascula-nm.rules
+
+  # Detecta systemd
+  if [ -d /run/systemd/system ]; then
+    # Recargar polkit si existe el servicio
+    if systemctl list-unit-files | grep -q '^polkit\.service'; then
+      sudo systemctl reload polkit 2>/dev/null || true
     fi
-    sudo systemctl restart NetworkManager || sudo systemctl restart NetworkManager.service || true
+    # Reiniciar NetworkManager si está disponible
+    if systemctl list-unit-files | grep -q -E '^NetworkManager\.service'; then
+      sudo systemctl restart NetworkManager 2>/dev/null || true
+    elif systemctl list-unit-files | grep -q -E '^NetworkManager\.service'; then
+      sudo systemctl restart NetworkManager.service 2>/dev/null || true
+    fi
   else
-    warn "${BASCULA_NM_RULE_SRC} no encontrado; omitiendo instalación de regla Polkit 10-bascula-nm"
-    if systemctl is-active --quiet polkit; then
-      sudo systemctl reload polkit || true
-    else
-      sudo systemctl restart polkit || sudo systemctl restart polkitd || true
-    fi
-    sudo systemctl restart NetworkManager || sudo systemctl restart NetworkManager.service || true
+    echo "[install] systemd no disponible (chroot/imagen). La regla ya está instalada y tomará efecto al primer arranque."
   fi
-else
-  warn "systemd no disponible: omitiendo instalación de regla 10-bascula-nm y recarga de polkit/NetworkManager"
 fi
 
 if ! nmcli general status >/dev/null 2>&1; then
