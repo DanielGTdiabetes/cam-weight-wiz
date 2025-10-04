@@ -14,6 +14,7 @@ import string
 import asyncio
 import time
 import shlex
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Union, Sequence, Set
@@ -511,6 +512,38 @@ async def _cleanup_nmcli_duplicates(connection_id: str, persistent_path: Path | 
         )
 
 
+async def _export_connection_profile(connection_id: str, target_path: Path) -> Path:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(target_path.parent),
+        prefix=f".{connection_id}.",
+        suffix=".nmconnection",
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+
+    try:
+        await _run_nmcli_async(
+            _nmcli_args("con", "export", connection_id, str(tmp_path)),
+            check=True,
+        )
+        await asyncio.to_thread(os.chmod, tmp_path, 0o600)
+        await asyncio.to_thread(os.replace, tmp_path, target_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                await asyncio.to_thread(os.unlink, tmp_path)
+            except FileNotFoundError:
+                pass
+
+    await _run_nmcli_async(
+        _nmcli_args("con", "load", str(target_path)),
+        check=False,
+    )
+    return target_path
+
+
 @dataclass
 class _ClientProfileState:
     name: str
@@ -665,17 +698,13 @@ async def _create_or_update_wifi_profile(
                 target_path = NM_CONNECTIONS_DIR / profile_path.name
                 await asyncio.to_thread(os.replace, profile_path, target_path)
                 profile_path = target_path
-                await _run_nmcli_async(
-                    _nmcli_args("con", "load", str(profile_path)),
-                    check=False,
-                )
-            await asyncio.to_thread(os.chmod, profile_path, 0o600)
-            await _cleanup_nmcli_duplicates(ssid, profile_path)
-            return profile_path
+        else:
+            NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+            profile_path = NM_CONNECTIONS_DIR / f"{ssid}.nmconnection"
 
-        NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-        fallback = NM_CONNECTIONS_DIR / f"{ssid}.nmconnection"
-        return fallback
+        await _export_connection_profile(ssid, profile_path)
+        await _cleanup_nmcli_duplicates(ssid, profile_path)
+        return profile_path
     except FileNotFoundError as exc:
         raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
 

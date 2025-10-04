@@ -1211,16 +1211,10 @@ if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     warn "Servicio bascula-ap-ensure no instalado; omitiendo enable"
   fi
   if [[ "${AP_ENSURE_TIMER_INSTALLED}" -eq 1 ]]; then
-    if systemctl enable bascula-ap-ensure.timer; then
-      log "✓ Timer bascula-ap-ensure habilitado"
+    if systemctl enable --now bascula-ap-ensure.timer; then
+      log "✓ Timer bascula-ap-ensure habilitado e iniciado"
     else
-      warn "No se pudo habilitar bascula-ap-ensure.timer"
-      systemctl status bascula-ap-ensure.timer --no-pager || true
-    fi
-    if systemctl start bascula-ap-ensure.timer; then
-      log "✓ Timer bascula-ap-ensure iniciado"
-    else
-      warn "No se pudo iniciar bascula-ap-ensure.timer"
+      warn "No se pudo habilitar/iniciar bascula-ap-ensure.timer"
       systemctl status bascula-ap-ensure.timer --no-pager || true
     fi
   else
