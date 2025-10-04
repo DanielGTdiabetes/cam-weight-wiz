@@ -10,7 +10,7 @@ import { logger } from "@/services/logger";
 interface WifiNetwork {
   ssid: string;
   signal: number;
-  sec: string;
+  sec: string | null;
   in_use: boolean;
   secured: boolean;
 }
@@ -36,7 +36,12 @@ export const MiniWebConfig = () => {
   const [selectedSSID, setSelectedSSID] = useState("");
   const [password, setPassword] = useState("");
   const [isScanning, setIsScanning] = useState(false);
-  const [ui, setUi] = useState({ connecting: false, error: '' });
+  const [ui, setUi] = useState({ connecting: false });
+  const [connectionStatus, setConnectionStatus] = useState<{
+    type: 'idle' | 'error' | 'success' | 'info';
+    message: string;
+    panelUrl?: string;
+  }>({ type: 'idle', message: '' });
   const [pinInput, setPinInput] = useState("");
   const [devicePin, setDevicePin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
@@ -44,9 +49,6 @@ export const MiniWebConfig = () => {
   const { toast } = useToast();
 
   const selectedNetwork = networks.find((network) => network.ssid === selectedSSID);
-  const requiresPassword = selectedNetwork
-    ? selectedNetwork.secured ?? (selectedNetwork.sec && selectedNetwork.sec.toUpperCase() !== 'NONE')
-    : false;
 
   useEffect(() => {
     const fetchPin = async () => {
@@ -106,7 +108,7 @@ export const MiniWebConfig = () => {
   };
 
   const loadNetworks = async () => {
-    setUi((prev) => ({ ...prev, error: '' }));
+    setConnectionStatus({ type: 'idle', message: '' });
     setIsScanning(true);
     try {
       const response = await fetch('/api/miniweb/scan-networks');
@@ -116,7 +118,7 @@ export const MiniWebConfig = () => {
           const mapped = data.networks.map((net) => ({
             ssid: net.ssid,
             signal: typeof net.signal === 'number' ? net.signal : 0,
-            sec: net.sec ?? '',
+            sec: typeof net.sec === 'string' ? net.sec : null,
             in_use: Boolean(net.in_use),
             secured:
               typeof net.secured === 'boolean'
@@ -180,94 +182,113 @@ export const MiniWebConfig = () => {
   const handleConnect = async () => {
     if (!selectedSSID) {
       toast({
-        title: "Selecciona una red",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    if (requiresPassword && password.trim().length === 0) {
-      toast({
-        title: 'Ingresa la contraseña',
-        description: 'La red seleccionada requiere contraseña.',
+        title: 'Selecciona una red',
         variant: 'destructive',
       });
       return;
     }
 
-    const connectWifi = async (ssid: string, wifiPassword: string, secured: boolean) => {
+    const connectWifi = async () => {
       try {
-        console.log('[miniweb] connect', { ssid, secured, pwdLen: wifiPassword.length });
-        setUi((prev) => ({ ...prev, connecting: true, error: '' }));
+        setConnectionStatus({ type: 'idle', message: '' });
+
         const payload = {
-          ssid,
-          password: wifiPassword,
-          secured,
+          ssid: selectedNetwork?.ssid ?? selectedSSID,
+          password: selectedNetwork?.secured ? (password ?? '') : null,
+          secured: !!selectedNetwork?.secured,
+          sec: selectedNetwork?.sec ?? null,
         };
+
+        if (payload.secured && !payload.password) {
+          setConnectionStatus({ type: 'error', message: 'Falta contraseña' });
+          return;
+        }
+
+        setUi((prev) => ({ ...prev, connecting: true }));
+
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
 
         const res = await fetch('/api/miniweb/connect-wifi', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
+          signal: controller.signal,
+        }).finally(() => {
+          window.clearTimeout(timeoutId);
         });
+
         if (!res.ok) {
-          const errorBody = (await res.json().catch(() => null)) as
-            | { detail?: unknown; error?: unknown }
+          const err = (await res.json().catch(() => null)) as
+            | { detail?: unknown; message?: unknown }
             | null;
-          const detailValue =
-            typeof errorBody?.detail === 'string'
-              ? errorBody.detail
-              : typeof errorBody?.detail === 'object' && errorBody.detail !== null
+          const detail =
+            typeof err?.detail === 'string'
+              ? err.detail
+              : typeof err?.detail === 'object' && err.detail !== null
                 ? (() => {
-                    const message = (errorBody.detail as { message?: unknown }).message;
+                    const message = (err.detail as { message?: unknown }).message;
                     return typeof message === 'string' ? message : undefined;
                   })()
                 : undefined;
-          const errorMessage =
-            typeof errorBody?.error === 'string' ? errorBody.error : undefined;
-
-          throw new Error(detailValue || errorMessage || `HTTP ${res.status}`);
+          const message =
+            (typeof err?.message === 'string' ? err.message : undefined) || detail || 'Error al conectar';
+          setConnectionStatus({ type: 'error', message });
+          setUi((prev) => ({ ...prev, connecting: false }));
+          return;
         }
 
+        setConnectionStatus({ type: 'info', message: 'Conectando… verificando el estado de la red.' });
+
         const started = Date.now();
-        const timeoutMs = 60_000;
+        const timeoutMs = 30_000;
         const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
         while (Date.now() - started < timeoutMs) {
           try {
-            const st = await fetch('/api/miniweb/status', { cache: 'no-store' }).then((r) => r.json());
-            console.log('[miniweb] status', st);
-            if (st && (st.connected === true || st.ap_active === false)) {
-              const targetIp = st.ip || st.ip_address || window.location.hostname;
-              window.location.href = `http://${targetIp}:8080/`;
+            const statusResponse = await fetch('/api/miniweb/status', { cache: 'no-store' });
+            if (!statusResponse.ok) {
+              await delay(2_000);
+              continue;
+            }
+            const status = await statusResponse.json();
+            if (status?.connected === true && status?.ap_active === false) {
+              const targetIp = status.ip || status.ip_address || window.location.hostname;
+              const panelUrl = `http://${targetIp}:8080/`;
+              setConnectionStatus({
+                type: 'success',
+                message: `Conectado a ${payload.ssid}`,
+                panelUrl,
+              });
+              setUi((prev) => ({ ...prev, connecting: false }));
               return;
             }
           } catch (statusError) {
             logger.error('Failed to fetch status during connect', { error: statusError });
           }
-          await delay(1000);
+
+          await delay(2_000);
         }
-        throw new Error('Tiempo de espera agotado esperando la conexión Wi-Fi');
+
+        setConnectionStatus({
+          type: 'error',
+          message: 'No se pudo confirmar la conexión. Revisa la contraseña o acércate al router',
+        });
       } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
         logger.error('Failed to connect WiFi', { error });
-        const message = err.message || 'Error conectando a la Wi-Fi';
-        setUi((prev) => ({ ...prev, connecting: false, error: message }));
+        const isNetworkChangeError =
+          (error instanceof DOMException && error.name === 'AbortError') ||
+          (error instanceof TypeError && error.message.includes('Failed to fetch'));
+        const message = isNetworkChangeError
+          ? 'Conectando… Si pierdes esta página es normal: cambia tu Wi-Fi al punto de acceso/red seleccionada y vuelve a abrir la app.'
+          : 'Error al conectar';
+        setConnectionStatus({ type: isNetworkChangeError ? 'info' : 'error', message });
       } finally {
         setUi((prev) => ({ ...prev, connecting: false }));
       }
     };
 
-    const selectedSecured =
-      typeof selectedNetwork?.secured === 'boolean'
-        ? selectedNetwork.secured
-        : Boolean(selectedNetwork?.sec && selectedNetwork.sec.toUpperCase() !== 'NONE');
-
-    void connectWifi(
-      selectedSSID,
-      requiresPassword ? password : '',
-      selectedSecured
-    );
+    void connectWifi();
   };
 
   // PIN Entry Screen
@@ -366,10 +387,10 @@ export const MiniWebConfig = () => {
                     key={network.ssid}
                     onClick={() => {
                       setSelectedSSID(network.ssid);
+                      setConnectionStatus({ type: 'idle', message: '' });
                       if (!network.secured) {
                         setPassword('');
                       }
-                      setUi((prev) => ({ ...prev, error: '' }));
                     }}
                     className={`w-full p-4 rounded-lg border-2 text-left transition-smooth hover:bg-accent ${
                       selectedSSID === network.ssid
@@ -419,7 +440,7 @@ export const MiniWebConfig = () => {
                     value={password}
                     onChange={(e) => {
                       setPassword(e.target.value);
-                      setUi((prev) => ({ ...prev, error: '' }));
+                      setConnectionStatus({ type: 'idle', message: '' });
                     }}
                     placeholder="Ingresa la contraseña"
                     className="text-lg h-14"
@@ -427,7 +448,7 @@ export const MiniWebConfig = () => {
                   />
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    Esta red no requiere contraseña. Se conectará inmediatamente.
+                    Red abierta (sin contraseña).
                   </p>
                 )}
               </div>
@@ -438,8 +459,8 @@ export const MiniWebConfig = () => {
               onClick={handleConnect}
               variant="glow"
               size="xl"
-              className="w-full text-xl"
-              disabled={!selectedSSID || (requiresPassword && password.trim().length === 0) || ui.connecting}
+              className="w-full text-xl mx-auto"
+              disabled={!selectedSSID || ui.connecting}
             >
               {ui.connecting ? (
                 <>
@@ -454,9 +475,28 @@ export const MiniWebConfig = () => {
               )}
             </Button>
 
-            {ui.error && (
-              <div className="text-sm text-destructive text-center" role="alert">
-                {ui.error}
+            {connectionStatus.message && (
+              <div
+                className={`text-sm text-center rounded-md border px-3 py-2 ${
+                  connectionStatus.type === 'error'
+                    ? 'text-destructive border-destructive/50'
+                    : connectionStatus.type === 'success'
+                      ? 'text-emerald-600 border-emerald-500/40'
+                      : 'text-muted-foreground border-border'
+                }`}
+                role="status"
+                aria-live="polite"
+              >
+                <p>{connectionStatus.message}</p>
+                {connectionStatus.type === 'success' && connectionStatus.panelUrl && (
+                  <div className="mt-3 flex justify-center">
+                    <Button asChild variant="outline" size="sm">
+                      <a href={connectionStatus.panelUrl} target="_blank" rel="noopener noreferrer">
+                        Abrir panel
+                      </a>
+                    </Button>
+                  </div>
+                )}
               </div>
             )}
 
