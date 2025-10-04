@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# ensure-ap.sh - Ensure BasculaAP comes up when no other connectivity exists
+# bascula-ap-ensure.sh - Ensure BasculaAP comes up when no other connectivity exists
 #
 set -euo pipefail
 
