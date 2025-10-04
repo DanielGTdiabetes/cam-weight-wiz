@@ -14,6 +14,7 @@ import string
 import asyncio
 import time
 import shlex
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Union, Sequence, Set
 
@@ -510,72 +511,69 @@ async def _cleanup_nmcli_duplicates(connection_id: str, persistent_path: Path | 
         )
 
 
-async def _list_wifi_client_profiles() -> list[str]:
-    try:
-        res = await _run_nmcli_async(
-            _nmcli_args(
-                "-t",
-                "-f",
-                "NAME,TYPE,802-11-wireless.mode",
-                "con",
-                "show",
-            ),
-            check=False,
-        )
-    except FileNotFoundError:
-        raise
-
-    profiles: list[str] = []
-    seen: set[str] = set()
-    for line in (res.stdout or "").splitlines():
-        if not line:
-            continue
-        parts = line.split(":", 2)
-        if len(parts) < 3:
-            continue
-        name, conn_type, mode = parts
-        if not name or name == AP_CONNECTION_ID:
-            continue
-        if conn_type.lower() != "802-11-wireless":
-            continue
-        if mode.lower() != "infrastructure":
-            continue
-        if name in seen:
-            continue
-        seen.add(name)
-        profiles.append(name)
-    return profiles
+@dataclass
+class _ClientProfileState:
+    name: str
+    autoconnect: str  # "yes"/"no"
+    priority: str  # str numérica o ""
 
 
-async def _disable_client_profiles_temporarily(profiles: Sequence[str]) -> None:
-    for profile in profiles:
-        if not profile:
+async def _list_client_profiles_state() -> list[_ClientProfileState]:
+    cp = await _run_nmcli_async(
+        _nmcli_args(
+            "-t",
+            "-f",
+            "NAME,TYPE,AUTOCONNECT,AUTOCONNECT-PRIORITY",
+            "con",
+            "show",
+        ),
+        check=True,
+    )
+    out = (cp.stdout or "").strip().splitlines()
+    res: list[_ClientProfileState] = []
+    for line in out:
+        parts = line.split(":")
+        if len(parts) < 4:
             continue
-        await _run_nmcli_async(
-            _nmcli_args(
-                "con",
-                "modify",
-                profile,
-                "connection.autoconnect",
-                "no",
-            ),
-            check=False,
-        )
-        await _run_nmcli_async(
-            _nmcli_args(
-                "con",
-                "modify",
-                profile,
-                "connection.autoconnect-priority",
-                "0",
-            ),
-            check=False,
-        )
-        await _run_nmcli_async(
-            _nmcli_args("con", "down", profile),
-            check=False,
-            ok_codes={0, 10},
-        )
+        name, ctype, autocon, prio = parts[0], parts[1], parts[2], parts[3]
+        if ctype == "802-11-wireless" and name != AP_CONNECTION_ID:
+            res.append(
+                _ClientProfileState(
+                    name=name,
+                    autoconnect=autocon or "no",
+                    priority=prio or "0",
+                )
+            )
+    return res
+
+
+async def _down_active_wifi_clients() -> None:
+    cp = await _run_nmcli_async(
+        _nmcli_args(
+            "-t",
+            "-f",
+            "NAME,TYPE,DEVICE,STATE",
+            "con",
+            "show",
+            "--active",
+        ),
+        check=False,
+    )
+    for line in (cp.stdout or "").strip().splitlines():
+        parts = line.split(":")
+        if len(parts) < 4:
+            continue
+        name, ctype, dev, _state = parts[0], parts[1], parts[2], parts[3]
+        if ctype == "802-11-wireless" and dev == WIFI_INTERFACE and name != AP_CONNECTION_ID:
+            await _run_nmcli_async(
+                _nmcli_args("con", "down", name),
+                check=False,
+                ok_codes={0, 10},
+            )
+    await _run_nmcli_async(
+        _nmcli_args("dev", "disconnect", WIFI_INTERFACE),
+        check=False,
+    )
 
 
 async def _create_or_update_wifi_profile(
@@ -2019,17 +2017,45 @@ async def miniweb_status():
 @app.post("/api/network/enable-ap")
 async def enable_ap():
     try:
-        profiles = await _list_wifi_client_profiles()
+        prev = await _list_client_profiles_state()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
 
     try:
-        await _disable_client_profiles_temporarily(profiles)
+        await _down_active_wifi_clients()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
-    except Exception as exc:
-        LOG_NETWORK.debug("No se pudieron desactivar perfiles cliente: %s", exc)
 
+    await _run_nmcli_async(
+        _nmcli_args(
+            "con",
+            "modify",
+            AP_CONNECTION_ID,
+            "802-11-wireless.mode",
+            "ap",
+        ),
+        check=False,
+    )
+    await _run_nmcli_async(
+        _nmcli_args(
+            "con",
+            "modify",
+            AP_CONNECTION_ID,
+            "ipv4.method",
+            "shared",
+        ),
+        check=False,
+    )
+    await _run_nmcli_async(
+        _nmcli_args(
+            "con",
+            "modify",
+            AP_CONNECTION_ID,
+            "connection.interface-name",
+            WIFI_INTERFACE,
+        ),
+        check=False,
+    )
     await _run_nmcli_async(
         _nmcli_args(
             "con",
@@ -2052,21 +2078,54 @@ async def enable_ap():
     )
 
     try:
-        res = await _run_nmcli_async(
+        await _run_nmcli_async(
             _nmcli_args("con", "up", AP_CONNECTION_ID),
-            check=False,
+            check=True,
         )
+        return {"ok": True}
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
-
-    if res.returncode != 0:
-        message = (res.stderr or res.stdout or "nmcli falló al activar la AP").strip()
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "AP_ENABLE_FAILED", "message": message[:500]},
-        )
-
-    return {"ok": True}
+    except subprocess.CalledProcessError as e:
+        for st in prev:
+            await _run_nmcli_async(
+                _nmcli_args(
+                    "con",
+                    "modify",
+                    st.name,
+                    "connection.autoconnect",
+                    st.autoconnect,
+                ),
+                check=False,
+            )
+            if st.priority.isdigit():
+                await _run_nmcli_async(
+                    _nmcli_args(
+                        "con",
+                        "modify",
+                        st.name,
+                        "connection.autoconnect-priority",
+                        st.priority,
+                    ),
+                    check=False,
+                )
+        try:
+            sorted_prev = sorted(
+                prev,
+                key=lambda s: ((s.autoconnect == "yes"), int(s.priority or "0")),
+                reverse=True,
+            )
+            for s in sorted_prev:
+                if s.autoconnect == "yes":
+                    rc = await _run_nmcli_async(
+                        _nmcli_args("con", "up", s.name),
+                        check=False,
+                    )
+                    if rc.returncode == 0:
+                        break
+        except Exception:
+            pass
+        detail = (e.stderr or e.output or str(e))[:500]
+        raise HTTPException(status_code=500, detail=f"Enable AP failed: {detail}")
 
 
 @app.post("/api/network/disable-ap")
