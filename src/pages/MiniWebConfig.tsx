@@ -195,43 +195,32 @@ export const MiniWebConfig = () => {
       return;
     }
 
-    const connectWifi = async (ssid: string, wifiPassword: string) => {
+    const connectWifi = async (ssid: string, wifiPassword: string, secured: boolean) => {
       try {
-        console.log('[miniweb] click connect', { ssid, pwdLen: wifiPassword.length });
+        console.log('[miniweb] connect', { ssid, secured, pwdLen: wifiPassword.length });
         setUi((prev) => ({ ...prev, connecting: true, error: '' }));
-        console.log('[miniweb] POST /api/miniweb/connect-wifi');
         const res = await fetch('/api/miniweb/connect-wifi', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ssid, password: wifiPassword }),
+          body: JSON.stringify({ ssid, password: wifiPassword, secured }),
         });
-        let data: unknown = null;
-        try {
-          data = await res.json();
-        } catch (parseError) {
-          logger.warn('Failed to parse connect response', { parseError });
-        }
         if (!res.ok) {
-          let detailMessage: string | undefined;
-          let errorMessage: string | undefined;
-          if (data && typeof data === 'object') {
-            const responseData = data as Record<string, unknown>;
-            const detail = responseData['detail'];
-            if (typeof detail === 'string') {
-              detailMessage = detail;
-            } else if (detail && typeof detail === 'object') {
-              const detailRecord = detail as Record<string, unknown>;
-              const messageValue = detailRecord['message'];
-              if (typeof messageValue === 'string') {
-                detailMessage = messageValue;
-              }
-            }
-            const errorValue = responseData['error'];
-            if (typeof errorValue === 'string') {
-              errorMessage = errorValue;
-            }
-          }
-          throw new Error(detailMessage || errorMessage || `HTTP ${res.status}`);
+          const errorBody = (await res.json().catch(() => null)) as
+            | { detail?: unknown; error?: unknown }
+            | null;
+          const detailValue =
+            typeof errorBody?.detail === 'string'
+              ? errorBody.detail
+              : typeof errorBody?.detail === 'object' && errorBody.detail !== null
+                ? (() => {
+                    const message = (errorBody.detail as { message?: unknown }).message;
+                    return typeof message === 'string' ? message : undefined;
+                  })()
+                : undefined;
+          const errorMessage =
+            typeof errorBody?.error === 'string' ? errorBody.error : undefined;
+
+          throw new Error(detailValue || errorMessage || `HTTP ${res.status}`);
         }
 
         const started = Date.now();
@@ -263,9 +252,12 @@ export const MiniWebConfig = () => {
       }
     };
 
+    const selectedSecured = Boolean(selectedNetwork?.secured ?? requiresPassword);
+
     void connectWifi(
       selectedSSID,
-      requiresPassword ? password : ''
+      requiresPassword ? password : '',
+      selectedSecured
     );
   };
 
