@@ -224,13 +224,21 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils sox ffmpeg
         libzbar0 gpiod python3-rpi.gpio
-        network-manager dnsmasq dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+        network-manager dnsmasq-base dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
         uuid-runtime
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
         log "✓ Dependencias base instaladas"
     else
         warn "No se pudieron instalar todas las dependencias base"
+    fi
+
+    # Ensure global dnsmasq service is not running (NM will spawn its own instance)
+    if [[ "${HAS_SYSTEMD}" -eq 1 ]] && systemctl list-unit-files | grep -q '^dnsmasq\.service'; then
+        log "Deshabilitando servicio global de dnsmasq para evitar conflictos con NetworkManager"
+        systemctl stop dnsmasq 2>/dev/null || true
+        systemctl disable dnsmasq 2>/dev/null || true
+        systemctl mask dnsmasq 2>/dev/null || true
     fi
 
     ensure_pkg xorg
