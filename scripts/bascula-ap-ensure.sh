@@ -1,210 +1,170 @@
 #!/usr/bin/env bash
+#
+# Ensure the Bascula access point only comes up when there is no real connectivity
+# and at least one configured client profile is failing.
+
 set -euo pipefail
 
-LOG_TAG="bascula-ap-ensure"
-LOG_FILE="/var/log/bascula-ap.log"
-AP_NAME="BasculaAP"
-AP_SSID="Bascula-AP"
-AP_PSK="Bascula1234"
-AP_IFACE="wlan0"
+log() {
+  local msg="$1"
+  logger -t bascula-ap-ensure -- "$msg" 2>/dev/null || true
+  printf '[bascula-ap-ensure] %s\n' "$msg"
+}
+
+error_exit() {
+  local msg="$1"
+  logger -t bascula-ap-ensure -- "ERROR: $msg" 2>/dev/null || true
+  printf '[bascula-ap-ensure][err] %s\n' "$msg" >&2
+  exit 1
+}
+
+AP_NAME="${AP_NAME:-BasculaAP}"
+AP_SSID="${AP_SSID:-Bascula-AP}"
+AP_PASS_DEFAULT="Bascula1234"
+AP_PASS="${AP_PASS:-${AP_PASS_DEFAULT}}"
+AP_IFACE="${AP_IFACE:-wlan0}"
 AP_GATEWAY="192.168.4.1"
 AP_CIDR="${AP_GATEWAY}/24"
-FORCE_FLAG="/run/bascula/force_ap"
-NMCLI_BIN="/usr/bin/nmcli"
+AP_PROFILE_DIR="/etc/NetworkManager/system-connections"
 
-log_dir="$(dirname "${LOG_FILE}")"
-install -d -m 0755 "${log_dir}" 2>/dev/null || true
-touch "${LOG_FILE}" 2>/dev/null || true
+if ! command -v nmcli >/dev/null 2>&1; then
+  error_exit "nmcli requerido pero no disponible"
+fi
 
-log_msg() {
-  local level="$1"
-  shift || true
-  local msg="$*"
-  local ts
-  ts="$(date '+%Y-%m-%d %H:%M:%S')"
-  logger -t "${LOG_TAG}" -p "user.${level}" -- "${msg}" 2>/dev/null || true
-  printf '%s [%s] %s\n' "${ts}" "${level^^}" "${msg}" >>"${LOG_FILE}" 2>/dev/null || true
-}
-
-log_info() { log_msg "info" "$*"; }
-log_warn() { log_msg "warn" "$*"; }
-log_error() { log_msg "err" "$*"; }
-
-redact_nmcli_args() {
-  local -a output=()
-  local skip_next=0
-  local arg
-  for arg in "$@"; do
-    if [[ ${skip_next} -eq 1 ]]; then
-      output+=("******")
-      skip_next=0
-      continue
-    fi
-    case "${arg}" in
-      wifi-sec.psk|802-11-wireless-security.psk|password|psk)
-        output+=("${arg}")
-        skip_next=1
-        continue
-        ;;
-      wifi-sec.psk=*|802-11-wireless-security.psk=*|password=*|psk=*)
-        output+=("${arg%%=*}=******")
-        continue
-        ;;
-    esac
-    output+=("${arg}")
-  done
-  if ((${#output[@]} == 0)); then
-    printf '%s' ""
-    return
-  fi
-  printf -v _nmcli_safe '%q ' "${output[@]}"
-  printf '%s' "${_nmcli_safe% }"
-}
-
-run_nmcli() {
-  local -a cmd=("${NMCLI_BIN}" "$@")
-  local safe
-  safe="$(redact_nmcli_args "${cmd[@]}")"
-  if ! "${cmd[@]}" >/dev/null 2>&1; then
-    local rc=$?
-    log_warn "nmcli fallo rc=${rc}: ${safe}"
-    return ${rc}
-  fi
-  log_info "nmcli ok: ${safe}"
-  return 0
-}
-
-nmcli_available() {
-  [[ -x "${NMCLI_BIN}" ]]
-}
-
-has_real_connectivity() {
-  if nmcli_available; then
-    local status
-    status="$(${NMCLI_BIN} -g CONNECTIVITY general status 2>/dev/null || true)"
-    if [[ "${status,,}" == "full" ]]; then
+real_connectivity() {
+  local status
+  status=$(nmcli networking connectivity check 2>/dev/null || echo "unknown")
+  case "${status,,}" in
+    full|portal)
       return 0
-    fi
+      ;;
+  esac
+
+  if ping -q -c 1 -W 3 1.1.1.1 >/dev/null 2>&1; then
+    return 0
   fi
-  if ping -q -c1 -W3 8.8.8.8 >/dev/null 2>&1; then
-    if getent ahostsv4 google.com >/dev/null 2>&1; then
-      return 0
-    fi
+
+  if getent ahostsv4 debian.org >/dev/null 2>&1; then
+    return 0
   fi
+
   return 1
 }
 
-ap_is_active() {
-  ${NMCLI_BIN} -t -f NAME connection show --active 2>/dev/null | grep -Fxq "${AP_NAME}"
+list_client_profiles() {
+  nmcli -t --separator '|' -f NAME,TYPE,802-11-wireless.mode,AUTOCONNECT connection show 2>/dev/null |
+    awk -F'|' -v ap="${AP_NAME}" 'tolower($2)=="802-11-wireless" && tolower($3)=="infrastructure" && $1!=ap {print $1 "|" $4}'
 }
 
 ensure_ap_profile() {
-  if ! nmcli_available; then
-    log_error "nmcli no disponible"
-    return 1
-  fi
+  install -d -m 0755 "${AP_PROFILE_DIR}"
 
-  if ! ${NMCLI_BIN} -t -f NAME connection show "${AP_NAME}" >/dev/null 2>&1; then
-    log_info "Creando perfil AP ${AP_NAME}"
-    run_nmcli con add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" || true
+  if ! nmcli -t -f NAME connection show "${AP_NAME}" >/dev/null 2>&1; then
+    nmcli connection add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" \
+      ipv4.method shared ipv4.addresses "${AP_CIDR}" ipv4.gateway "${AP_GATEWAY}" \
+      802-11-wireless.mode ap wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || \
+      error_exit "No se pudo crear el perfil ${AP_NAME}"
   else
-    log_info "Perfil AP ${AP_NAME} encontrado, actualizando"
+    nmcli connection modify "${AP_NAME}" 802-11-wireless.mode ap \
+      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || true
   fi
 
-  run_nmcli con modify "${AP_NAME}" 802-11-wireless.ssid "${AP_SSID}" || true
-  run_nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap || true
-  run_nmcli con modify "${AP_NAME}" 802-11-wireless.band bg || true
-  run_nmcli con modify "${AP_NAME}" 802-11-wireless.channel 6 || true
-  run_nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk || true
-  run_nmcli con modify "${AP_NAME}" wifi-sec.proto rsn || true
-  run_nmcli con modify "${AP_NAME}" wifi-sec.pmf 1 || run_nmcli con modify "${AP_NAME}" 802-11-wireless-security.pmf 1 || true
-  run_nmcli con modify "${AP_NAME}" wifi-sec.psk "${AP_PSK}" || true
-  run_nmcli con modify "${AP_NAME}" ipv4.method shared || true
-  run_nmcli con modify "${AP_NAME}" ipv4.addresses "${AP_CIDR}" || true
-  run_nmcli con modify "${AP_NAME}" ipv4.gateway "${AP_GATEWAY}" || true
-  run_nmcli con modify "${AP_NAME}" ipv4.dns "" || true
-  run_nmcli con modify "${AP_NAME}" ipv4.never-default yes || true
-  run_nmcli con modify "${AP_NAME}" connection.interface-name "${AP_IFACE}" || true
-  run_nmcli con modify "${AP_NAME}" connection.autoconnect no || true
-  run_nmcli con modify "${AP_NAME}" connection.autoconnect-priority 0 || true
-  run_nmcli con modify "${AP_NAME}" ipv6.method ignore || true
+  nmcli connection modify "${AP_NAME}" \
+    connection.autoconnect no \
+    connection.autoconnect-priority 0 \
+    connection.interface-name "${AP_IFACE}" \
+    802-11-wireless.band bg \
+    ipv4.method shared \
+    ipv4.addresses "${AP_CIDR}" \
+    ipv4.gateway "${AP_GATEWAY}" \
+    ipv4.never-default yes \
+    ipv6.method ignore >/dev/null 2>&1 || true
 }
 
-disable_client_connections() {
-  local -a active
-  mapfile -t active < <(${NMCLI_BIN} -t -f NAME,DEVICE connection show --active 2>/dev/null || true)
-  local entry name device
-  for entry in "${active[@]}"; do
-    [[ -z "${entry}" ]] && continue
-    name="${entry%%:*}"
-    device="${entry##*:}"
-    [[ "${device}" != "${AP_IFACE}" ]] && continue
-    [[ "${name}" == "${AP_NAME}" ]] && continue
-    log_info "Desactivando conexión cliente ${name} en ${device}"
-    run_nmcli con down "${name}" || true
-  done
-  log_info "Desconectando dispositivo ${AP_IFACE}"
-  run_nmcli dev disconnect "${AP_IFACE}" || true
-}
-
-restart_miniweb() {
-  if command -v systemctl >/dev/null 2>&1; then
-    if systemctl restart bascula-miniweb >/dev/null 2>&1; then
-      log_info "Servicio bascula-miniweb reiniciado"
-    else
-      log_warn "No se pudo reiniciar bascula-miniweb"
+activate_client_profiles() {
+  local profile autocon
+  while IFS='|' read -r profile autocon; do
+    [[ -z "${profile}" ]] && continue
+    if real_connectivity; then
+      return 0
     fi
-  else
-    log_warn "systemctl no disponible para reiniciar miniweb"
+    if [[ "${autocon}" != "yes" ]]; then
+      continue
+    fi
+    log "Intentando activar perfil Wi-Fi '${profile}'"
+    nmcli connection up "${profile}" >/dev/null 2>&1 || true
+    sleep 5
+    if real_connectivity; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+count_failing_profiles() {
+  local profile autocon failures=0 total=0 active
+  mapfile -t active < <(nmcli -t --separator '|' -f NAME connection show --active 2>/dev/null || true)
+  while IFS='|' read -r profile autocon; do
+    [[ -z "${profile}" ]] && continue
+    [[ "${autocon}" != "yes" ]] && continue
+    (( total++ ))
+    local is_active=0
+    for entry in "${active[@]}"; do
+      [[ "${entry}" == "${profile}" ]] && { is_active=1; break; }
+    done
+    if (( is_active == 0 )); then
+      (( failures++ ))
+    fi
+  done
+
+  if (( failures == 0 && total > 0 )); then
+    failures=${total}
   fi
+
+  echo "${failures}"
 }
 
 main() {
-  log_info "=== Ejecutando ensure AP ==="
+  nmcli radio wifi on >/dev/null 2>&1 || true
 
-  iw reg set ES >/dev/null 2>&1 || log_warn "No se pudo fijar dominio regulatorio ES"
-  rfkill unblock wifi >/dev/null 2>&1 || log_warn "No se pudo desbloquear rfkill"
-  if nmcli_available; then
-    run_nmcli radio wifi on || true
-  else
-    log_error "nmcli no disponible; abortando"
-    return 1
+  if real_connectivity; then
+    log "Conectividad detectada; no se activa AP"
+    exit 0
   fi
 
-  local force_ap=0
-  if [[ -f "${FORCE_FLAG}" ]]; then
-    force_ap=1
-    log_info "Flag force_ap detectado; mantener AP forzado"
+  mapfile -t client_profiles < <(list_client_profiles)
+
+  if (( ${#client_profiles[@]} == 0 )); then
+    log "Sin perfiles Wi-Fi cliente configurados; no se activa AP"
+    exit 0
   fi
 
-  if has_real_connectivity; then
-    log_info "Conectividad real detectada"
-    if (( force_ap )); then
-      log_info "force_ap activo: se preserva el AP"
-      return 0
-    fi
-    if ap_is_active; then
-      log_info "Desactivando AP por conectividad existente"
-      run_nmcli con down "${AP_NAME}" || true
-      run_nmcli dev disconnect "${AP_IFACE}" || true
-    else
-      log_info "AP ya inactivo"
-    fi
-    return 0
+  printf '%s\n' "${client_profiles[@]}" | activate_client_profiles || true
+
+  if real_connectivity; then
+    log "Conectividad restaurada tras reintentar perfiles cliente"
+    exit 0
   fi
 
-  log_info "Sin conectividad real; asegurando AP"
+  local failures
+  failures=$(printf '%s\n' "${client_profiles[@]}" | count_failing_profiles)
+
+  if [[ -z "${failures}" || "${failures}" == "0" ]]; then
+    log "No hay perfiles cliente fallando; no se activa AP"
+    exit 0
+  fi
+
   ensure_ap_profile
-  disable_client_connections
 
-  if run_nmcli con up "${AP_NAME}"; then
-    log_info "${AP_NAME} activo en ${AP_IFACE} (${AP_CIDR})"
-    restart_miniweb
-    return 0
+  nmcli device disconnect "${AP_IFACE}" >/dev/null 2>&1 || true
+  nmcli connection down "${AP_NAME}" >/dev/null 2>&1 || true
+
+  if nmcli connection up "${AP_NAME}" >/dev/null 2>&1; then
+    log "${AP_NAME} activo en ${AP_IFACE} (${AP_CIDR})"
+    exit 0
   fi
 
-  log_error "No se pudo activar ${AP_NAME}"
-  return 1
+  error_exit "Fallo al activar ${AP_NAME}"
 }
 
 main "$@"
