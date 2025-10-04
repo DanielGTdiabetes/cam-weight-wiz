@@ -1,0 +1,14 @@
+// Permitir a 'pi' gestionar NetworkManager sin prompt en el dispositivo
+// Colocar en: /etc/polkit-1/rules.d/10-bascula-nm.rules
+polkit.addRule(function(action, subject) {
+  if (subject.user === "pi") {
+    // Permisos amplios de NM en equipo dedicado (kiosco)
+    if (action.id.startsWith("org.freedesktop.NetworkManager.")) {
+      return polkit.Result.YES;
+    }
+    // Permitir modificar conexiones del sistema
+    if (action.id.startsWith("org.freedesktop.NetworkManager.settings.")) {
+      return polkit.Result.YES;
+    }
+  }
+});
