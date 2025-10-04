@@ -592,32 +592,30 @@ async def _create_or_update_wifi_profile(
         )
         await _cleanup_nmcli_duplicates(ssid, None)
 
-        await _run_nmcli_async(
-            _nmcli_args(
-                "con",
-                "add",
-                "type",
-                "wifi",
-                "ifname",
-                WIFI_INTERFACE,
-                "con-name",
-                ssid,
-                "ssid",
-                ssid,
-            )
-        )
-
+        add_args = [
+            "con",
+            "add",
+            "type",
+            "wifi",
+            "ifname",
+            WIFI_INTERFACE,
+            "con-name",
+            ssid,
+            "ssid",
+            ssid,
+            "ipv4.method",
+            "auto",
+        ]
         if secured:
-            await _run_nmcli_async(
-                _nmcli_args("con", "modify", ssid, "wifi-sec.key-mgmt", "wpa-psk")
-            )
-            await _run_nmcli_async(
-                _nmcli_args("con", "modify", ssid, "wifi-sec.psk", password or "")
+            add_args.extend(
+                ["wifi-sec.key-mgmt", "wpa-psk", "wifi-sec.psk", password or ""]
             )
         else:
-            await _run_nmcli_async(
-                _nmcli_args("con", "modify", ssid, "wifi-sec.key-mgmt", "none")
-            )
+            add_args.extend(["wifi-sec.key-mgmt", "none"])
+
+        await _run_nmcli_async(_nmcli_args(*add_args))
+
+        if not secured:
             await _run_nmcli_async(
                 _nmcli_args("con", "modify", ssid, "wifi-sec.psk", "")
             )
@@ -631,7 +629,7 @@ async def _create_or_update_wifi_profile(
                 "modify",
                 ssid,
                 "connection.autoconnect-priority",
-                "120",
+                "200",
             )
         )
         await _run_nmcli_async(
@@ -643,15 +641,41 @@ async def _create_or_update_wifi_profile(
             )
         )
 
-        NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
-        target = NM_CONNECTIONS_DIR / f"{ssid}.nmconnection"
-        await _run_nmcli_async(
-            _nmcli_args("con", "export", ssid, str(target))
+        profile_path: Optional[Path] = None
+        res_filename = await _run_nmcli_async(
+            _nmcli_args(
+                "-g",
+                "connection.filename",
+                "con",
+                "show",
+                ssid,
+            ),
+            check=False,
         )
-        await _run_nmcli_async(["/bin/chmod", "600", str(target)], check=False)
-        await _run_nmcli_async(_nmcli_args("con", "load", str(target)))
-        await _cleanup_nmcli_duplicates(ssid, target)
-        return target
+        if res_filename.returncode == 0:
+            for line in (res_filename.stdout or "").splitlines():
+                candidate = line.strip()
+                if candidate:
+                    profile_path = Path(candidate)
+                    break
+
+        if profile_path and profile_path.exists():
+            if not str(profile_path).startswith(str(NM_CONNECTIONS_DIR)):
+                NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+                target_path = NM_CONNECTIONS_DIR / profile_path.name
+                await asyncio.to_thread(os.replace, profile_path, target_path)
+                profile_path = target_path
+                await _run_nmcli_async(
+                    _nmcli_args("con", "load", str(profile_path)),
+                    check=False,
+                )
+            await asyncio.to_thread(os.chmod, profile_path, 0o600)
+            await _cleanup_nmcli_duplicates(ssid, profile_path)
+            return profile_path
+
+        NM_CONNECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+        fallback = NM_CONNECTIONS_DIR / f"{ssid}.nmconnection"
+        return fallback
     except FileNotFoundError as exc:
         raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
 
@@ -1336,7 +1360,7 @@ def ensure_ap_profile() -> None:
             "connection.autoconnect",
             "no",
             "connection.autoconnect-priority",
-            "-999",
+            "0",
             "connection.interface-name",
             WIFI_INTERFACE,
             "802-11-wireless.mode",
@@ -2020,6 +2044,13 @@ async def enable_ap():
         prev = await _list_client_profiles_state()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+
+    try:
+        await asyncio.to_thread(ensure_ap_profile)
+    except PermissionError as exc:
+        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     try:
         await _down_active_wifi_clients()
