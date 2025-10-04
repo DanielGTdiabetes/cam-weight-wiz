@@ -117,7 +117,7 @@ hdmi_cvt=1024 600 60 6 0 0 0
 Si no hay red WiFi al arrancar, el sistema activa automáticamente:
 
 **SSID:** `Bascula-AP`  
-**Password:** `bascula2025`  
+**Password:** `Bascula1234`
 **URL:** `http://192.168.4.1:8080`
 
 Configura desde la mini-web y reinicia.

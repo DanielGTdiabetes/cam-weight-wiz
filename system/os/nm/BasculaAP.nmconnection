@@ -14,11 +14,10 @@ band=bg
 
 [wifi-security]
 key-mgmt=wpa-psk
-psk=bascula2025
+psk=Bascula1234
 
 [ipv4]
 address1=192.168.4.1/24
-dns=1.1.1.1;8.8.8.8;
 gateway=192.168.4.1
 method=shared
 

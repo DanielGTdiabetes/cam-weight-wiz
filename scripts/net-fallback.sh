@@ -11,7 +11,7 @@ log() { logger -t bascula-net-fallback "$*"; }
 
 # Configuración
 AP_SSID="${AP_SSID:-Bascula-AP}"
-AP_PASS="${AP_PASS:-bascula2025}"
+AP_PASS="${AP_PASS:-Bascula1234}"
 AP_IFACE="${AP_IFACE:-wlan0}"
 AP_NAME="${AP_NAME:-BasculaAP}"
 AP_GATEWAY="${AP_GATEWAY:-192.168.4.1}"
@@ -81,7 +81,8 @@ create_ap_profile() {
     ipv4.method shared \
     ipv4.addresses "${AP_GATEWAY}/24" \
     ipv4.gateway "${AP_GATEWAY}" \
-    ipv4.dns "${AP_GATEWAY}" \
+    ipv4.never-default yes \
+    -ipv4.dns \
     ipv6.method ignore 2>/dev/null; then
     return 1
   fi

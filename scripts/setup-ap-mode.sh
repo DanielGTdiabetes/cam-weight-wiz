@@ -43,7 +43,7 @@ macaddr_acl=0
 auth_algs=1
 ignore_broadcast_ssid=0
 wpa=2
-wpa_passphrase=bascula2025
+wpa_passphrase=Bascula1234
 wpa_key_mgmt=WPA-PSK
 wpa_pairwise=TKIP
 rsn_pairwise=CCMP
@@ -78,7 +78,7 @@ sudo systemctl disable dnsmasq
 
 echo "✅ Modo AP configurado"
 echo "📡 SSID: Bascula-AP"
-echo "🔐 Password: bascula2025"
+echo "🔐 Password: Bascula1234"
 echo "📍 IP: 192.168.4.1"
 echo ""
 echo "⚠️  Los servicios NO se inician automáticamente"
