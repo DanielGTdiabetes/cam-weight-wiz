@@ -5,6 +5,9 @@ import os
 import json
 import logging
 import subprocess
+import socket
+import fcntl
+import struct
 import ipaddress
 import random
 import string
@@ -56,6 +59,7 @@ CFG_DIR.mkdir(parents=True, exist_ok=True)
 # ---------- Estado global ----------
 ScaleServiceType = Union[HX711Service, SerialScaleService]
 scale_service: Optional[ScaleServiceType] = None
+_LAST_AP_ACTION_TS = 0.0
 
 # ---------- Modelos ----------
 class CalibrationPayload(BaseModel):
@@ -227,24 +231,32 @@ def _init_scale_service() -> ScaleServiceType:
     return service
 
 
-def get_iface_ip(ifname: str) -> Optional[str]:
+def _iface_has_carrier(ifname: str) -> bool:
     try:
-        out = subprocess.check_output(["ip", "-4", "addr", "show", ifname], text=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
+        with open(f"/sys/class/net/{ifname}/carrier", "r") as f:
+            return f.read().strip() == "1"
+    except Exception:
+        return False
+
+
+def _get_iface_ip(ifname: str) -> str | None:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        return socket.inet_ntoa(
+            fcntl.ioctl(
+                s.fileno(),
+                0x8915,
+                struct.pack('256s', ifname[:15].encode()),
+            )[20:24]
+        )
     except Exception:
         return None
-
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("inet "):
-            ip = line.split()[1].split("/")[0]
-            return ip
-    return None
+    finally:
+        s.close()
 
 
-def _get_iface_ip(iface: str) -> Optional[str]:
-    return get_iface_ip(iface)
+def get_iface_ip(ifname: str) -> Optional[str]:
+    return _get_iface_ip(ifname)
 
 
 def _nmcli_available() -> bool:
@@ -258,46 +270,12 @@ def _nmcli(args: List[str], timeout: int = 15) -> subprocess.CompletedProcess:
 
 
 def wifi_connected() -> bool:
-    try:
-        res = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"], timeout=5)
-    except FileNotFoundError:
-        return False
-    except Exception:
-        return False
-
-    if res.returncode != 0:
-        return False
-
-    for line in res.stdout.strip().splitlines():
-        if not line:
-            continue
-        parts = line.split(":")
-        if len(parts) < 3:
-            continue
-        name, conn_type, device = parts[0], parts[1], parts[2]
-        if conn_type != "802-11-wireless" or device != WIFI_INTERFACE:
-            continue
-        if name == AP_CONNECTION_ID:
-            continue
-        try:
-            mode_res = _nmcli(["-t", "-f", "802-11-wireless.mode", "con", "show", name], timeout=5)
-            if mode_res.returncode == 0:
-                mode_value = mode_res.stdout.strip().split(":")[-1].strip().lower()
-                if mode_value == "ap":
-                    continue
-        except Exception:
-            pass
-        return True
-    return False
+    return _wifi_client_connected()
 
 
 def ethernet_carrier(ifname: str = "eth0") -> bool:
-    carrier_path = Path(f"/sys/class/net/{ifname}/carrier")
-    try:
-        if carrier_path.exists():
-            return carrier_path.read_text().strip() == "1"
-    except Exception:
-        pass
+    if _iface_has_carrier(ifname):
+        return True
 
     try:
         res = _nmcli(["-t", "-f", "DEVICE,TYPE,STATE", "device", "status"], timeout=5)
@@ -321,6 +299,52 @@ def ethernet_carrier(ifname: str = "eth0") -> bool:
         if dev_type == "ethernet" and state.startswith("connected"):
             return True
     return False
+
+
+def _wifi_client_connected() -> bool:
+    try:
+        res = _nmcli(["-t", "-f", "DEVICE,TYPE,STATE", "device"])
+    except Exception:
+        return False
+    if res.returncode != 0:
+        return False
+    for line in res.stdout.splitlines():
+        dev, typ, st = (line.split(":") + ["", "", ""])[:3]
+        if dev == WIFI_INTERFACE and typ == "wifi" and st.lower() == "connected":
+            return True
+    return False
+
+
+def _ap_active() -> bool:
+    try:
+        res = _nmcli(["-t", "-f", "NAME,TYPE,ACTIVE", "connection", "show", "--active"])
+    except Exception:
+        return False
+    if res.returncode != 0:
+        return False
+    for line in res.stdout.splitlines():
+        name, typ, active = (line.split(":") + ["", "", ""])[:3]
+        if name == AP_CONNECTION_ID and typ == "802-11-wireless" and active.lower() == "yes":
+            return True
+    return False
+
+
+def _bring_up_ap(debounce_sec: float = 30.0) -> bool:
+    global _LAST_AP_ACTION_TS
+    now = time.time()
+    if now - _LAST_AP_ACTION_TS < debounce_sec:
+        return False
+    if _iface_has_carrier("eth0") or _wifi_client_connected():
+        return False
+    if _ap_active():
+        return False
+    _LAST_AP_ACTION_TS = now
+    try:
+        ensure_ap_profile()
+    except Exception:
+        pass
+    _nmcli(["connection", "up", AP_CONNECTION_ID])
+    return True
 
 
 def set_autoconnect(name: str, yes_no: bool, priority: int) -> None:
@@ -374,24 +398,10 @@ def _is_ap_mode_legacy() -> bool:
 
 def _is_ap_active() -> bool:
     try:
-        res = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "con", "show", "--active"], timeout=5)
-    except FileNotFoundError:
-        return _is_ap_mode_legacy()
-    except Exception:
-        return _is_ap_mode_legacy()
-
-    if res.returncode != 0:
-        return _is_ap_mode_legacy()
-
-    for line in res.stdout.strip().splitlines():
-        if not line:
-            continue
-        parts = line.split(":")
-        if len(parts) < 3:
-            continue
-        name, conn_type, device = parts[0], parts[1], parts[2]
-        if name == AP_CONNECTION_ID and conn_type == "802-11-wireless" and device == WIFI_INTERFACE:
+        if _ap_active():
             return True
+    except Exception:
+        pass
     return _is_ap_mode_legacy()
 
 
@@ -874,21 +884,11 @@ async def close_scale() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Solo levantar AP en frío si procede
     try:
-        if not ethernet_carrier() and not wifi_connected():
-            try:
-                ensure_ap_profile()
-            except Exception:
-                pass
-            try:
-                await asyncio.to_thread(bring_up, AP_CONNECTION_ID, WIFI_INTERFACE, 20)
-                LOG_NETWORK.info("BasculaAP activada automáticamente (sin red disponible)")
-            except PermissionError:
-                LOG_NETWORK.debug("nmcli no disponible para activar BasculaAP automáticamente")
-            except Exception as exc:
-                LOG_NETWORK.warning("No se pudo activar BasculaAP automáticamente: %s", exc)
+        _bring_up_ap(debounce_sec=30.0)
     except Exception as exc:
-        LOG_NETWORK.debug("No se pudo evaluar el estado de red inicial: %s", exc)
+        LOG_SCALE.warning("No se pudo activar AP en arranque: %s", exc)
 
     await init_scale()
     yield
@@ -1153,14 +1153,9 @@ async def miniweb_status():
 @app.post("/api/network/enable-ap")
 async def enable_ap():
     try:
-        ensure_ap_profile()
-        set_autoconnect(AP_CONNECTION_ID, True, 100)
-        bring_up(AP_CONNECTION_ID, WIFI_INTERFACE, timeout=20)
-        return {"success": True}
-    except PermissionError as exc:
-        if str(exc) == "NMCLI_NOT_AVAILABLE":
-            raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
-        raise HTTPException(status_code=403, detail="Permisos insuficientes para habilitar AP") from exc
+        # Desactiva autoconnect de Wi-Fi cliente si procede (opcional)
+        _bring_up_ap(debounce_sec=0.0)
+        return {"success": True, "ap_active": _ap_active()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"AP error: {exc}") from exc
 
@@ -1168,16 +1163,27 @@ async def enable_ap():
 @app.post("/api/network/disable-ap")
 async def disable_ap():
     try:
-        set_autoconnect(AP_CONNECTION_ID, False, 0)
-        _disconnect_connection(AP_CONNECTION_ID)
-        return {"success": True}
+        res = _nmcli(["connection", "down", AP_CONNECTION_ID])
+        if res.returncode not in (0, 10):
+            raise RuntimeError((res.stderr or res.stdout).strip())
+        return {"success": True, "ap_active": _ap_active()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"AP disable error: {exc}") from exc
 
 
 @app.get("/api/network/status")
 async def network_status():
-    return await miniweb_status()
+    eth_up = _iface_has_carrier("eth0")
+    ip_eth = _get_iface_ip("eth0")
+    ip_wlan = _get_iface_ip(WIFI_INTERFACE)
+    status = {
+        "ethernet": {"carrier": eth_up, "ip": ip_eth},
+        "wifi_client": {"connected": _wifi_client_connected(), "ip": ip_wlan},
+        "ap": {"active": _ap_active(), "ssid": AP_DEFAULT_SSID},
+    }
+    best_ip = ip_eth or ip_wlan or "192.168.12.1"
+    status["bascula_url"] = f"http://{best_ip}:8080"
+    return status
 
 
 # ====== (opcional) WebSocket y tare/zero/scale como ya estaban si aplica ======
