@@ -317,13 +317,15 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         warn "No se pudieron instalar todas las dependencias base"
     fi
 
-    # Ensure global dnsmasq service is not running (NM will spawn its own instance)
-    if [[ "${HAS_SYSTEMD}" -eq 1 ]] && systemctl list-unit-files | grep -q '^dnsmasq\.service'; then
-        log "Deshabilitando servicio global de dnsmasq para evitar conflictos con NetworkManager"
-        systemctl stop dnsmasq 2>/dev/null || true
-        systemctl disable dnsmasq 2>/dev/null || true
-        systemctl mask dnsmasq 2>/dev/null || true
-    fi
+    # Ensure global dnsmasq daemon is never installed/active (only dnsmasq-base needed)
+    log "Asegurando que dnsmasq global no esté activo..."
+    systemctl stop dnsmasq 2>/dev/null || true
+    systemctl disable dnsmasq 2>/dev/null || true
+    systemctl mask dnsmasq 2>/dev/null || true
+    apt-get -y purge dnsmasq 2>/dev/null || true
+    # Install only dnsmasq-base (library for NetworkManager)
+    ensure_pkg dnsmasq-base
+    log "✓ dnsmasq-base instalado (dnsmasq global removido)"
 
     ensure_pkg xorg
     ensure_pkg xinit
@@ -731,11 +733,12 @@ if [ -f system/os/nm/BasculaAP.nmconnection ]; then
   if command -v nmcli >/dev/null 2>&1; then
     nmcli connection load "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" >/dev/null 2>&1 || true
     if ! nmcli connection modify "${AP_NAME}" \
-      connection.autoconnect no \
+      connection.autoconnect yes \
       connection.autoconnect-priority -999 \
       connection.interface-name "${AP_IFACE}" \
       802-11-wireless.mode ap \
       802-11-wireless.band bg \
+      802-11-wireless.channel 6 \
       802-11-wireless.ssid "${AP_SSID}" \
       ipv4.method shared \
       ipv4.addresses "${AP_GATEWAY}/24" \
@@ -802,24 +805,21 @@ fi
 # Desactivar autoconnect en TODAS las Wi-Fi de infraestructura, excepto BasculaAP
 # (Evita que NM tumbe la AP por una Wi-Fi antigua)
 if command -v nmcli >/dev/null 2>&1; then
-  # Recorremos por UUID para evitar problemas con NAMES con espacios/:“:”
+  log "Desactivando autoconnect de conexiones Wi-Fi heredadas..."
   while IFS= read -r UUID; do
-    [ -z "$UUID" ] && continue
+    [[ -z "${UUID}" ]] && continue
 
-    NAME="$(nmcli -g connection.id connection show "$UUID" 2>/dev/null || true)"
-    TYPE="$(nmcli -g connection.type connection show "$UUID" 2>/dev/null || true)"
+    TYPE="$(nmcli -t -g connection.type connection show "${UUID}" 2>/dev/null || true)"
+    MODE="$(nmcli -t -g 802-11-wireless.mode connection show "${UUID}" 2>/dev/null || true)"
+    NAME="$(nmcli -t -g connection.id connection show "${UUID}" 2>/dev/null || true)"
 
-    # Saltar perfiles no Wi-Fi y la propia BasculaAP
-    if [ "$TYPE" != "802-11-wireless" ] || [ "$NAME" = "BasculaAP" ]; then
-      continue
+    # Skip non-WiFi profiles and BasculaAP itself
+    if [[ "${TYPE}" == "802-11-wireless" ]] && [[ "${MODE}" != "ap" ]] && [[ "${NAME}" != "BasculaAP" ]]; then
+      log "  Desactivando autoconnect: ${NAME} (${UUID})"
+      nmcli connection modify "${UUID}" connection.autoconnect no connection.autoconnect-priority 0 || true
     fi
-
-    MODE="$(nmcli -g 802-11-wireless.mode connection show "$UUID" 2>/dev/null || true)"
-    # Si no es AP (es cliente/infrastructure), desactiva autoconnect
-    if [ "$MODE" != "ap" ]; then
-      nmcli connection modify "$UUID" connection.autoconnect no connection.autoconnect-priority 0 || true
-    fi
-  done < <(nmcli -t -f UUID connection show 2>/dev/null | sed 's/^UUID://')
+  done < <(nmcli -t -g UUID connection show 2>/dev/null | sed '/^$/d')
+  log "✓ Autoconnect desactivado en perfiles Wi-Fi heredados"
 fi
 
 # Nota: La UI, al conectar a una nueva Wi-Fi, deberá:
@@ -1183,6 +1183,24 @@ install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
 systemctl_safe daemon-reload
 systemctl_safe enable --now bascula-miniweb.service
 log "✓ Mini-web backend configurado"
+
+# Install AP ensure service and script
+log "[17a/20] Configurando servicio de arranque de AP..."
+if [[ -f "${SCRIPT_DIR}/ensure-ap.sh" ]]; then
+  install -m 0755 "${SCRIPT_DIR}/ensure-ap.sh" /usr/local/sbin/ensure-ap.sh
+  log "✓ Script ensure-ap.sh instalado"
+else
+  warn "No se encontró ${SCRIPT_DIR}/ensure-ap.sh"
+fi
+
+if [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" ]]; then
+  install -m 0644 "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
+  systemctl_safe daemon-reload
+  systemctl_safe enable bascula-ap-ensure.service
+  log "✓ Servicio bascula-ap-ensure configurado"
+else
+  warn "No se encontró systemd/bascula-ap-ensure.service"
+fi
 
 # Setup UI kiosk service
 log "[18/20] Configurando servicio UI kiosk..."

@@ -716,17 +716,48 @@ def _wifi_client_connected() -> bool:
 
 
 def _ap_active() -> bool:
+    """Check if BasculaAP is active and properly configured as AP mode."""
     try:
-        res = _nmcli(["-t", "-f", "NAME,TYPE,ACTIVE", "connection", "show", "--active"])
+        # Check active connections
+        res = _nmcli(["-t", "-f", "NAME,TYPE,DEVICE", "connection", "show", "--active"], timeout=5)
+        if res.returncode != 0:
+            return False
+
+        ap_is_active = False
+        for line in res.stdout.splitlines():
+            parts = line.split(":")
+            if len(parts) < 3:
+                continue
+            name, typ, device = parts[0], parts[1], parts[2]
+            if name == AP_CONNECTION_ID and typ == "802-11-wireless" and device == WIFI_INTERFACE:
+                ap_is_active = True
+                break
+
+        if not ap_is_active:
+            return False
+
+        # Verify it's actually in AP mode and has correct IP
+        try:
+            mode_res = _nmcli(["-t", "-g", "802-11-wireless.mode", "connection", "show", AP_CONNECTION_ID], timeout=5)
+            if mode_res.returncode == 0:
+                mode = (mode_res.stdout or "").strip()
+                if mode != "ap":
+                    return False
+
+            ip_res = _nmcli(["-t", "-g", "IP4.ADDRESS", "device", "show", WIFI_INTERFACE], timeout=5)
+            if ip_res.returncode == 0:
+                ip_line = (ip_res.stdout or "").strip().split("\n")[0] if ip_res.stdout else ""
+                if ip_line:
+                    ip = ip_line.split("/")[0]
+                    # Should be 192.168.4.1
+                    if not ip.startswith("192.168.4."):
+                        return False
+        except Exception:
+            pass
+
+        return True
     except Exception:
         return False
-    if res.returncode != 0:
-        return False
-    for line in res.stdout.splitlines():
-        name, typ, active = (line.split(":") + ["", "", ""])[:3]
-        if name == AP_CONNECTION_ID and typ == "802-11-wireless" and active.lower() == "yes":
-            return True
-    return False
 
 
 def _bring_up_ap(debounce_sec: float = 30.0) -> bool:
@@ -741,10 +772,45 @@ def _bring_up_ap(debounce_sec: float = 30.0) -> bool:
     _LAST_AP_ACTION_TS = now
     try:
         ensure_ap_profile()
-    except Exception:
-        pass
-    _nmcli(["connection", "up", AP_CONNECTION_ID])
-    return True
+    except Exception as exc:
+        LOG_NETWORK.warning("Failed to ensure AP profile: %s", exc)
+
+    # Disconnect wlan0 before activating AP
+    try:
+        LOG_NETWORK.info("Disconnecting %s before activating AP", WIFI_INTERFACE)
+        _nmcli(["device", "disconnect", WIFI_INTERFACE], timeout=5)
+    except Exception as exc:
+        LOG_NETWORK.debug("Failed to disconnect %s: %s", WIFI_INTERFACE, exc)
+
+    # Verify AP profile has correct settings
+    try:
+        mode_res = _nmcli(["-t", "-g", "802-11-wireless.mode", "connection", "show", AP_CONNECTION_ID], timeout=5)
+        if mode_res.returncode == 0:
+            mode = (mode_res.stdout or "").strip()
+            if mode != "ap":
+                LOG_NETWORK.warning("AP profile mode is '%s', fixing to 'ap'", mode)
+                _nmcli(["connection", "modify", AP_CONNECTION_ID, "802-11-wireless.mode", "ap"], timeout=5)
+
+        ipv4_res = _nmcli(["-t", "-g", "ipv4.method", "connection", "show", AP_CONNECTION_ID], timeout=5)
+        if ipv4_res.returncode == 0:
+            ipv4_method = (ipv4_res.stdout or "").strip()
+            if ipv4_method != "shared":
+                LOG_NETWORK.warning("AP profile ipv4.method is '%s', fixing to 'shared'", ipv4_method)
+                _nmcli(["connection", "modify", AP_CONNECTION_ID, "ipv4.method", "shared"], timeout=5)
+    except Exception as exc:
+        LOG_NETWORK.warning("Failed to verify AP profile settings: %s", exc)
+
+    try:
+        res = _nmcli(["connection", "up", AP_CONNECTION_ID], timeout=15)
+        if res.returncode != 0:
+            err_msg = (res.stderr or res.stdout or "").strip()
+            LOG_NETWORK.error("Failed to activate %s: %s", AP_CONNECTION_ID, err_msg)
+            return False
+        LOG_NETWORK.info("AP %s activated successfully", AP_CONNECTION_ID)
+        return True
+    except Exception as exc:
+        LOG_NETWORK.error("Exception activating AP: %s", exc)
+        return False
 
 
 def set_autoconnect(name: str, yes_no: bool, priority: int) -> None:
