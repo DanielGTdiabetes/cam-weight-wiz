@@ -192,10 +192,11 @@ export const MiniWebConfig = () => {
       try {
         setConnectionStatus({ type: 'idle', message: '' });
 
+        const isSecured = Boolean(selectedNetwork?.secured);
         const payload = {
           ssid: selectedNetwork?.ssid ?? selectedSSID,
-          password: selectedNetwork?.secured ? (password ?? '') : null,
-          secured: !!selectedNetwork?.secured,
+          password: isSecured ? password ?? '' : '',
+          secured: isSecured,
           sec: selectedNetwork?.sec ?? null,
         };
 

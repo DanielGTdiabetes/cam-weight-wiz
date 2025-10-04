@@ -284,32 +284,13 @@ def _classify_nmcli_failure(res: subprocess.CompletedProcess) -> tuple[int, str,
     err = (res.stderr or "").strip()
     txt = f"{out}\n{err}".lower()
 
-    # Autorización / polkit
     if "not authorized" in txt or "requires authorization" in txt or "not privileged" in txt:
-        return 403, "NMCLI_NOT_AUTHORIZED", "Acceso denegado por PolicyKit/NetworkManager."
+        return 403, "NMCLI_NOT_AUTHORIZED", err or out or "Acceso denegado por NetworkManager."
 
-    # Secretos/PSK requeridos (WPA)
     if "secrets were required" in txt or "secrets are required" in txt or "no key available" in txt:
-        return 400, "NMCLI_SECRETS_REQUIRED", "La red requiere contraseña (WPA/WPA2)."
+        return 400, "NMCLI_SECRETS_REQUIRED", "NetworkManager requiere una contraseña válida."
 
-    # SSID no encontrado
-    if "no network with ssid" in txt or "no suitable device found to create connection" in txt:
-        return 404, "NMCLI_SSID_NOT_FOUND", "No se encontró el SSID en el escaneo."
-
-    # Dispositivo no disponible
-    if "no such device" in txt or "device not managed" in txt:
-        return 500, "NM_DEVICE_UNAVAILABLE", "Interfaz Wi-Fi no disponible."
-
-    # Ya hay conexión activa / conflicto de estado
-    if "already a connection active" in txt or "connection is already active" in txt:
-        return 409, "NM_ALREADY_ACTIVE", "La conexión ya está activa."
-
-    # Tiempo de espera DHCP/IP
-    if "activation failed" in txt and "dhcp" in txt:
-        return 504, "NM_DHCP_TIMEOUT", "Timeout obteniendo IP por DHCP."
-
-    # Genérico
-    return 400, "WIFI_UP_FAILED", (err or out or "Fallo al activar la conexión Wi-Fi.")
+    return 400, "wifi_up_failed", err or out or "Fallo al activar la conexión Wi-Fi."
 
 
 def _nmcli_get_values(args: List[str], timeout: int = 5) -> List[str]:
@@ -329,6 +310,81 @@ def _nmcli_get_first_value(args: List[str], timeout: int = 5) -> Optional[str]:
     if not values:
         return None
     return values[0]
+
+
+async def _list_connection_entries(name: str) -> list[dict[str, str]]:
+    try:
+        res = await _nmcli_async(
+            [
+                "-t",
+                "--separator",
+                "|",
+                "-f",
+                "NAME,UUID",
+                "connection",
+                "show",
+            ],
+            timeout=10,
+        )
+    except FileNotFoundError as exc:
+        raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
+
+    if res.returncode != 0:
+        return []
+
+    entries: list[dict[str, str]] = []
+    for line in (res.stdout or "").splitlines():
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 2:
+            continue
+        entry_name = parts[0].strip()
+        uuid = parts[1].strip()
+        if entry_name == name and uuid:
+            entries.append({"name": entry_name, "uuid": uuid})
+    return entries
+
+
+async def _get_active_connection_uuid(name: str) -> Optional[str]:
+    try:
+        res = await _nmcli_async(
+            [
+                "-t",
+                "--separator",
+                "|",
+                "-f",
+                "NAME,UUID",
+                "connection",
+                "show",
+                "--active",
+            ],
+            timeout=5,
+        )
+    except FileNotFoundError as exc:
+        raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
+
+    if res.returncode != 0:
+        return None
+
+    for line in (res.stdout or "").splitlines():
+        if not line:
+            continue
+        parts = line.split("|")
+        if len(parts) < 2:
+            continue
+        entry_name = parts[0].strip()
+        uuid = parts[1].strip()
+        if entry_name == name and uuid:
+            return uuid
+    return None
+
+
+def _ip_is_ap_subnet(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network("192.168.4.0/24")
+    except Exception:
+        return False
 
 
 def _wifi_connection_exists(connection_name: str) -> bool:
@@ -381,7 +437,7 @@ def _configure_wifi_security(connection_name: str, secured: bool, password: Opti
             "modify",
             connection_name,
             "802-11-wireless-security.key-mgmt",
-            "",
+            "none",
         ], timeout=5)
         if res_keymgmt.returncode != 0:
             message = (res_keymgmt.stderr or res_keymgmt.stdout).strip()
@@ -429,13 +485,132 @@ def _ensure_wifi_profile(ssid: str, password: Optional[str], secured: bool) -> N
         "auto",
         "ipv6.method",
         "ignore",
+        "connection.autoconnect",
+        "yes",
+        "connection.autoconnect-priority",
+        "100",
+        "802-11-wireless.mode",
+        "infrastructure",
     ], timeout=10)
     if modify_base.returncode != 0:
         message = (modify_base.stderr or modify_base.stdout).strip()
         raise RuntimeError(message)
 
-    _set_connection_autoconnect_value(ssid, True)
     _configure_wifi_security(ssid, secured, password)
+
+
+async def _prepare_ap_for_wifi_connection() -> Optional[str]:
+    try:
+        res = await _nmcli_async(
+            ["connection", "modify", AP_CONNECTION_ID, "connection.autoconnect", "no"],
+            timeout=5,
+        )
+        if res.returncode != 0:
+            LOG_NETWORK.debug(
+                "Setting autoconnect=no for %s returned %s", AP_CONNECTION_ID, res.returncode
+            )
+    except FileNotFoundError as exc:
+        raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
+    except Exception as exc:
+        LOG_NETWORK.warning("Could not set autoconnect=no for %s: %s", AP_CONNECTION_ID, exc)
+
+    try:
+        entries = await _list_connection_entries(AP_CONNECTION_ID)
+    except PermissionError:
+        raise
+    except Exception as exc:
+        LOG_NETWORK.debug("Failed to list connections for %s: %s", AP_CONNECTION_ID, exc)
+        entries = []
+
+    if not entries:
+        return None
+
+    try:
+        active_uuid = await _get_active_connection_uuid(AP_CONNECTION_ID)
+    except PermissionError:
+        raise
+    except Exception as exc:
+        LOG_NETWORK.debug("Could not determine active UUID for %s: %s", AP_CONNECTION_ID, exc)
+        active_uuid = None
+
+    keep_uuid = active_uuid or entries[0]["uuid"]
+
+    for entry in entries:
+        uuid = entry["uuid"]
+        try:
+            res_mod = await _nmcli_async(
+                [
+                    "connection",
+                    "modify",
+                    "uuid",
+                    uuid,
+                    "connection.autoconnect",
+                    "no",
+                ],
+                timeout=5,
+            )
+            if res_mod.returncode != 0:
+                LOG_NETWORK.debug(
+                    "Setting autoconnect=no for AP uuid %s returned %s", uuid, res_mod.returncode
+                )
+        except Exception as exc:
+            LOG_NETWORK.warning("Could not disable autoconnect for AP uuid %s: %s", uuid, exc)
+
+    for entry in entries:
+        uuid = entry["uuid"]
+        try:
+            res_down = await _nmcli_async(
+                ["connection", "down", "uuid", uuid],
+                timeout=10,
+            )
+            if res_down.returncode not in (0, 10):
+                LOG_NETWORK.debug(
+                    "Down command for AP uuid %s returned %s", uuid, res_down.returncode
+                )
+        except Exception as exc:
+            LOG_NETWORK.warning("Could not bring down AP uuid %s: %s", uuid, exc)
+
+    for entry in entries:
+        uuid = entry["uuid"]
+        if keep_uuid and uuid == keep_uuid:
+            continue
+        try:
+            res_del = await _nmcli_async(
+                ["connection", "delete", "uuid", uuid],
+                timeout=5,
+            )
+            if res_del.returncode != 0:
+                LOG_NETWORK.debug(
+                    "Deleting duplicate AP uuid %s returned %s", uuid, res_del.returncode
+                )
+        except Exception as exc:
+            LOG_NETWORK.warning("Could not delete duplicate AP uuid %s: %s", uuid, exc)
+
+    return keep_uuid
+
+
+async def _ensure_ap_autoconnect_disabled(keep_uuid: Optional[str]) -> None:
+    targets: list[list[str]] = []
+    if keep_uuid:
+        targets.append(["uuid", keep_uuid])
+    targets.append([AP_CONNECTION_ID])
+
+    for target in targets:
+        args = ["connection", "modify", *target, "connection.autoconnect", "no"]
+        try:
+            res = await _nmcli_async(args, timeout=5)
+            if res.returncode != 0:
+                LOG_NETWORK.debug(
+                    "Keeping autoconnect=no for %s returned %s",
+                    target[-1],
+                    res.returncode,
+                )
+        except FileNotFoundError as exc:
+            raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
+        except Exception as exc:
+            LOG_NETWORK.warning(
+                "Could not ensure autoconnect=no for %s: %s", target[-1], exc
+            )
 
 
 async def _wait_for_wifi_activation(timeout_s: float = 45.0) -> tuple[bool, Optional[str]]:
@@ -935,7 +1110,13 @@ def _get_wifi_status() -> Dict[str, Any]:
     if not wlan_ip:
         wlan_ip = get_iface_ip(WIFI_INTERFACE)
 
-    connected = bool(wlan_ip and active_connection and active_connection != AP_CONNECTION_ID)
+    ip_is_ap = bool(wlan_ip and _ip_is_ap_subnet(wlan_ip))
+    connected = bool(
+        wlan_ip
+        and not ip_is_ap
+        and active_connection
+        and active_connection != AP_CONNECTION_ID
+    )
 
     ssid: Optional[str] = None
     if active_connection:
@@ -953,6 +1134,8 @@ def _get_wifi_status() -> Dict[str, Any]:
         ap_active = False
 
     should_activate_ap = not connected and not ethernet_active
+    if connected:
+        should_activate_ap = False
 
     ip_address: Optional[str] = None
     if eth_ip:
@@ -1227,7 +1410,12 @@ async def connect_wifi(credentials: WifiCredentials):
     LOG_NETWORK.info("Received connect request for SSID '%s' (secured=%s)", ssid, credentials.secured)
 
     try:
-        _ensure_wifi_profile(ssid, sanitized_password if credentials.secured else None, credentials.secured)
+        await asyncio.to_thread(
+            _ensure_wifi_profile,
+            ssid,
+            sanitized_password if credentials.secured else None,
+            credentials.secured,
+        )
     except PermissionError as exc:
         code = str(exc)
         if code == "NMCLI_NOT_AVAILABLE":
@@ -1252,49 +1440,26 @@ async def connect_wifi(credentials: WifiCredentials):
                     "message": "NetworkManager requiere secretos adicionales (comprueba la contraseña WPA).",
                 },
             ) from exc
-        raise HTTPException(status_code=400, detail=message) from exc
+        raise HTTPException(status_code=400, detail={"code": "wifi_up_failed", "message": message}) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    try:
-        try:
-            await _nmcli_async(
-                [
-                    "connection",
-                    "modify",
-                    AP_CONNECTION_ID,
-                    "connection.autoconnect",
-                    "no",
-                ],
-                timeout=5,
-            )
-        except Exception as exc:
-            LOG_NETWORK.warning("Failed to set BasculaAP autoconnect=no: %s", exc)
+    keep_uuid: Optional[str] = None
 
-        try:
-            LOG_NETWORK.info("Bringing down '%s'", AP_CONNECTION_ID)
-            res_down = await _nmcli_async(["connection", "down", AP_CONNECTION_ID], timeout=10)
-            if res_down.returncode not in (0, 10):
-                LOG_NETWORK.warning(
-                    "Could not bring down BasculaAP: %s",
-                    (res_down.stderr or res_down.stdout or "").strip(),
-                )
-        except Exception as exc:
-            LOG_NETWORK.warning("Error bringing down BasculaAP: %s", exc)
+    try:
+        keep_uuid = await _prepare_ap_for_wifi_connection()
 
         LOG_NETWORK.info("Activating Wi-Fi connection '%s'", ssid)
-        up_res = await _nmcli_async(["connection", "up", ssid, "ifname", WIFI_INTERFACE], timeout=25)
+        up_res = await _nmcli_async(["connection", "up", ssid, "ifname", WIFI_INTERFACE], timeout=45)
         if up_res.returncode != 0:
             LOG_NETWORK.warning(
                 "nmcli up failed for '%s': %s",
                 ssid,
                 (up_res.stderr or up_res.stdout or "").strip(),
             )
-            await _nmcli_async(["connection", "modify", AP_CONNECTION_ID, "connection.autoconnect", "yes"])
-            await _nmcli_async(["connection", "up", AP_CONNECTION_ID])
-
+            await _reactivate_ap_after_failure()
             status, code, msg = _classify_nmcli_failure(up_res)
             raise HTTPException(
                 status_code=status,
@@ -1308,18 +1473,48 @@ async def connect_wifi(credentials: WifiCredentials):
 
         ok, ip_address = await _wait_for_wifi_activation(timeout_s=45.0)
         if ok and ip_address:
+            if _ip_is_ap_subnet(ip_address):
+                LOG_NETWORK.warning(
+                    "Wi-Fi '%s' obtained AP subnet IP %s; keeping AP disabled and reporting failure",
+                    ssid,
+                    ip_address,
+                )
+                try:
+                    await _ensure_ap_autoconnect_disabled(keep_uuid)
+                except PermissionError as exc:
+                    LOG_NETWORK.warning("Could not persist BasculaAP autoconnect=no: %s", exc)
+                await _reactivate_ap_after_failure()
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "code": "WIFI_IP_AP_SUBNET",
+                        "message": "NetworkManager asignó una IP de la red AP (192.168.4.x).",
+                        "ip": ip_address,
+                    },
+                )
+
             LOG_NETWORK.info("Wi-Fi '%s' connected with IP %s", ssid, ip_address)
-            return {"connected": True, "ssid": ssid, "ip": ip_address, "ap_active": False}
+            try:
+                await _ensure_ap_autoconnect_disabled(keep_uuid)
+            except PermissionError as exc:
+                LOG_NETWORK.warning("Could not persist BasculaAP autoconnect=no: %s", exc)
+            return {
+                "success": True,
+                "connected": True,
+                "ssid": ssid,
+                "ip": ip_address,
+                "ap_active": False,
+            }
 
         LOG_NETWORK.warning("Timed out waiting for Wi-Fi '%s' activation", ssid)
-        await _nmcli_async(["connection", "modify", AP_CONNECTION_ID, "connection.autoconnect", "yes"])
-        await _nmcli_async(["connection", "up", AP_CONNECTION_ID])
+        await _reactivate_ap_after_failure()
         raise HTTPException(status_code=504, detail={"code": "WIFI_ACTIVATION_TIMEOUT", "ssid": ssid})
     except HTTPException:
         raise
     except PermissionError as exc:
         code = str(exc)
         if code == "NMCLI_NOT_AVAILABLE":
+            await _reactivate_ap_after_failure()
             raise HTTPException(
                 status_code=503,
                 detail={"code": code, "message": "nmcli no está instalado"},
@@ -1343,7 +1538,7 @@ async def connect_wifi(credentials: WifiCredentials):
                     "message": "NetworkManager requiere secretos adicionales (comprueba la contraseña WPA).",
                 },
             ) from exc
-        raise HTTPException(status_code=400, detail=message) from exc
+        raise HTTPException(status_code=400, detail={"code": "wifi_up_failed", "message": message}) from exc
     except FileNotFoundError as exc:
         await _reactivate_ap_after_failure()
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
@@ -1448,23 +1643,11 @@ async def ws_scale(websocket: WebSocket):
             if data.get("ok"):
                 grams = data.get("grams")
 
-                # NO asumir instant = grams; solo usarlo si el backend lo proporciona
-                instant = data.get("instant", None)
-
-                # Priorizar valor del backend si viene
                 stable_value = data.get("stable", None)
-
-                # Fallback conservador: solo calcular si hay 'instant' distinto y 'grams'
+                if grams is None:
+                    stable_value = False
                 if stable_value is None:
-                    if instant is not None and grams is not None:
-                        try:
-                            # Umbral conservador; ajustable vía config si se desea
-                            stable_value = abs(float(instant) - float(grams)) <= 1.0
-                        except Exception:
-                            stable_value = False
-                    else:
-                        # Sin datos suficientes, no afirmar estabilidad
-                        stable_value = False
+                    stable_value = False
 
                 payload = {
                     "ok": True,
