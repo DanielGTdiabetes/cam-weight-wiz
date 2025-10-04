@@ -274,9 +274,12 @@ if [[ "${NET_OK}" -eq 1 ]]; then
 
     # Ensure global dnsmasq daemon is never installed/active (only dnsmasq-base needed)
     log "Asegurando que dnsmasq global no esté activo..."
-    systemctl stop dnsmasq 2>/dev/null || true
-    systemctl disable dnsmasq 2>/dev/null || true
-    systemctl mask dnsmasq 2>/dev/null || true
+    if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+      systemctl disable --now dnsmasq 2>/dev/null || true
+      systemctl mask dnsmasq 2>/dev/null || true
+    else
+      warn "systemd no disponible: omitiendo systemctl para dnsmasq"
+    fi
     apt-get -y purge dnsmasq 2>/dev/null || true
     # Install only dnsmasq-base (library for NetworkManager)
     ensure_pkg dnsmasq-base
@@ -661,63 +664,60 @@ set -e
 # Instalar siempre la regla polkit (ya creada antes)
 if [ -f system/os/10-bascula-nm.rules ]; then
   install -D -m 0644 system/os/10-bascula-nm.rules /etc/polkit-1/rules.d/10-bascula-nm.rules
+else
+  warn "No se encontró system/os/10-bascula-nm.rules; instalando regla básica"
+  cat >/etc/polkit-1/rules.d/10-bascula-nm.rules <<'EOF'
+polkit.addRule(function(action, subject) {
+  if (subject.user === "pi") {
+    if (action.id.startsWith("org.freedesktop.NetworkManager.")) {
+      return polkit.Result.YES;
+    }
+    if (action.id.startsWith("org.freedesktop.NetworkManager.settings.")) {
+      return polkit.Result.YES;
+    }
+  }
+});
+EOF
 fi
 
-# Instalar SIEMPRE el perfil AP (aunque no haya systemd en chroot)
-if [ -f system/os/nm/BasculaAP.nmconnection ]; then
-  AP_TMP="$(mktemp)"
-  EXISTING_AP_UUID="$(nmcli -g connection.uuid connection show "${AP_NAME}" 2>/dev/null | head -n1 || true)"
-  if [ -z "$EXISTING_AP_UUID" ] && [ -f "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" ]; then
-    EXISTING_AP_UUID="$(grep -m1 '^uuid=' "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" | cut -d= -f2)"
-  fi
-  if [ -z "$EXISTING_AP_UUID" ]; then
-    UUID_GEN="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
+# Configurar el perfil AP mediante nmcli para garantizar idempotencia
+if command -v nmcli >/dev/null 2>&1; then
+  log "Configurando perfil AP ${AP_NAME}..."
+  nmcli connection show "${AP_NAME}" >/dev/null 2>&1 || \
+    nmcli connection add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1 || true
+
+  nmcli connection modify "${AP_NAME}" \
+    connection.interface-name "${AP_IFACE}" \
+    802-11-wireless.mode ap \
+    802-11-wireless.band bg \
+    802-11-wireless.channel 6 \
+    802-11-wireless.ssid "${AP_SSID}" \
+    ipv4.method shared \
+    ipv4.addresses "${AP_GATEWAY}/24" \
+    ipv4.gateway "${AP_GATEWAY}" \
+    ipv4.route-metric 10 \
+    ipv4.dns "${AP_GATEWAY}" \
+    ipv6.method ignore >/dev/null 2>&1 || warn "No se pudieron aplicar todos los parámetros de ${AP_NAME}"
+
+  if [[ -n "${AP_PASS}" ]]; then
+    nmcli connection modify "${AP_NAME}" \
+      802-11-wireless-security.key-mgmt wpa-psk \
+      802-11-wireless-security.proto rsn \
+      802-11-wireless-security.pairwise ccmp \
+      802-11-wireless-security.group ccmp \
+      802-11-wireless-security.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar la seguridad WPA2 en ${AP_NAME}"
   else
-    UUID_GEN="$EXISTING_AP_UUID"
+    nmcli connection modify "${AP_NAME}" 802-11-wireless-security.key-mgmt none >/dev/null 2>&1 || true
   fi
 
-  if grep -q '${GENERATE_UUID}' system/os/nm/BasculaAP.nmconnection; then
-    sed "s#\${GENERATE_UUID}#${UUID_GEN}#g" system/os/nm/BasculaAP.nmconnection >"$AP_TMP"
-  else
-    cp system/os/nm/BasculaAP.nmconnection "$AP_TMP"
-  fi
+  nmcli connection modify "${AP_NAME}" connection.autoconnect no connection.autoconnect-priority 0 >/dev/null 2>&1 || true
 
-  install -D -m 0600 "$AP_TMP" "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
-  rm -f "$AP_TMP"
-
-  if command -v nmcli >/dev/null 2>&1; then
-    nmcli connection load "/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection" >/dev/null 2>&1 || true
-    if ! nmcli connection modify "${AP_NAME}" \
-      connection.autoconnect yes \
-      connection.autoconnect-priority -999 \
-      connection.interface-name "${AP_IFACE}" \
-      802-11-wireless.mode ap \
-      802-11-wireless.band bg \
-      802-11-wireless.channel 6 \
-      802-11-wireless.ssid "${AP_SSID}" \
-      ipv4.method shared \
-      ipv4.addresses "${AP_GATEWAY}/24" \
-      ipv4.gateway "${AP_GATEWAY}" \
-      ipv4.dns "${AP_GATEWAY}" \
-      ipv6.method ignore >/dev/null 2>&1; then
-      warn "No se pudo ajustar parámetros base de ${AP_NAME}"
-    fi
-    if ! nmcli connection modify "${AP_NAME}" \
-      ipv4.dhcp-server.address-pool-start "${AP_POOL_START}" \
-      ipv4.dhcp-server.address-pool-end "${AP_POOL_END}" \
-      ipv4.dhcp-server.gateway "${AP_GATEWAY}" \
-      ipv4.dhcp-server.default-route yes \
-      ipv4.dhcp-server.dns "${AP_GATEWAY}" >/dev/null 2>&1; then
-      warn "No se pudo fijar el pool DHCP personalizado para ${AP_NAME}"
-    fi
-    if [[ -n "${AP_PASS}" ]]; then
-      nmcli connection modify "${AP_NAME}" \
-        wifi-sec.key-mgmt wpa-psk \
-        wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || true
-    else
-      nmcli connection modify "${AP_NAME}" wifi-sec.key-mgmt none >/dev/null 2>&1 || true
-    fi
-  fi
+  ssid="$(nmcli -g 802-11-wireless.ssid connection show "${AP_NAME}" 2>/dev/null || echo '?')"
+  mode="$(nmcli -g 802-11-wireless.mode connection show "${AP_NAME}" 2>/dev/null || echo '?')"
+  ipv4m="$(nmcli -g ipv4.method connection show "${AP_NAME}" 2>/dev/null || echo '?')"
+  log "BasculaAP: ssid=${ssid}, mode=${mode}, ipv4.method=${ipv4m}"
+else
+  warn "nmcli no disponible; no se pudo configurar ${AP_NAME}"
 fi
 
 if command -v nmcli >/dev/null 2>&1; then
@@ -761,19 +761,18 @@ fi
 # (Evita que NM tumbe la AP por una Wi-Fi antigua)
 if command -v nmcli >/dev/null 2>&1; then
   log "Desactivando autoconnect de conexiones Wi-Fi heredadas..."
-  while IFS= read -r UUID; do
-    [[ -z "${UUID}" ]] && continue
+  while IFS=: read -r uuid type; do
+    [[ -z "${uuid}" ]] && continue
+    [[ "${type}" != "802-11-wireless" ]] && continue
 
-    TYPE="$(nmcli -t -g connection.type connection show "${UUID}" 2>/dev/null || true)"
-    MODE="$(nmcli -t -g 802-11-wireless.mode connection show "${UUID}" 2>/dev/null || true)"
-    NAME="$(nmcli -t -g connection.id connection show "${UUID}" 2>/dev/null || true)"
+    mode="$(nmcli -g 802-11-wireless.mode connection show "${uuid}" 2>/dev/null || true)"
+    name="$(nmcli -g connection.id connection show "${uuid}" 2>/dev/null || true)"
 
-    # Skip non-WiFi profiles and BasculaAP itself
-    if [[ "${TYPE}" == "802-11-wireless" ]] && [[ "${MODE}" != "ap" ]] && [[ "${NAME}" != "BasculaAP" ]]; then
-      log "  Desactivando autoconnect: ${NAME} (${UUID})"
-      nmcli connection modify "${UUID}" connection.autoconnect no connection.autoconnect-priority 0 || true
+    if [[ "${mode}" == "infrastructure" ]] && [[ "${name}" != "${AP_NAME}" ]]; then
+      log "  Desactivando autoconnect: ${name} (${uuid})"
+      nmcli connection modify "${uuid}" connection.autoconnect no connection.autoconnect-priority 0 || true
     fi
-  done < <(nmcli -t -g UUID connection show 2>/dev/null | sed '/^$/d')
+  done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null | sed '/^$/d')
   log "✓ Autoconnect desactivado en perfiles Wi-Fi heredados"
 fi
 
