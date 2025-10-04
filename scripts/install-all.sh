@@ -903,15 +903,36 @@ if ! command -v piper >/dev/null 2>&1; then
 fi
 
 # Download Spanish voice models
+VOICE_DIR="/opt/bascula/voices"
+install -d -m 0755 "${VOICE_DIR}"
+
 voices=(
-  es_ES-mls_10246-medium.onnx
-  es_ES-mls_10246-medium.onnx.json
+  "es_ES-carlfm-x_low.onnx"
+  "es_ES-carlfm-x_low.onnx.json"
+  "es_ES-davefx-medium.onnx"
+  "es_ES-davefx-medium.onnx.json"
+  "es_ES-sharvard-medium.onnx"
+  "es_ES-sharvard-medium.onnx.json"
 )
-for f in "${voices[@]}"; do
-  if [[ ! -s "/opt/piper/models/$f" && "${NET_OK}" = "1" ]]; then
-    log "Descargando voz: $f"
-    curl -fL --retry 2 -m 30 -o "/opt/piper/models/$f" \
-      "https://github.com/rhasspy/piper/releases/download/v1.2.0/$f" 2>/dev/null || warn "No se pudo descargar $f"
+
+VOICE_BASE_URL="https://github.com/DanielGTdiabetes/bascula-cam/releases/download/voices-v1"
+
+for voice in "${voices[@]}"; do
+  dest="${VOICE_DIR}/${voice}"
+  if [[ -s "${dest}" ]]; then
+    log "[info] Voz ${voice} ya instalada"
+    continue
+  fi
+  if [[ "${NET_OK}" != "1" ]]; then
+    warn "Sin red: omitiendo descarga de ${voice}"
+    continue
+  fi
+  log "Descargando voz: ${voice}"
+  if wget -q --show-progress -O "${dest}.tmp" "${VOICE_BASE_URL}/${voice}"; then
+    mv "${dest}.tmp" "${dest}"
+  else
+    rm -f "${dest}.tmp"
+    warn "No se pudo descargar ${voice} (saltando)"
   fi
 done
 
