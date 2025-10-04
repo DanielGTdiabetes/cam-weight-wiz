@@ -526,7 +526,15 @@ fi
 ensure_enable_uart "${CONF}"
 
 # Disable Bluetooth UART
-systemctl_safe disable --now hciuart
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if systemctl list-unit-files | grep -q '^hciuart.service'; then
+    systemctl disable --now hciuart 2>/dev/null || warn "No se pudo deshabilitar hciuart"
+  else
+    log "hciuart.service no existe; nada que deshabilitar"
+  fi
+else
+  warn "systemd no disponible: hciuart no puede deshabilitarse en esta sesión"
+fi
 systemctl_safe disable --now serial-getty@ttyAMA0.service
 systemctl_safe disable --now serial-getty@ttyS0.service
 
@@ -684,6 +692,12 @@ fi
 if command -v nmcli >/dev/null 2>&1; then
   log "Configurando perfil AP ${AP_NAME}..."
 
+  nmcli_diag_ap() {
+    warn "Diagnóstico nmcli tras fallo configurando ${AP_NAME}"
+    while IFS= read -r line; do warn "[nmcli] ${line}"; done < <(nmcli -f GENERAL,IP4,CONNECTION device show "${AP_IFACE}" 2>&1 || true)
+    while IFS= read -r line; do warn "[nmcli] ${line}"; done < <(nmcli connection show "${AP_NAME}" 2>&1 || true)
+  }
+
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     systemctl disable --now dnsmasq 2>/dev/null || true
   fi
@@ -691,37 +705,52 @@ if command -v nmcli >/dev/null 2>&1; then
   AP_UUIDS="$(nmcli -t -f NAME,UUID,TYPE con show | awk -F: -v name="${AP_NAME}" '$1==name && $3=="802-11-wireless"{print $2}')"
   printf '%s\n' "${AP_UUIDS}" | sed -n '2,$p' | xargs -r -I{} nmcli con delete uuid "{}" || true
 
-  nmcli con show "${AP_NAME}" >/dev/null 2>&1 || \
-    nmcli con add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1 || true
+  if ! nmcli con show "${AP_NAME}" >/dev/null 2>&1; then
+    if ! nmcli con add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" >/dev/null 2>&1; then
+      warn "No se pudo crear el perfil ${AP_NAME}"
+      nmcli_diag_ap
+    fi
+  fi
 
-  nmcli con modify "${AP_NAME}" \
+  if ! nmcli con modify "${AP_NAME}" \
     connection.interface-name "${AP_IFACE}" \
     802-11-wireless.mode ap \
     802-11-wireless.band bg \
     802-11-wireless.channel 6 \
     802-11-wireless.ssid "${AP_SSID}" \
     ipv4.method shared \
-    ipv4.addresses "${AP_GATEWAY}/24" \
-    ipv4.gateway "${AP_GATEWAY}" \
-    ipv4.route-metric 10 \
-    ipv4.dns "${AP_GATEWAY}" \
-    ipv6.method ignore >/dev/null 2>&1 || warn "No se pudieron aplicar todos los parámetros de ${AP_NAME}"
+    ipv6.method ignore >/dev/null 2>&1; then
+    warn "No se pudieron aplicar todos los parámetros básicos de ${AP_NAME}"
+    nmcli_diag_ap
+  fi
 
   if [[ -n "${AP_PASS}" ]]; then
-    nmcli con modify "${AP_NAME}" \
+    if ! nmcli con modify "${AP_NAME}" \
       802-11-wireless-security.key-mgmt wpa-psk \
       802-11-wireless-security.proto rsn \
       802-11-wireless-security.pairwise ccmp \
       802-11-wireless-security.group ccmp \
-      802-11-wireless-security.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar la seguridad WPA2 en ${AP_NAME}"
+      802-11-wireless-security.psk "${AP_PASS}" >/dev/null 2>&1; then
+      warn "No se pudo configurar la seguridad WPA2 en ${AP_NAME}"
+      nmcli_diag_ap
+    fi
   else
-    nmcli con modify "${AP_NAME}" 802-11-wireless-security.key-mgmt none >/dev/null 2>&1 || true
+    if ! nmcli con modify "${AP_NAME}" 802-11-wireless-security.key-mgmt none >/dev/null 2>&1; then
+      warn "No se pudo dejar ${AP_NAME} sin clave"
+      nmcli_diag_ap
+    fi
   fi
 
-  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-    nmcli con modify "${AP_NAME}" connection.autoconnect no connection.autoconnect-priority 0 >/dev/null 2>&1 || true
-  else
-    nmcli con modify "${AP_NAME}" connection.autoconnect yes connection.autoconnect-priority -999 >/dev/null 2>&1 || true
+  AP_AUTOCONNECT_VALUE="no"
+  AP_AUTOCONNECT_PRIORITY=0
+  if [[ "${HAS_SYSTEMD}" -eq 0 ]]; then
+    AP_AUTOCONNECT_VALUE="yes"
+    AP_AUTOCONNECT_PRIORITY=100
+  fi
+
+  if ! nmcli con modify "${AP_NAME}" connection.autoconnect "${AP_AUTOCONNECT_VALUE}" connection.autoconnect-priority "${AP_AUTOCONNECT_PRIORITY}" >/dev/null 2>&1; then
+    warn "No se pudo ajustar autoconnect de ${AP_NAME}"
+    nmcli_diag_ap
   fi
 
   ssid="$(nmcli -g 802-11-wireless.ssid con show "${AP_NAME}" 2>/dev/null || echo '?')"
@@ -1152,37 +1181,60 @@ log "✓ Mini-web backend configurado"
 
 # Install AP ensure service and script
 log "[17a/20] Configurando servicio de arranque de AP..."
+install -d /usr/local/sbin
+AP_ENSURE_DEPLOYED=0
+
+if [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.sh" ]]; then
+  install -m 0755 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.sh" /usr/local/sbin/bascula-ap-ensure.sh
+  log "✓ Script bascula-ap-ensure.sh instalado"
+else
+  warn "No se encontró system/os/bascula-ap-ensure.sh"
+fi
+
+AP_ENSURE_SERVICE_INSTALLED=0
+install -d /etc/systemd/system
+if [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" ]]; then
+  install -m 0644 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
+  AP_ENSURE_SERVICE_INSTALLED=1
+elif [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" ]]; then
+  warn "Usando servicio heredado de systemd/"
+  install -m 0644 "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
+  AP_ENSURE_SERVICE_INSTALLED=1
+else
+  warn "No se encontró definición de servicio bascula-ap-ensure"
+fi
+
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  install -d /usr/local/sbin /etc/systemd/system
-
-  if [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.sh" ]]; then
-    install -m 0755 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.sh" /usr/local/sbin/bascula-ap-ensure.sh
-    log "✓ Script bascula-ap-ensure.sh instalado"
-  else
-    warn "No se encontró system/os/bascula-ap-ensure.sh"
-  fi
-
-  AP_ENSURE_SERVICE_INSTALLED=0
-  if [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" ]]; then
-    install -m 0644 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
-    AP_ENSURE_SERVICE_INSTALLED=1
-  elif [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" ]]; then
-    warn "Usando servicio heredado de systemd/"
-    install -m 0644 "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
-    AP_ENSURE_SERVICE_INSTALLED=1
-  else
-    warn "No se encontró definición de servicio bascula-ap-ensure"
-  fi
-
+  systemctl daemon-reload
   if [[ "${AP_ENSURE_SERVICE_INSTALLED}" -eq 1 ]]; then
-    systemctl daemon-reload
-    systemctl enable --now bascula-ap-ensure.service
-    log "✓ Servicio bascula-ap-ensure configurado"
+    if systemctl enable bascula-ap-ensure.service; then
+      if systemctl start bascula-ap-ensure.service; then
+        AP_ENSURE_DEPLOYED=1
+        log "✓ Servicio bascula-ap-ensure habilitado y arrancado"
+      else
+        warn "No se pudo iniciar bascula-ap-ensure.service"
+        systemctl status bascula-ap-ensure.service --no-pager || true
+      fi
+    else
+      warn "No se pudo habilitar bascula-ap-ensure.service"
+    fi
   else
     warn "Servicio bascula-ap-ensure no instalado; omitiendo enable"
   fi
 else
-  warn "systemd no disponible: omitiendo despliegue de bascula-ap-ensure.service"
+  warn "systemd no disponible: bascula-ap-ensure.service se activará tras el primer arranque"
+fi
+
+if [[ "${HAS_SYSTEMD}" -eq 1 && "${AP_ENSURE_DEPLOYED}" -ne 1 ]]; then
+  warn "bascula-ap-ensure no quedó activo; activando autoconnect directo de ${AP_NAME} como respaldo"
+  if command -v nmcli >/dev/null 2>&1; then
+    if ! nmcli con modify "${AP_NAME}" connection.autoconnect yes connection.autoconnect-priority 100 >/dev/null 2>&1; then
+      warn "No se pudo forzar autoconnect de respaldo en ${AP_NAME}"
+      if declare -f nmcli_diag_ap >/dev/null 2>&1; then
+        nmcli_diag_ap
+      fi
+    fi
+  fi
 fi
 
 # Setup UI kiosk service

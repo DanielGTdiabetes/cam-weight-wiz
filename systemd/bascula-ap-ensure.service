@@ -1,16 +1,12 @@
 [Unit]
-Description=Ensure BasculaAP is active when no other connectivity exists
+Description=Ensure Bascula AP when no other connectivity
 After=NetworkManager.service
-Wants=NetworkManager.service
-ConditionPathExists=/usr/local/sbin/bascula-ap-ensure.sh
+Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/sbin/bascula-ap-ensure.sh
 RemainAfterExit=yes
-TimeoutSec=20
-StandardOutput=journal
-StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
