@@ -28,8 +28,8 @@ Incluye:
    - Configura reglas de PolicyKit que permiten al usuario `pi` administrar redes Wi-Fi (escaneo, conexión, y modo compartido). 【F:scripts/install-all.sh†L320-L352】【F:packaging/polkit/49-nmcli.rules†L1-L13】
    - Despliega el backend mini-web (`bascula-miniweb.service`) escuchando en `:8080`. 【F:packaging/systemd/bascula-miniweb.service†L1-L16】
    - Configura el servicio kiosk de Chromium apuntando a `http://localhost:8080`. 【F:scripts/install-all.sh†L772-L834】
-   - Despliega el servicio `bascula-ap-ensure.service`, que crea y activa el AP `BasculaAP` (wlan0, `192.168.4.1/24`) sólo cuando no hay conectividad previa. 【F:scripts/install-all.sh†L1090-L1185】【F:scripts/bascula-ap-ensure.sh†L1-L150】
-  - El servicio espera hasta 25 segundos a que NetworkManager intente las redes guardadas antes de encender el AP (`nm-online`) y, si NetworkManager sigue en estado `connecting`, prolonga la espera hasta 45 segundos adicionales antes de activar el modo AP. 【F:systemd/bascula-ap-ensure.service†L1-L13】【F:scripts/bascula-ap-ensure.sh†L24-L120】
+   - Despliega el servicio `bascula-ap-ensure.service`, que recrea el perfil `BasculaAP` en `wlan0` (`192.168.4.1/24`, WPA2-PSK) y sólo levanta la AP cuando no existe conectividad real (ping + DNS o `nmcli g connectivity`). 【F:scripts/install-all.sh†L703-L812】【F:scripts/bascula-ap-ensure.sh†L1-L210】
+  - El servicio activa la radio Wi-Fi con dominio regulatorio `ES`, respeta el flag `/run/bascula/force_ap` para tareas de mantenimiento y reinicia la miniweb tras subir la AP para asegurar el portal de configuración. 【F:systemd/bascula-ap-ensure.service†L1-L13】【F:scripts/bascula-ap-ensure.sh†L40-L205】
 
 3. Reinicia el dispositivo al finalizar la instalación para cargar todos los servicios y reglas (`sudo reboot`).
 
@@ -47,7 +47,7 @@ La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo
 | Método | Endpoint                    | Descripción                                                                           |
 |--------|-----------------------------|---------------------------------------------------------------------------------------|
 | GET    | `/api/miniweb/scan-networks`| Escanea redes visibles y devuelve `{ssid, signal, sec, in_use, secured}` por entrada. 【F:backend/miniweb.py†L134-L183】|
-| POST   | `/api/miniweb/connect`      | Recrea el perfil Wi-Fi con el SSID indicado, fija `autoconnect` (prioridad 120), baja `BasculaAP` y activa la nueva red. 【F:backend/miniweb.py†L1446-L1573】|
+| POST   | `/api/miniweb/connect`      | Crea un perfil Wi-Fi persistente en `/etc/NetworkManager/system-connections/` (autoconnect=YES, prioridad 200), elimina el flag de AP forzado, baja `BasculaAP` y activa la nueva red. 【F:backend/miniweb.py†L1806-L2112】|
 | GET    | `/api/miniweb/status`       | Devuelve el estado actual (`connected`, `ssid`, `ip`, `ethernet_connected`, `ap_active`, `should_activate_ap`). 【F:backend/miniweb.py†L531-L575】|
 
 > El endpoint legado `/api/miniweb/connect-wifi` permanece disponible como alias para compatibilidad.
@@ -72,7 +72,7 @@ Flujo esperado:
 
 1. Sin credenciales conocidas → `bascula-ap-ensure.sh` crea/activa la red compartida en `wlan0` con DHCP interno de NetworkManager.
 2. El usuario accede a `http://192.168.4.1:8080`, introduce el PIN y guarda una Wi-Fi doméstica.
-3. Al enviar SSID y clave desde la miniweb, la Pi recrea el perfil Wi-Fi, lo exporta a `/etc/NetworkManager/system-connections/<SSID>.nmconnection` (permisos `600`, `autoconnect=yes`, prioridad `120`), desconecta `BasculaAP`, activa la red doméstica y reinicia el kiosk. Si más tarde se pierde la conectividad, el AP reaparece.
+3. Al enviar SSID y clave desde la miniweb, la Pi recrea el perfil Wi-Fi, lo exporta a `/etc/NetworkManager/system-connections/<SSID>.nmconnection` (permisos `600`, `autoconnect=yes`, prioridad `200`), elimina el flag `/run/bascula/force_ap`, desconecta `BasculaAP`, activa la red doméstica y reinicia el kiosk. Si más tarde se pierde la conectividad, el AP reaparece.
 
 Verificación rápida (no bloqueante):
 
@@ -84,14 +84,16 @@ journalctl -u bascula-ap-ensure -b | tail -n 20
 ss -lntu | grep ':53' || true   # No debe aparecer dnsmasq.service
 ```
 
-Todos estos pasos quedan automatizados por `scripts/bascula-ap-ensure.sh`, ejecutado como servicio `oneshot` con reintentos. 【F:scripts/bascula-ap-ensure.sh†L1-L150】【F:systemd/bascula-ap-ensure.service†L1-L16】
+Todos estos pasos quedan automatizados por `scripts/bascula-ap-ensure.sh`, ejecutado como servicio `oneshot` con reintentos. 【F:scripts/bascula-ap-ensure.sh†L1-L210】【F:systemd/bascula-ap-ensure.service†L1-L16】
 
 Checklist posterior a la instalación:
 
 1. Tras ejecutar el instalador, confirma que `BasculaAP` no tiene autoconexión: `nmcli con show | grep BasculaAP` debe mostrar `autoconnect=no`.
 2. Arranca sin cable Ethernet ni Wi-Fi guardada y verifica que el ensure levanta `BasculaAP` (SSID `Bascula-AP`).
 3. Usa la miniweb para guardar una Wi-Fi válida; la AP debe bajar y la interfaz cambiar al modo normal tras obtener IP del router.
-4. En un arranque posterior con esa Wi-Fi guardada, NetworkManager debe conectar al perfil cliente (prioridad 120) sin levantar la AP; si por cualquier motivo `BasculaAP` aparece activa, el ensure la apagará automáticamente al detectar conectividad.
+4. En un arranque posterior con esa Wi-Fi guardada, NetworkManager debe conectar al perfil cliente (prioridad 200) sin levantar la AP; si por cualquier motivo `BasculaAP` aparece activa, el ensure la mantendrá solo si el flag de mantenimiento existe y, en caso contrario, la apagará automáticamente al detectar conectividad real.
+
+Cuando el usuario habilita el AP manualmente desde la miniweb se crea el flag `/run/bascula/force_ap`, evitando que el ensure lo tumbe aunque exista cable Ethernet o una Wi-Fi operativa. Al conectar a una Wi-Fi doméstica desde la miniweb, ese flag se elimina, se baja `BasculaAP` y el perfil persistente se activa inmediatamente. 【F:backend/miniweb.py†L2038-L2137】【F:scripts/bascula-ap-ensure.sh†L91-L165】
 
 ## Validación recomendada
 

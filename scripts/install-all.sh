@@ -710,6 +710,7 @@ if command -v nmcli >/dev/null 2>&1; then
 
   rfkill unblock wifi || true
   nmcli radio wifi on || true
+  iw reg set ES || true
 
   install -d -m 0755 /etc/NetworkManager/system-connections
   target_ap_path="/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
@@ -725,12 +726,15 @@ if command -v nmcli >/dev/null 2>&1; then
   nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 6 >/dev/null 2>&1 || warn "No se pudieron configurar parámetros Wi-Fi en ${AP_NAME}"
   nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk wifi-sec.proto rsn wifi-sec.pmf 1 wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar la seguridad Wi-Fi"
   nmcli con modify "${AP_NAME}" ipv4.method shared ipv4.addresses 192.168.4.1/24 ipv4.gateway 192.168.4.1 >/dev/null 2>&1 || warn "No se pudo fijar IPv4 shared en ${AP_NAME}"
-  nmcli con modify "${AP_NAME}" -ipv4.dns >/dev/null 2>&1 || warn "No se pudo limpiar ipv4.dns"
+  nmcli con modify "${AP_NAME}" ipv4.dns "" >/dev/null 2>&1 || warn "No se pudo limpiar ipv4.dns"
   nmcli con modify "${AP_NAME}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar ipv4.never-default"
   nmcli con modify "${AP_NAME}" connection.interface-name wlan0 connection.autoconnect no connection.autoconnect-priority 0 >/dev/null 2>&1 || warn "No se pudo fijar autoconnect"
 
   if nmcli con export "${AP_NAME}" "${target_ap_path}" >/dev/null 2>&1; then
     chmod 600 "${target_ap_path}" || warn "No se pudo ajustar permisos en ${target_ap_path}"
+    if ! nmcli con load "${target_ap_path}" >/dev/null 2>&1; then
+      warn "No se pudo recargar ${AP_NAME} desde ${target_ap_path}"
+    fi
     nmcli con delete "${AP_NAME}" 2>/dev/null || true
     if ! nmcli con load "${target_ap_path}" >/dev/null 2>&1; then
       warn "No se pudo recargar ${AP_NAME} desde ${target_ap_path}"
@@ -786,7 +790,7 @@ else
 fi
 
 # Nota: La UI, al conectar a una nueva Wi-Fi, deberá:
-#  - crear/actualizar esa conexión con autoconnect=yes y prioridad 120
+  #  - crear/actualizar esa conexión con autoconnect=yes y prioridad 200
 #  - mantener BasculaAP con autoconnect=no (para no competir)
 
 if command -v nmcli >/dev/null 2>&1; then
@@ -801,6 +805,7 @@ if command -v nmcli >/dev/null 2>&1; then
 
   nmcli dev status || true
   nmcli -t -f NAME,AUTOCONNECT,AUTOCONNECT-PRIORITY,FILENAME con show | grep -E 'BasculaAP|802-11-wireless' || true
+  nmcli -t -f NAME,FILENAME con show | grep "^${AP_NAME}:" || true
 fi
 
 if ! nmcli general status >/dev/null 2>&1; then

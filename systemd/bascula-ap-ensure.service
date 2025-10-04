@@ -1,10 +1,11 @@
 [Unit]
 Description=Ensure Bascula AP when no other connectivity
-After=NetworkManager.service NetworkManager-wait-online.service
+After=NetworkManager.service network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
+# No bloquear: si nm-online falla, continuar igualmente
 ExecStartPre=-/usr/bin/nm-online -s -q -t 25
 ExecStart=/opt/bascula/current/scripts/bascula-ap-ensure.sh
 Restart=on-failure
