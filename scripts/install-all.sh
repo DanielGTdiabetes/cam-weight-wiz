@@ -1439,20 +1439,20 @@ if [[ -f "${SERVICE_FILE}" ]]; then
       -e "s|/home/pi/bascula-ui|${BASCULA_CURRENT_LINK}|g" \
       "${SERVICE_FILE}" > "${TMP_SERVICE_FILE}"
 
-  if grep -q '^After=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
-    :
-  elif grep -q '^After=' "${TMP_SERVICE_FILE}"; then
-    sed -i 's/^After=\(.*\)$/After=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
+  if grep -q '^After=' "${TMP_SERVICE_FILE}"; then
+    if ! grep -q '^After=.*NetworkManager\.service' "${TMP_SERVICE_FILE}"; then
+      sed -i 's/^After=\(.*\)$/After=\1 NetworkManager.service/' "${TMP_SERVICE_FILE}"
+    fi
   else
-    sed -i '/^\[Unit\]/a After=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
+    sed -i '/^\[Unit\]/a After=NetworkManager.service' "${TMP_SERVICE_FILE}"
   fi
 
-  if grep -q '^Requires=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
-    :
-  elif grep -q '^Requires=' "${TMP_SERVICE_FILE}"; then
-    sed -i 's/^Requires=\(.*\)$/Requires=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
+  if grep -q '^Wants=' "${TMP_SERVICE_FILE}"; then
+    if ! grep -q '^Wants=.*NetworkManager\.service' "${TMP_SERVICE_FILE}"; then
+      sed -i 's/^Wants=\(.*\)$/Wants=\1 NetworkManager.service/' "${TMP_SERVICE_FILE}"
+    fi
   else
-    sed -i '/^\[Unit\]/a Requires=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
+    sed -i '/^\[Unit\]/a Wants=NetworkManager.service' "${TMP_SERVICE_FILE}"
   fi
 
   mv "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-app.service
@@ -1462,7 +1462,8 @@ else
   cat > /etc/systemd/system/bascula-app.service <<EOF
 [Unit]
 Description=Bascula Digital Pro - UI (Xorg kiosk)
-After=graphical.target systemd-user-sessions.service bascula-miniweb.service
+After=graphical.target systemd-user-sessions.service NetworkManager.service
+Wants=NetworkManager.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=3
@@ -1479,6 +1480,7 @@ PermissionsStartOnly=yes
 ExecStartPre=/usr/bin/install -d -m 0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula
 ExecStartPre=/usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/app.log
 ExecStartPre=/usr/bin/install -d -m 0700 -o ${TARGET_USER} -g ${TARGET_GROUP} ${TARGET_HOME}/.local/share/xorg
+ExecStartPre=/bin/bash -c 'for i in {1..5}; do [ -d /sys/class/net/wlan0 ] && exit 0; sleep 1; done; exit 0'
 ExecStart=${STARTX_CMD}
 Restart=on-failure
 RestartSec=2
