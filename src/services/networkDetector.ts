@@ -5,7 +5,10 @@ import { logger } from './logger';
 export interface NetworkStatus {
   isOnline: boolean;
   isWifiConnected: boolean;
-  shouldActivateAP: boolean;
+  apActive: boolean;
+  connectivity: 'full' | 'limited' | 'portal' | 'none' | 'unknown';
+  savedWifiProfiles: boolean;
+  showAPScreen: boolean;
   ssid?: string;
   ip?: string;
 }
@@ -16,7 +19,10 @@ class NetworkDetector {
   private currentStatus: NetworkStatus = {
     isOnline: navigator.onLine,
     isWifiConnected: false,
-    shouldActivateAP: false,
+    apActive: false,
+    connectivity: 'unknown',
+    savedWifiProfiles: false,
+    showAPScreen: false,
   };
 
   constructor() {
@@ -40,10 +46,13 @@ class NetworkDetector {
     const isOnline = navigator.onLine;
 
     // Check if we can reach the backend
-    let isWifiConnected = false;
-    let ssid: string | undefined;
-    let ip: string | undefined;
-    let shouldActivateAP = !isWifiConnected;
+    let isWifiConnected = this.currentStatus.isWifiConnected;
+    let ssid: string | undefined = this.currentStatus.ssid;
+    let ip: string | undefined = this.currentStatus.ip;
+    let apActive = this.currentStatus.apActive;
+    let connectivity: NetworkStatus['connectivity'] = this.currentStatus.connectivity;
+    let savedWifiProfiles = this.currentStatus.savedWifiProfiles;
+    let showAPScreen = this.currentStatus.showAPScreen;
 
     if (isOnline) {
       try {
@@ -55,28 +64,43 @@ class NetworkDetector {
 
         if (response.ok) {
           const data = await response.json();
-          isWifiConnected = data.connected || false;
-          ssid = data.ssid;
-          ip = data.ip;
-          logger.info('Network status fetched', { isWifiConnected, ssid, ip });
+          ssid = typeof data.ssid === 'string' ? data.ssid : undefined;
+          ip = typeof data.ip === 'string' ? data.ip : undefined;
 
-          if (typeof data.should_activate_ap === 'boolean') {
-            shouldActivateAP = data.should_activate_ap;
-          } else {
-            shouldActivateAP = !isWifiConnected;
+          const connectivityValue = typeof data.connectivity === 'string' ? data.connectivity.toLowerCase() : 'unknown';
+          if (connectivityValue === 'full' || connectivityValue === 'limited' || connectivityValue === 'portal' || connectivityValue === 'none') {
+            connectivity = connectivityValue;
           }
+
+          apActive = data.ap_active === true;
+          savedWifiProfiles = data.saved_wifi_profiles === true;
+          const connectedField = typeof data.connected === 'boolean' ? data.connected : undefined;
+          isWifiConnected = connectedField ?? connectivity === 'full';
+          showAPScreen = apActive;
+
+          logger.info('Network status fetched', {
+            connectivity,
+            apActive,
+            savedWifiProfiles,
+            isWifiConnected,
+            ssid,
+            ip,
+          });
         }
       } catch (error) {
         logger.warn('Cannot reach backend, assuming disconnected', { error });
       }
     } else {
-      shouldActivateAP = !isWifiConnected;
+      showAPScreen = apActive;
     }
 
     const status: NetworkStatus = {
       isOnline,
       isWifiConnected,
-      shouldActivateAP,
+      apActive,
+      connectivity,
+      savedWifiProfiles,
+      showAPScreen,
       ssid,
       ip,
     };
@@ -86,38 +110,14 @@ class NetworkDetector {
       this.currentStatus = status;
       this.notifyListeners(status);
       
-      if (shouldActivateAP) {
-        logger.warn('No WiFi connection detected, AP mode should be activated');
-        this.requestAPMode();
+      if (showAPScreen) {
+        logger.warn('BasculaAP active; showing AP provisioning screen');
       } else {
-        logger.info('WiFi connected, AP mode should be deactivated');
-        this.requestStationMode();
+        logger.info('AP provisioning screen not required');
       }
     }
 
     return status;
-  }
-
-  private async requestAPMode() {
-    try {
-      await fetch('/api/network/enable-ap', {
-        method: 'POST',
-      });
-      logger.info('AP mode activation requested');
-    } catch (error) {
-      logger.error('Failed to request AP mode', { error });
-    }
-  }
-
-  private async requestStationMode() {
-    try {
-      await fetch('/api/network/disable-ap', {
-        method: 'POST',
-      });
-      logger.info('Station mode requested (AP disabled)');
-    } catch (error) {
-      logger.error('Failed to disable AP mode', { error });
-    }
   }
 
   private notifyListeners(status: NetworkStatus) {
@@ -125,7 +125,7 @@ class NetworkDetector {
   }
 
   // Public API
-  startMonitoring(intervalMs: number = 30000) {
+  startMonitoring(intervalMs: number = 3000) {
     if (this.checkInterval) {
       this.stopMonitoring();
     }

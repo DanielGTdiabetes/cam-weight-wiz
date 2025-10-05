@@ -70,7 +70,11 @@ export const APModeScreen = () => {
         const response = await fetch("/api/miniweb/status", { cache: "no-store" });
         if (response.ok) {
           const status = await response.json();
-          if (status?.connected === true && status?.ap_active === false) {
+          if (
+            status?.ap_active === false &&
+            typeof status?.connectivity === "string" &&
+            status.connectivity.toLowerCase() === "full"
+          ) {
             const ssid = typeof status.ssid === "string" && status.ssid ? status.ssid : "tu red WiFi";
             const ip =
               (typeof status.ip === "string" && status.ip) ||

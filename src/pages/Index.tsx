@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { MainMenu } from "@/components/MainMenu";
 import { ScaleView } from "@/pages/ScaleView";
 import { FoodScannerView } from "@/pages/FoodScannerView";
@@ -28,8 +28,13 @@ const Index = () => {
   const [show1515Mode, setShow1515Mode] = useState(false);
   const [showRecovery, setShowRecovery] = useState(false);
   const [showAPMode, setShowAPMode] = useState(false);
+  const [networkStatusState, setNetworkStatusState] = useState<NetworkStatus | null>(null);
+  const [networkNotice, setNetworkNotice] = useState<
+    { message: string; type: "info" | "warning" | "success" | "error" } | null
+  >(null);
   const [mascoMsg, setMascoMsg] = useState<string | undefined>();
   const [basculinMood, setBasculinMood] = useState<"normal" | "happy" | "worried" | "alert" | "sleeping">("normal");
+  const previousNetworkStatus = useRef<NetworkStatus | null>(null);
 
   // Monitor glucose if diabetes mode is enabled
   const glucoseData = useGlucoseMonitor(diabetesMode);
@@ -81,28 +86,48 @@ const Index = () => {
   // Monitor network status for AP mode
   useEffect(() => {
     const handleNetworkStatus = (status: NetworkStatus) => {
-      // Show AP mode screen if WiFi is not connected
-      setShowAPMode(status.shouldActivateAP);
-      
-      // Show notification if reconnected
-      if (status.isWifiConnected && showAPMode) {
-        setNotification(`Conectado a ${status.ssid}`);
-        setBasculinMood("happy");
-        setMascoMsg("¡WiFi conectado!");
+      setNetworkStatusState(status);
+      setShowAPMode(status.showAPScreen);
+
+      const previous = previousNetworkStatus.current;
+
+      if (status.showAPScreen) {
+        setNetworkNotice({
+          message: "Modo punto de acceso activo para provisión de Wi-Fi",
+          type: "info",
+        });
+        setBasculinMood("alert");
+        setMascoMsg("Configura la Wi-Fi desde el modo AP");
+      } else if (status.connectivity === "full") {
+        if (!previous || previous.connectivity !== "full" || previous.showAPScreen) {
+          const ssidLabel = status.ssid ? `Conectado a ${status.ssid}` : "Conectado a Internet";
+          setNetworkNotice({ message: ssidLabel, type: "success" });
+          setBasculinMood("happy");
+          setMascoMsg("¡WiFi conectado!");
+        } else {
+          setNetworkNotice(null);
+        }
+      } else if (!status.showAPScreen && status.savedWifiProfiles) {
+        if (!previous || previous.connectivity === "full" || previous.showAPScreen) {
+          setNetworkNotice({ message: "Sin conexión (reintentando)", type: "warning" });
+          setBasculinMood("worried");
+          setMascoMsg("Reintentando conexión Wi-Fi…");
+        }
+      } else {
+        setNetworkNotice(null);
       }
+
+      previousNetworkStatus.current = status;
     };
 
-    // Subscribe to network status
     networkDetector.subscribe(handleNetworkStatus);
-    
-    // Start monitoring (check every 30 seconds)
-    networkDetector.startMonitoring(30000);
+    networkDetector.startMonitoring(2500);
 
     return () => {
       networkDetector.unsubscribe(handleNetworkStatus);
       networkDetector.stopMonitoring();
     };
-  }, [showAPMode]);
+  }, []);
 
   const handleTimerStart = async (seconds: number) => {
     setTimerSeconds(seconds);
@@ -185,7 +210,11 @@ const Index = () => {
         <>
           <TopBar
             isVoiceActive={isVoiceActive}
-            isWifiConnected={true}
+            isWifiConnected={
+              networkStatusState?.connectivity === "full"
+                ? true
+                : networkStatusState?.isWifiConnected ?? false
+            }
             glucose={glucoseData?.glucose}
             glucoseTrend={glucoseData?.trend}
             timerSeconds={timerSeconds}
@@ -193,11 +222,16 @@ const Index = () => {
             onTimerClick={() => setShowTimerDialog(true)}
             onVoiceToggle={() => setIsVoiceActive(!isVoiceActive)}
           />
-          <NotificationBar
-            message={notification}
-            type="info"
-            onClose={() => setNotification("")}
-          />
+          {networkNotice && (
+            <NotificationBar
+              message={networkNotice.message}
+              type={networkNotice.type}
+              onClose={() => setNetworkNotice(null)}
+            />
+          )}
+          {notification && (
+            <NotificationBar message={notification} type="info" onClose={() => setNotification("")} />
+          )}
         </>
       )}
 
