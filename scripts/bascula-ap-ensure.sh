@@ -10,34 +10,16 @@ AP_PSK="${AP_PSK:-${AP_PASS:-Bascula1234}}"
 AP_IFACE="${AP_IFACE:-wlan0}"
 AP_GATEWAY="192.168.4.1"
 AP_CIDR="${AP_GATEWAY}/24"
+AP_PROFILE_DIR="/etc/NetworkManager/system-connections"
+AP_PROFILE_PATH="${AP_PROFILE_DIR}/${AP_NAME}.nmconnection"
 FORCE_AP_FLAG="/run/bascula/force_ap"
 MINIWEB_SERVICE="bascula-miniweb"
+CONNECTIVITY_REASON=""
 
 NMCLI_BIN="${NMCLI_BIN:-$(command -v nmcli 2>/dev/null || true)}"
 if [[ -z "${NMCLI_BIN}" ]]; then
   printf '[bascula-ap-ensure][err] nmcli requerido pero no disponible\n' >&2
   exit 1
-fi
-
-force_ap=0
-if [[ -f "${FORCE_AP_FLAG}" ]]; then
-  force_ap=1
-fi
-
-if (( force_ap == 0 )); then
-  if "${NMCLI_BIN}" -t -f DEVICE,STATE,CONNECTION device status | grep -q "^${AP_IFACE}:connected:"; then
-    echo "[bascula-ap-ensure] ${AP_IFACE} already connected; exit fast"
-    exit 0
-  fi
-
-  if "${NMCLI_BIN}" -t -f NAME,TYPE connection show \
-    | grep -v "^${AP_NAME}:wifi$" \
-    | grep -q ':wifi$'; then
-    echo "[bascula-ap-ensure] saved Wi-Fi profiles present; do not create AP"
-    exit 0
-  fi
-else
-  echo "[bascula-ap-ensure] force_ap flag present; continuing"
 fi
 
 log_msg() {
@@ -124,121 +106,94 @@ run_nmcli() {
   fi
 }
 
-profile_exists() {
-  "${NMCLI_BIN}" -t -f NAME,TYPE connection show 2>/dev/null | grep -Fxq "${AP_NAME}:wifi"
+has_saved_wifi_profiles() {
+  "${NMCLI_BIN}" -t -f TYPE,AUTOCONNECT connection show 2>/dev/null \
+    | awk -F: '$1=="802-11-wireless" && tolower($2)=="yes"{found=1} END{exit(found?0:1)}'
 }
 
-profile_needs_repair() {
-  local get
-  get() {
-    "${NMCLI_BIN}" -t -g "$1" connection show "${AP_NAME}" 2>/dev/null || echo ""
-  }
-
-  local cur_ssid cur_mode cur_band cur_channel cur_ipv4 cur_auto cur_prio cur_mgmt cur_proto cur_pmf cur_psk
-  cur_ssid="$(get 802-11-wireless.ssid)"
-  cur_mode="$(get 802-11-wireless.mode)"
-  cur_band="$(get 802-11-wireless.band)"
-  cur_channel="$(get 802-11-wireless.channel)"
-  cur_ipv4="$(get ipv4.method)"
-  cur_auto="$(get connection.autoconnect)"
-  cur_prio="$(get connection.autoconnect-priority)"
-  cur_mgmt="$(get wifi-sec.key-mgmt)"
-  cur_proto="$(get wifi-sec.proto)"
-  cur_proto="${cur_proto,,}"
-  cur_pmf="$(get 802-11-wireless-security.pmf)"
-  cur_psk="$(get wifi-sec.psk)"
-
-  local want_mode="ap" want_band="${AP_BAND:-bg}" want_channel="${AP_CHANNEL:-1}"
-  local want_ipv4="shared" want_auto="no" want_prio="-999" want_mgmt="wpa-psk" want_proto="rsn" want_pmf="1"
-
-  [[ "${cur_ssid}" == "${AP_SSID}" ]] || return 0
-  [[ "${cur_mode}" == "${want_mode}" ]] || return 0
-  [[ "${cur_band}" == "${want_band}" ]] || return 0
-  [[ "${cur_channel:-}" == "${want_channel}" ]] || return 0
-  [[ "${cur_ipv4}" == "${want_ipv4}" ]] || return 0
-  [[ "${cur_auto}" == "${want_auto}" ]] || return 0
-  [[ "${cur_prio}" == "${want_prio}" ]] || return 0
-  [[ "${cur_mgmt}" == "${want_mgmt}" ]] || return 0
-  [[ "${cur_proto}" == *"${want_proto}"* ]] || return 0
-  [[ "${cur_pmf}" == "${want_pmf}" ]] || return 0
-
-  if [[ -n "${AP_PSK:-}" ]]; then
-    [[ "${cur_psk}" == "${AP_PSK}" ]] || return 0
-  fi
-
-  return 1
-}
-
-apply_ap_profile_settings() {
-  local -a modify_cmd=(
-    connection
-    modify
-    "${AP_NAME}"
-    802-11-wireless.ssid
-    "${AP_SSID}"
-    802-11-wireless.mode
-    ap
-    802-11-wireless.band
-    "${AP_BAND:-bg}"
-    802-11-wireless.channel
-    "${AP_CHANNEL:-1}"
-    802-11-wireless.hidden
-    yes
-    802-11-wireless-security.pmf
-    1
-    wifi-sec.key-mgmt
-    wpa-psk
-    wifi-sec.proto
-    rsn
-    ipv4.method
-    shared
-    ipv4.addresses
-    "${AP_CIDR}"
-    ipv4.gateway
-    "${AP_GATEWAY}"
-    ipv4.never-default
-    yes
-    ipv6.method
-    ignore
-    connection.interface-name
-    "${AP_IFACE}"
-    connection.autoconnect
-    no
-    connection.autoconnect-priority
-    -999
-    connection.autoconnect-retries
-    0
-    connection.permissions
-    "user:root"
-  )
-
-  if [[ -n "${AP_PSK:-}" ]]; then
-    modify_cmd+=(
-      wifi-sec.psk
-      "${AP_PSK}"
-    )
-  fi
-
-  run_nmcli "${modify_cmd[@]}"
+disable_client_connections() {
+  local -a active
+  mapfile -t active < <("${NMCLI_BIN}" -t -f NAME,DEVICE connection show --active 2>/dev/null || true)
+  local entry name device
+  for entry in "${active[@]}"; do
+    [[ -z "${entry}" ]] && continue
+    name="${entry%%:*}"
+    device="${entry##*:}"
+    [[ "${device}" != "${AP_IFACE}" ]] && continue
+    [[ "${name}" == "${AP_NAME}" ]] && continue
+    log_info "Desactivando conexión cliente ${name} en ${device}"
+    run_nmcli con down "${name}" || true
+  done
 }
 
 ensure_ap_profile() {
-  if ! profile_exists; then
+  if ! "${NMCLI_BIN}" -t -f NAME connection show "${AP_NAME}" >/dev/null 2>&1; then
     log_info "Creando perfil AP ${AP_NAME}"
-    if ! run_nmcli connection add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}"; then
-      log_error "No se pudo crear el perfil ${AP_NAME}"
-      return 1
-    fi
-    apply_ap_profile_settings || return 1
+    run_nmcli con add type wifi ifname "${AP_IFACE}" con-name "${AP_NAME}" ssid "${AP_SSID}" || true
+  fi
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless.ssid "${AP_SSID}" || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless.mode ap || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless.band bg || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless.channel 1 || true
+
+  run_nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk || true
+  run_nmcli con modify "${AP_NAME}" wifi-sec.proto rsn || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless-security.pmf 1 || true
+  run_nmcli con modify "${AP_NAME}" wifi-sec.psk "${AP_PSK}" || true
+
+  run_nmcli con modify "${AP_NAME}" ipv4.method shared || true
+  run_nmcli con modify "${AP_NAME}" ipv4.addresses "${AP_CIDR}" || true
+  run_nmcli con modify "${AP_NAME}" ipv4.gateway "${AP_GATEWAY}" || true
+  run_nmcli con modify "${AP_NAME}" ipv4.never-default yes || true
+  run_nmcli con modify "${AP_NAME}" ipv6.method ignore || true
+
+  run_nmcli con modify "${AP_NAME}" connection.interface-name "${AP_IFACE}" || true
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect no || true
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect-priority -999 || true
+}
+
+harden_ap_profile() {
+  # Asegura que NM NO auto-arranque el AP jamás
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect no || true
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect-priority -999 || true
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect-retries 0 || true
+  run_nmcli con modify "${AP_NAME}" connection.permissions "user:root" || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless.hidden yes || true
+  run_nmcli con modify "${AP_NAME}" ipv4.never-default yes || true
+  run_nmcli con modify "${AP_NAME}" ipv6.method ignore || true
+}
+
+ap_is_active() {
+  "${NMCLI_BIN}" -t -f NAME connection show --active 2>/dev/null | grep -Fxq "${AP_NAME}" || return 1
+  return 0
+}
+
+ethernet_is_connected() {
+  "${NMCLI_BIN}" -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
+    | awk -F: 'tolower($2)=="ethernet" && tolower($3)=="connected"{found=1} END{exit(found?0:1)}'
+}
+
+nm_connectivity_is_full() {
+  local status
+  status="$("${NMCLI_BIN}" -t -f CONNECTIVITY general status 2>/dev/null || true)"
+  [[ -n "${status}" && "${status,,}" == "full" ]]
+}
+
+has_real_connectivity() {
+  CONNECTIVITY_REASON=""
+  if has_saved_wifi_profiles; then
+    CONNECTIVITY_REASON="perfiles Wi-Fi guardados"
     return 0
   fi
-
-  if profile_needs_repair; then
-    log_warn "Reparando perfil AP ${AP_NAME}"
-    apply_ap_profile_settings || return 1
-  else
-    log_info "Perfil AP ${AP_NAME} ya presente"
+  if ethernet_is_connected; then
+    CONNECTIVITY_REASON="ethernet conectada"
+    return 0
   fi
+  if nm_connectivity_is_full; then
+    CONNECTIVITY_REASON="NetworkManager CONNECTIVITY=full"
+    return 0
+  fi
+  return 1
 }
 
 restart_miniweb() {
@@ -260,15 +215,34 @@ main() {
   rfkill unblock wifi >/dev/null 2>&1 || log_warn "No se pudo desbloquear rfkill"
   run_nmcli radio wifi on || true
 
-  ensure_ap_profile || exit 1
+  local force_ap=0
+  [[ -f "${FORCE_AP_FLAG}" ]] && force_ap=1
 
-  if "${NMCLI_BIN}" -w 10 connection up "${AP_NAME}" >/dev/null 2>&1; then
+  ensure_ap_profile
+  harden_ap_profile
+
+  if (( force_ap == 0 )) && has_real_connectivity; then
+    log_info "Conectividad real detectada (${CONNECTIVITY_REASON})"
+    harden_ap_profile
+    if ap_is_active; then
+      log_info "Desactivando AP por conectividad existente"
+      run_nmcli con down "${AP_NAME}" || true
+      run_nmcli dev disconnect "${AP_IFACE}" || true
+    fi
+    exit 0
+  fi
+
+  local connectivity_note=""
+  (( force_ap == 1 )) && connectivity_note=" (force_ap)"
+  log_info "Sin conectividad real${connectivity_note}; asegurando AP de provisión"
+  harden_ap_profile
+  disable_client_connections
+  if run_nmcli con up "${AP_NAME}"; then
     log_info "${AP_NAME} activa en ${AP_IFACE} (${AP_CIDR})"
     restart_miniweb
     exit 0
   fi
-
-  echo "[bascula-ap-ensure] failed to activate AP"
+  log_error "No se pudo activar ${AP_NAME}"
   exit 1
 }
 
