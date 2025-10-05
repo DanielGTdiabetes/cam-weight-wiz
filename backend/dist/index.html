@@ -18,20 +18,26 @@
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:site" content="@lovable_dev" />
     <meta name="twitter:image" content="https://lovable.dev/opengraph-image-p98pqg.png" />
-    <script type="module" crossorigin src="/assets/index-BPAPH84e.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CtADUwdD.css">
+    <script type="module" crossorigin src="/assets/index-CRMp6JqJ.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BjMV_hei.css">
   </head>
 
   <body>
     <div id="root"></div>
     <script>
-      // Register service worker for PWA
       if ('serviceWorker' in navigator) {
-        window.addEventListener('load', () => {
-          navigator.serviceWorker.register('/service-worker.js')
-            .then(reg => console.log('Service Worker registered'))
-            .catch(err => console.error('Service Worker registration failed:', err));
-        });
+        // Unregister any previously installed SW to avoid stale caches/offline pages
+        navigator.serviceWorker
+          .getRegistrations()
+          .then((regs) => Promise.all(regs.map((r) => r.unregister())))
+          .catch(() => {});
+        // Optional: also clear caches created by old SWs
+        if (window.caches && caches.keys) {
+          caches
+            .keys()
+            .then((keys) => keys.forEach((k) => caches.delete(k)))
+            .catch(() => {});
+        }
       }
     </script>
   </body>

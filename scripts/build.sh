@@ -14,10 +14,6 @@ else
   npm install --no-audit --no-fund
 fi
 
-if command -v node >/dev/null 2>&1; then
-  node scripts/generate-service-worker.mjs
-fi
-
 npm run build
 
 mkdir -p "${DIST_DIR}/config"
