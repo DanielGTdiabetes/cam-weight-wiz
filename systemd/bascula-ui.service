@@ -14,6 +14,8 @@ WorkingDirectory=/home/pi/bascula-ui
 Environment=HOME=/home/pi
 Environment=USER=pi
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+# Asegurar DISPLAY para Xorg
+Environment=DISPLAY=:0
 PermissionsStartOnly=yes
 ExecStartPre=/usr/bin/install -d -m 0755 -o pi -g pi /var/log/bascula
 ExecStartPre=/usr/bin/install -o pi -g pi -m 0644 /dev/null /var/log/bascula/app.log

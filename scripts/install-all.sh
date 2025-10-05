@@ -1266,6 +1266,10 @@ log "Instalando helper wait-miniweb..."
 install -Dm755 "${PROJECT_ROOT}/scripts/wait-miniweb.sh" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh"
 chown "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh" || true
 
+log "Instalando launcher del kiosko..."
+install -Dm755 "${PROJECT_ROOT}/scripts/kiosk-launch.sh" "${BASCULA_CURRENT_LINK}/scripts/kiosk-launch.sh"
+chown "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_CURRENT_LINK}/scripts/kiosk-launch.sh" || true
+
 # Install AP ensure service and script
 log "[17a/20] Configurando servicio de arranque de AP..."
 AP_ENSURE_SERVICE_INSTALLED=0
@@ -1485,10 +1489,16 @@ echo "  x735off          # apagar el sistema de forma segura"
 echo ""
 log "Instalación finalizada"
 log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
+systemctl_safe daemon-reload
 log "Reiniciando bascula-miniweb para aplicar la última compilación"
-systemctl_safe restart bascula-miniweb.service
-log "Reiniciando bascula-app (UI kiosk) para aplicar la espera de Mini-Web"
-systemctl_safe restart bascula-app.service
+systemctl_safe restart bascula-miniweb.service || true
+if [[ "${HAS_SYSTEMD}" -eq 1 ]] && systemctl list-unit-files | grep -q '^bascula-kiosk\.service'; then
+  log "Reiniciando bascula-kiosk (UI kiosk)"
+  systemctl_safe restart bascula-kiosk.service || true
+else
+  log "Reiniciando bascula-app (UI kiosk)"
+  systemctl_safe restart bascula-app.service || true
+fi
 systemctl_safe status bascula-miniweb --no-pager -l
 if command -v ss >/dev/null 2>&1; then
   ss -ltnp | grep 8080 || true
