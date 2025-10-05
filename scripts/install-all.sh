@@ -127,16 +127,39 @@ systemctl_safe() {
 safe_install() {
   local src="$1"
   local dst="$2"
-  if [ -e "${src}" ] && [ -e "${dst}" ]; then
-    local src_real dst_real
-    src_real=$(readlink -f "${src}" 2>/dev/null || echo "")
-    dst_real=$(readlink -f "${dst}" 2>/dev/null || echo "")
-    if [[ -n "${src_real}" && -n "${dst_real}" && "${src_real}" == "${dst_real}" ]]; then
-      echo "[inst][info] skip install: ${dst} ya es el mismo fichero"
-      return 0
+  local mode="${3:-}"
+  local owner="${4:-}"
+  local src_real dst_real
+
+  src_real="$(readlink -f -- "${src}" 2>/dev/null || true)"
+  if [[ -e "${dst}" || -L "${dst}" ]]; then
+    dst_real="$(readlink -f -- "${dst}" 2>/dev/null || true)"
+  else
+    dst_real=""
+  fi
+
+  if [[ -n "${src_real}" && -n "${dst_real}" && "${src_real}" == "${dst_real}" ]]; then
+    log "skip (same file): ${dst}"
+    return 0
+  fi
+
+  install -d "$(dirname -- "${dst}")"
+
+  local install_args=()
+  if [[ -n "${mode}" ]]; then
+    install_args+=(-m "${mode}")
+  fi
+
+  if [[ -n "${owner}" ]]; then
+    local owner_user="${owner%%:*}"
+    local owner_group="${owner#*:}"
+    install_args+=(-o "${owner_user}")
+    if [[ "${owner_group}" != "${owner}" && -n "${owner_group}" ]]; then
+      install_args+=(-g "${owner_group}")
     fi
   fi
-  install -m 0755 "${src}" "${dst}"
+
+  install "${install_args[@]}" -- "${src}" "${dst}"
 }
 
 install_x735() {
@@ -1258,16 +1281,16 @@ if [[ ! -f "${SYSTEMD_SRC}" ]]; then
   exit 1
 fi
 
-install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
+safe_install "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service 0644
 log "✓ Mini-web backend configurado"
 
 # --- Mini-Web wait helper ---
 log "Instalando helper wait-miniweb..."
-install -Dm755 "${PROJECT_ROOT}/scripts/wait-miniweb.sh" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh"
+safe_install "${PROJECT_ROOT}/scripts/wait-miniweb.sh" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh" 0755
 chown "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh" || true
 
 log "Instalando launcher del kiosko..."
-install -Dm755 "${PROJECT_ROOT}/scripts/kiosk-launch.sh" "${BASCULA_CURRENT_LINK}/scripts/kiosk-launch.sh"
+safe_install "${PROJECT_ROOT}/scripts/kiosk-launch.sh" "${BASCULA_CURRENT_LINK}/scripts/kiosk-launch.sh" 0755
 chown "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_CURRENT_LINK}/scripts/kiosk-launch.sh" || true
 
 # Install AP ensure service and script
@@ -1278,7 +1301,7 @@ AP_ENSURE_SCRIPT_SRC="${PROJECT_ROOT}/scripts/bascula-ap-ensure.sh"
 AP_ENSURE_SCRIPT_DST="${BASCULA_CURRENT_LINK}/scripts/bascula-ap-ensure.sh"
 if [[ -f "${AP_ENSURE_SCRIPT_SRC}" ]]; then
   install -d "${BASCULA_CURRENT_LINK}/scripts"
-  safe_install "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}"
+  safe_install "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}" 0755
   chown "${TARGET_USER}:${TARGET_GROUP}" "${AP_ENSURE_SCRIPT_DST}" || true
   log "✓ Script bascula-ap-ensure.sh desplegado en ${AP_ENSURE_SCRIPT_DST}"
 else
