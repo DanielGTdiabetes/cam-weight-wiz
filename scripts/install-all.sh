@@ -167,6 +167,8 @@ configure_pi_boot_hardware() {
   local bootcfg="${CONF}"
   local ts="$(date +%Y%m%d-%H%M%S)"
   local dac_name="${HW_DAC_NAME:-hifiberry-dac}"
+  local block_start="# --- Bascula-Cam: Hardware Configuration ---"
+  local block_end="# --- Bascula-Cam (end) ---"
 
   if [[ ! -f "${bootcfg}" ]]; then
     warn "config.txt no existe en ${bootcfg}"
@@ -180,27 +182,32 @@ configure_pi_boot_hardware() {
 
   backup_boot_config_once "${bootcfg}" "${ts}" || true
 
-  if ! grep -q "Bascula-Cam: Hardware Configuration" "${bootcfg}"; then
-    {
-      printf '\n# --- Bascula-Cam: Hardware Configuration ---\n'
-      printf '# (autoconfig generado por install-all.sh)\n'
-    } >> "${bootcfg}"
+  local cleaned="${bootcfg}.clean.$$"
+  if awk -v start="${block_start}" -v end="${block_end}" '
+    BEGIN {skip=0}
+    $0 == start {skip=1; next}
+    skip && $0 == end {skip=0; next}
+    !skip {print}
+  ' "${bootcfg}" > "${cleaned}"; then
+    mv "${cleaned}" "${bootcfg}"
+  else
+    rm -f "${cleaned}"
+    warn "No se pudo limpiar bloque previo Bascula-Cam en ${bootcfg}"
   fi
 
-  if grep -q '^# --- Bascula-Cam (end) ---' "${bootcfg}"; then
-    sed -i '/^# --- Bascula-Cam (end) ---$/d' "${bootcfg}"
-  fi
-
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2c_arm=.*' 'dtparam=i2c_arm=on'
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2s=.*' 'dtparam=i2s=on'
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=spi=.*' 'dtparam=spi=on'
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=audio=.*' 'dtparam=audio=off'
-  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=i2s-mmap' 'dtoverlay=i2s-mmap'
-  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=hifiberry-[[:alnum:]_-]+' "dtoverlay=${dac_name}"
-  ensure_bootcfg_line "${bootcfg}" 'camera_auto_detect=.*' 'camera_auto_detect=1'
-  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=imx708' 'dtoverlay=imx708'
-
-  printf '# --- Bascula-Cam (end) ---\n' >> "${bootcfg}"
+  {
+    printf '\n%s\n' "${block_start}"
+    printf '# (autoconfig generado por install-all.sh)\n'
+    printf 'dtparam=i2c_arm=on\n'
+    printf 'dtparam=i2s=on\n'
+    printf 'dtparam=spi=on\n'
+    printf 'dtparam=audio=off\n'
+    printf 'dtoverlay=i2s-mmap\n'
+    printf 'dtoverlay=%s\n' "${dac_name}"
+    printf 'camera_auto_detect=1\n'
+    printf 'dtoverlay=imx708\n'
+    printf '%s\n' "${block_end}"
+  } >> "${bootcfg}" || warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
 
   local tmp_file="${bootcfg}.tmp.$$"
   if awk 'NR==1 {prev=$0; print; next} {if ($0 != prev) print; prev=$0}' "${bootcfg}" > "${tmp_file}"; then
@@ -210,7 +217,88 @@ configure_pi_boot_hardware() {
     warn "No se pudo limpiar duplicados en ${bootcfg}"
   fi
 
+  printf '[install] Cámara Picamera2 configurada\n'
   printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708). Requiere reboot.\n' "${dac_name}"
+}
+
+configure_hifiberry_audio() {
+  local cards_file="/proc/asound/cards"
+  local asound_conf="/etc/asound.conf"
+
+  if [[ ! -f "${cards_file}" ]] || ! grep -qi 'snd_rpi_hifiberry_dac' "${cards_file}"; then
+    warn "DAC HifiBerry no detectado; omitiendo configuración de audio"
+    return
+  fi
+
+  cat > "${asound_conf}" <<'EOF'
+pcm.!default {
+  type asym
+  playback.pcm {
+    type plug
+    slave.pcm "hw:1,0"
+  }
+  capture.pcm {
+    type plug
+    slave.pcm "hw:0,0"
+  }
+}
+ctl.!default {
+  type hw
+  card 1
+}
+EOF
+
+  if command -v alsactl >/dev/null 2>&1; then
+    if ! alsactl store >/dev/null 2>&1; then
+      warn "No se pudo ejecutar alsactl store"
+    fi
+  else
+    warn "alsactl no disponible; no se guardó el estado de audio"
+  fi
+
+  printf '[install] Audio (HifiBerry DAC) configurado\n'
+}
+
+configure_usb_microphone() {
+  if ! amixer -c 0 scontrols >/dev/null 2>&1; then
+    warn "No se pudo acceder a controles de la tarjeta 0; omitiendo Mic"
+    return
+  fi
+
+  if ! amixer -c 0 scontrols 2>/dev/null | grep -q "'Mic'"; then
+    warn "Control 'Mic' no disponible en la tarjeta 0"
+    return
+  fi
+
+  amixer -c 0 set Mic 16 unmute >/dev/null 2>&1 || true
+  amixer -c 0 set 'Auto Gain Control' on >/dev/null 2>&1 || true
+
+  printf '[install] Micrófono USB configurado con ganancia máxima\n'
+}
+
+post_install_hardware_checks() {
+  if aplay -l >/dev/null 2>&1; then
+    printf '[install] aplay -l ok\n'
+  else
+    warn "Verificación aplay -l falló"
+  fi
+
+  if arecord -l >/dev/null 2>&1; then
+    printf '[install] arecord -l ok\n'
+  else
+    warn "Verificación arecord -l falló"
+  fi
+
+  local picamera_msg
+  if picamera_msg=$(python3 -c "from picamera2 import Picamera2; print('Picamera2 OK')" 2>/dev/null); then
+    if [[ -n "${picamera_msg}" ]]; then
+      printf '[install] %s\n' "${picamera_msg}"
+    else
+      printf '[install] Picamera2 OK\n'
+    fi
+  else
+    warn "Picamera2 no disponible o falló la prueba"
+  fi
 }
 
 # --- Require root privileges ---
@@ -555,14 +643,24 @@ systemctl_safe enable NetworkManager-wait-online.service
 # Install camera dependencies
 log "[4/20] Instalando dependencias de cámara..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-    if apt-get install -y libcamera-apps v4l-utils python3-picamera2 \
-        python3-libcamera libcamera-ipa python3-opencv; then
+    if apt-get install -y rpicam-apps v4l-utils python3-picamera2; then
         log "✓ Dependencias de cámara instaladas"
     else
-        warn "No se pudieron instalar todas las dependencias de cámara"
+        warn "No se pudieron instalar dependencias de cámara"
     fi
 else
     warn "Sin red: omitiendo dependencias de cámara"
+fi
+
+log "[4a/20] Instalando herramientas de audio..."
+if [[ "${NET_OK}" -eq 1 ]]; then
+    if apt-get install -y alsa-utils sox ffmpeg; then
+        log "✓ Herramientas de audio instaladas"
+    else
+        warn "No se pudieron instalar herramientas de audio"
+    fi
+else
+    warn "Sin red: omitiendo herramientas de audio"
 fi
 
 # Install Node.js
@@ -595,6 +693,9 @@ for grp in "${HARDWARE_GROUPS[@]}"; do
     warn "Grupo ${grp} no existe en el sistema; omitiendo"
   fi
 done
+if ! usermod -aG video,render,input,dialout "${TARGET_USER}"; then
+  warn "No se pudieron añadir grupos básicos de hardware a ${TARGET_USER}"
+fi
 log "✓ Usuario ${TARGET_USER} añadido a grupos disponibles"
 
 # Garantiza acceso a UART para usuario pi
@@ -617,6 +718,9 @@ else
 fi
 
 ensure_enable_uart "${CONF}"
+
+configure_hifiberry_audio
+configure_usb_microphone
 
 # Disable Bluetooth UART
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
@@ -1500,6 +1604,8 @@ log "[20/20] Ajustando permisos finales..."
 install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /var/log/bascula
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}" /opt/ocr-service
 log "✓ Permisos ajustados"
+
+post_install_hardware_checks
 
 # Quick nmcli verification (logging only)
 if command -v nmcli >/dev/null 2>&1; then
