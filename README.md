@@ -48,7 +48,7 @@ La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo
 |--------|-----------------------------|---------------------------------------------------------------------------------------|
 | GET    | `/api/miniweb/scan-networks`| Escanea redes visibles y devuelve `{ssid, signal, sec, in_use, secured}` por entrada. 【F:backend/miniweb.py†L134-L183】|
 | POST   | `/api/miniweb/connect`      | Recrea el perfil Wi-Fi con el SSID indicado, fija `autoconnect` (prioridad 120), baja `BasculaAP` y activa la nueva red. 【F:backend/miniweb.py†L1446-L1573】|
-| GET    | `/api/miniweb/status`       | Devuelve el estado actual (`connected`, `ssid`, `ip`, `ethernet_connected`, `ap_active`, `should_activate_ap`). 【F:backend/miniweb.py†L531-L575】|
+| GET    | `/api/miniweb/status`       | Devuelve el estado actual (`connected`, `internet`, `ssid`, `ip`, `ethernet_connected`, `ap_active`, `should_activate_ap`). 【F:backend/miniweb.py†L1707-L1808】|
 
 > El endpoint legado `/api/miniweb/connect-wifi` permanece disponible como alias para compatibilidad.
 
