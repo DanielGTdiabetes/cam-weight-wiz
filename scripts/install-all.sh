@@ -23,6 +23,44 @@ warn() { printf "${YELLOW}[inst][warn]${NC} %s\n" "$*"; }
 err()  { printf "${RED}[inst][err]${NC} %s\n" "$*"; }
 fail() { err "$*"; exit 1; }
 
+disable_cloud_init() {
+  local bootcfg_dir="/boot/firmware"
+  local mark_file="${bootcfg_dir}/cloud-init.disabled"
+  local cmdline="${bootcfg_dir}/cmdline.txt"
+
+  echo "[install] Disabling cloud-init (if present)"
+
+  if [ -d "${bootcfg_dir}" ]; then
+    if [ ! -f "${mark_file}" ]; then
+      touch "${mark_file}" || true
+      echo "[install] Created ${mark_file}"
+    else
+      echo "[install] Marker already present: ${mark_file}"
+    fi
+
+    if [ -f "${cmdline}" ] && ! grep -q 'cloud-init=disabled' "${cmdline}"; then
+      sed -i '1 s|$| cloud-init=disabled|' "${cmdline}" || true
+      echo "[install] Appended cloud-init=disabled to ${cmdline}"
+    fi
+  else
+    echo "[install] ${bootcfg_dir} not found; skipping boot markers"
+  fi
+
+  if [[ "${HAS_SYSTEMD:-0}" -eq 1 ]]; then
+    if systemctl list-unit-files | grep -q '^cloud-init\\.service'; then
+      systemctl disable --now cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service || true
+      systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service || true
+      echo "[install] cloud-init services disabled & masked"
+    else
+      echo "[install] cloud-init services not found (ok)"
+    fi
+  else
+    echo "[install] systemd not available; skipping cloud-init services"
+  fi
+
+  echo "[install] cloud-init disabled (reboot recommended)"
+}
+
 apt_has() {
   dpkg -s "$1" >/dev/null 2>&1
 }
@@ -570,6 +608,7 @@ if [[ ! -f "${CONF}" ]]; then
 elif [[ "${SKIP_HARDWARE_CONFIG:-0}" == "1" ]]; then
   warn "SKIP_HARDWARE_CONFIG=1, saltando modificación de config.txt"
 elif grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
+  disable_cloud_init || true
   if ! configure_pi_boot_hardware; then
     warn "No se pudo completar la autoconfiguración de hardware"
   fi
