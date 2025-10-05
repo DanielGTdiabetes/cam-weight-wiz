@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect } from "react";
 import { Wifi, Lock, Save, RefreshCw, Check, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -31,12 +31,6 @@ interface ApiErrorResponse {
   detail?: string | { code?: string; message?: string };
 }
 
-interface PinStatusResponse {
-  pin?: string;
-  pinRequired?: boolean;
-  message?: string;
-}
-
 export const MiniWebConfig = () => {
   const [networks, setNetworks] = useState<WifiNetwork[]>([]);
   const [selectedSSID, setSelectedSSID] = useState("");
@@ -56,7 +50,64 @@ export const MiniWebConfig = () => {
 
   const selectedNetwork = networks.find((network) => network.ssid === selectedSSID);
 
-  const loadNetworks = useCallback(async () => {
+  useEffect(() => {
+    const fetchPin = async () => {
+      try {
+        const response = await fetch('/api/miniweb/pin');
+        if (response.ok) {
+          const data = await response.json();
+          if (data?.pin) {
+            setDevicePin(data.pin);
+            setPinMessage(null);
+          }
+        } else if (response.status === 403) {
+          setDevicePin(null);
+          setPinMessage('El PIN se muestra en la pantalla del dispositivo');
+        } else {
+          setDevicePin(null);
+          setPinMessage('No se pudo obtener el PIN. Verifica la conexión.');
+        }
+      } catch (error) {
+        logger.error('Failed to fetch PIN', { error });
+        setDevicePin(null);
+        setPinMessage('No se pudo obtener el PIN. Verifica la conexión.');
+      }
+    };
+
+    fetchPin();
+  }, []);
+
+  // Check PIN for security
+  const checkPin = async (inputPin: string) => {
+    try {
+      const response = await fetch('/api/miniweb/verify-pin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: inputPin }),
+      });
+      
+      if (response.ok) {
+        setIsPinValid(true);
+        loadNetworks();
+      } else if (response.status === 429) {
+        toast({
+          title: 'Demasiados intentos',
+          description: 'Espera unos minutos antes de volver a intentar.',
+          variant: 'destructive',
+        });
+      } else {
+        toast({
+          title: "PIN incorrecto",
+          description: "Verifica el PIN en la pantalla del dispositivo",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      logger.error('Failed to verify PIN', { error });
+    }
+  };
+
+  const loadNetworks = async () => {
     setConnectionStatus({ type: 'idle', message: '' });
     setIsScanning(true);
     try {
@@ -78,9 +129,11 @@ export const MiniWebConfig = () => {
           mapped.sort((a, b) => b.signal - a.signal);
           setNetworks(mapped);
 
-          const active = mapped.find((net) => net.in_use);
-          if (active) {
-            setSelectedSSID((current) => (current ? current : active.ssid));
+          if (!selectedSSID) {
+            const active = mapped.find((net) => net.in_use);
+            if (active) {
+              setSelectedSSID(active.ssid);
+            }
           }
         } else {
           setNetworks([]);
@@ -124,94 +177,7 @@ export const MiniWebConfig = () => {
     } finally {
       setIsScanning(false);
     }
-  }, [toast]);
-
-  const checkPin = useCallback(
-    async (inputPin: string) => {
-      try {
-        const response = await fetch('/api/miniweb/verify-pin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pin: inputPin }),
-        });
-
-        if (response.ok) {
-          setIsPinValid(true);
-          await loadNetworks();
-        } else if (response.status === 429) {
-          toast({
-            title: 'Demasiados intentos',
-            description: 'Espera unos minutos antes de volver a intentar.',
-            variant: 'destructive',
-          });
-        } else {
-          toast({
-            title: 'PIN incorrecto',
-            description: 'Verifica el PIN en la pantalla del dispositivo',
-            variant: 'destructive',
-          });
-        }
-      } catch (error) {
-        logger.error('Failed to verify PIN', { error });
-      }
-    },
-    [loadNetworks, toast]
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const fetchPin = async () => {
-      try {
-        const response = await fetch('/api/miniweb/pin', { cache: 'no-store' });
-        if (cancelled) {
-          return;
-        }
-
-        if (response.ok) {
-          const data = (await response.json().catch(() => null)) as PinStatusResponse | null;
-          const pinValue = data && typeof data.pin === 'string' ? data.pin : null;
-          const requiresPin = data?.pinRequired === false ? false : true;
-
-          if (cancelled) {
-            return;
-          }
-
-          setDevicePin(pinValue);
-
-          if (requiresPin) {
-            setIsPinValid(false);
-            setPinMessage(
-              data?.message ?? 'Introduce el PIN que aparece en la pantalla del dispositivo.'
-            );
-          } else {
-            setIsPinValid(true);
-            setPinMessage(data?.message ?? 'No se requiere PIN en esta red.');
-            await loadNetworks();
-          }
-        } else {
-          setDevicePin(null);
-          setIsPinValid(false);
-          if (!cancelled) {
-            setPinMessage('No se pudo obtener el PIN. Verifica la conexión.');
-          }
-        }
-      } catch (error) {
-        logger.error('Failed to fetch PIN', { error });
-        if (!cancelled) {
-          setDevicePin(null);
-          setIsPinValid(false);
-          setPinMessage('No se pudo obtener el PIN. Verifica la conexión.');
-        }
-      }
-    };
-
-    void fetchPin();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [loadNetworks]);
+  };
 
   const handleConnect = async () => {
     if (!selectedSSID) {
