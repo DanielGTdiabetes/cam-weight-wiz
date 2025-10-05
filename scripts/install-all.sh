@@ -142,27 +142,28 @@ configure_pi_boot_hardware() {
 
   backup_boot_config_once "${bootcfg}" "${ts}" || true
 
-  if ! grep -q "Bascula-Cam: Hardware Configuration" "${bootcfg}"; then
-    {
-      printf '\n# --- Bascula-Cam: Hardware Configuration ---\n'
-      printf '# (autoconfig generado por install-all.sh)\n'
-    } >> "${bootcfg}"
+  if grep -q "Bascula-Cam: Hardware Configuration" "${bootcfg}"; then
+    if sed -i '/# --- Bascula-Cam: Hardware Configuration ---/,/# --- Bascula-Cam (end) ---/d' "${bootcfg}"; then
+      printf '[install] Removed previous Bascula-Cam block\n'
+    else
+      warn "No se pudo eliminar bloque previo Bascula-Cam en ${bootcfg}"
+    fi
   fi
 
-  if grep -q '^# --- Bascula-Cam (end) ---' "${bootcfg}"; then
-    sed -i '/^# --- Bascula-Cam (end) ---$/d' "${bootcfg}"
-  fi
-
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2c_arm=.*' 'dtparam=i2c_arm=on'
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2s=.*' 'dtparam=i2s=on'
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=spi=.*' 'dtparam=spi=on'
-  ensure_bootcfg_line "${bootcfg}" 'dtparam=audio=.*' 'dtparam=audio=off'
-  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=i2s-mmap' 'dtoverlay=i2s-mmap'
-  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=hifiberry-[[:alnum:]_-]+' "dtoverlay=${dac_name}"
-  ensure_bootcfg_line "${bootcfg}" 'camera_auto_detect=.*' 'camera_auto_detect=1'
-  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=imx708' 'dtoverlay=imx708'
-
-  printf '# --- Bascula-Cam (end) ---\n' >> "${bootcfg}"
+  {
+    printf '\n'
+    printf '# --- Bascula-Cam: Hardware Configuration ---\n'
+    printf '# (autoconfig generado por install-all.sh)\n'
+    printf 'dtparam=i2c_arm=on\n'
+    printf 'dtparam=i2s=on\n'
+    printf 'dtparam=spi=on\n'
+    printf 'dtparam=audio=off\n'
+    printf 'dtoverlay=i2s-mmap\n'
+    printf 'dtoverlay=%s\n' "${dac_name}"
+    printf 'camera_auto_detect=1\n'
+    printf 'dtoverlay=imx708\n'
+    printf '# --- Bascula-Cam (end) ---\n'
+  } >> "${bootcfg}" || warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
 
   local tmp_file="${bootcfg}.tmp.$$"
   if awk 'NR==1 {prev=$0; print; next} {if ($0 != prev) print; prev=$0}' "${bootcfg}" > "${tmp_file}"; then
