@@ -14,6 +14,7 @@ AP_PROFILE_DIR="/etc/NetworkManager/system-connections"
 AP_PROFILE_PATH="${AP_PROFILE_DIR}/${AP_NAME}.nmconnection"
 FORCE_AP_FLAG="/run/bascula/force_ap"
 MINIWEB_SERVICE="bascula-miniweb"
+CONNECTIVITY_REASON=""
 
 NMCLI_BIN="${NMCLI_BIN:-$(command -v nmcli 2>/dev/null || true)}"
 if [[ -z "${NMCLI_BIN}" ]]; then
@@ -137,7 +138,7 @@ ensure_ap_profile() {
 
   run_nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk || true
   run_nmcli con modify "${AP_NAME}" wifi-sec.proto rsn || true
-  run_nmcli con modify "${AP_NAME}" 802-11-wireless-security.pmf 2 || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless-security.pmf 1 || true
   run_nmcli con modify "${AP_NAME}" wifi-sec.psk "${AP_PSK}" || true
 
   run_nmcli con modify "${AP_NAME}" ipv4.method shared || true
@@ -148,12 +149,51 @@ ensure_ap_profile() {
 
   run_nmcli con modify "${AP_NAME}" connection.interface-name "${AP_IFACE}" || true
   run_nmcli con modify "${AP_NAME}" connection.autoconnect no || true
-  run_nmcli con modify "${AP_NAME}" connection.autoconnect-priority 0 || true
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect-priority -999 || true
+}
+
+harden_ap_profile() {
+  # Asegura que NM NO auto-arranque el AP jamás
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect no || true
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect-priority -999 || true
+  run_nmcli con modify "${AP_NAME}" connection.autoconnect-retries 0 || true
+  run_nmcli con modify "${AP_NAME}" connection.permissions "user:root" || true
+  run_nmcli con modify "${AP_NAME}" 802-11-wireless.hidden yes || true
+  run_nmcli con modify "${AP_NAME}" ipv4.never-default yes || true
+  run_nmcli con modify "${AP_NAME}" ipv6.method ignore || true
 }
 
 ap_is_active() {
   "${NMCLI_BIN}" -t -f NAME connection show --active 2>/dev/null | grep -Fxq "${AP_NAME}" || return 1
   return 0
+}
+
+ethernet_is_connected() {
+  "${NMCLI_BIN}" -t -f DEVICE,TYPE,STATE device status 2>/dev/null \
+    | awk -F: 'tolower($2)=="ethernet" && tolower($3)=="connected"{found=1} END{exit(found?0:1)}'
+}
+
+nm_connectivity_is_full() {
+  local status
+  status="$("${NMCLI_BIN}" -t -f CONNECTIVITY general status 2>/dev/null || true)"
+  [[ -n "${status}" && "${status,,}" == "full" ]]
+}
+
+has_real_connectivity() {
+  CONNECTIVITY_REASON=""
+  if has_saved_wifi_profiles; then
+    CONNECTIVITY_REASON="perfiles Wi-Fi guardados"
+    return 0
+  fi
+  if ethernet_is_connected; then
+    CONNECTIVITY_REASON="ethernet conectada"
+    return 0
+  fi
+  if nm_connectivity_is_full; then
+    CONNECTIVITY_REASON="NetworkManager CONNECTIVITY=full"
+    return 0
+  fi
+  return 1
 }
 
 restart_miniweb() {
@@ -178,17 +218,24 @@ main() {
   local force_ap=0
   [[ -f "${FORCE_AP_FLAG}" ]] && force_ap=1
 
-  if has_saved_wifi_profiles && (( force_ap == 0 )); then
-    log_info "Hay perfiles Wi-Fi guardados: no se activa AP"
+  ensure_ap_profile
+  harden_ap_profile
+
+  if (( force_ap == 0 )) && has_real_connectivity; then
+    log_info "Conectividad real detectada (${CONNECTIVITY_REASON})"
+    harden_ap_profile
     if ap_is_active; then
-      log_info "AP activa con perfiles presentes; bajando AP"
+      log_info "Desactivando AP por conectividad existente"
       run_nmcli con down "${AP_NAME}" || true
+      run_nmcli dev disconnect "${AP_IFACE}" || true
     fi
     exit 0
   fi
 
-  log_info "Sin perfiles guardados (o force_ap): asegurando AP de provisión"
-  ensure_ap_profile
+  local connectivity_note=""
+  (( force_ap == 1 )) && connectivity_note=" (force_ap)"
+  log_info "Sin conectividad real${connectivity_note}; asegurando AP de provisión"
+  harden_ap_profile
   disable_client_connections
   if run_nmcli con up "${AP_NAME}"; then
     log_info "${AP_NAME} activa en ${AP_IFACE} (${AP_CIDR})"

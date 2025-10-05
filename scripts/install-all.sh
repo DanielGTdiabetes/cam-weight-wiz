@@ -714,50 +714,84 @@ if command -v nmcli >/dev/null 2>&1; then
   install -d -m 0700 /etc/NetworkManager/system-connections
   target_ap_path="/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
 
-  if [[ ! -f "${target_ap_path}" ]]; then
+  ap_uuid=""
+  if [[ -f "${target_ap_path}" ]]; then
+    ap_uuid="$(awk -F= 'tolower($1)=="uuid"{print $2; exit}' "${target_ap_path}" | tr -d '[:space:]' || true)"
+  fi
+  if [[ -z "${ap_uuid}" ]]; then
     if command -v uuidgen >/dev/null 2>&1; then
       ap_uuid="$(uuidgen)"
     else
       ap_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
     fi
-    cat >"${target_ap_path}" <<EOF
+  fi
+
+  tmp_ap_cfg="$(mktemp)"
+  cat >"${tmp_ap_cfg}" <<EOF
 [connection]
 id=${AP_NAME}
 uuid=${ap_uuid}
 type=wifi
 interface-name=${AP_IFACE}
 autoconnect=false
-autoconnect-priority=0
+autoconnect-priority=-999
+autoconnect-retries=0
+permissions=user:root
 
 [wifi]
-ssid=${AP_SSID}
 mode=ap
+ssid=${AP_SSID}
 band=bg
 channel=1
+hidden=true
 
 [wifi-security]
 key-mgmt=wpa-psk
-proto=rsn
-pmf=2
 psk=${AP_PASS}
+proto=rsn
+pmf=1
 
 [ipv4]
 method=shared
-address1=${AP_GATEWAY}/24
-gateway=${AP_GATEWAY}
+address1=${AP_GATEWAY}/24,${AP_GATEWAY}
 never-default=true
 
 [ipv6]
 method=ignore
 EOF
-    chmod 600 "${target_ap_path}" || warn "No se pudieron ajustar permisos de ${target_ap_path}"
+  install -m 0600 "${tmp_ap_cfg}" "${target_ap_path}"
+  rm -f "${tmp_ap_cfg}"
+  chmod 600 "${target_ap_path}" || warn "No se pudieron ajustar permisos de ${target_ap_path}"
+  chown root:root "${target_ap_path}" || warn "No se pudo ajustar propietario de ${target_ap_path}"
+
+  if ! nmcli connection reload >/dev/null 2>&1; then
+    warn "No se pudo recargar conexiones NM tras actualizar ${AP_NAME}"
   fi
 
   if ! nmcli con load "${target_ap_path}" >/dev/null 2>&1; then
     warn "No se pudo cargar ${AP_NAME} desde ${target_ap_path}"
   fi
 
-  chmod 600 "${target_ap_path}" || warn "No se pudieron ajustar permisos de ${target_ap_path}"
+  nmcli con modify "${AP_NAME}" \
+    connection.id "${AP_NAME}" \
+    connection.interface-name "${AP_IFACE}" \
+    connection.autoconnect no \
+    connection.autoconnect-priority -999 \
+    connection.autoconnect-retries 0 \
+    connection.permissions "user:root" \
+    802-11-wireless.mode ap \
+    802-11-wireless.ssid "${AP_SSID}" \
+    802-11-wireless.band bg \
+    802-11-wireless.channel 1 \
+    802-11-wireless.hidden yes \
+    wifi-sec.key-mgmt wpa-psk \
+    wifi-sec.proto rsn \
+    802-11-wireless-security.pmf 1 \
+    wifi-sec.psk "${AP_PASS}" \
+    ipv4.method shared \
+    ipv4.addresses "${AP_GATEWAY}/24 ${AP_GATEWAY}" \
+    ipv4.never-default yes \
+    ipv6.method ignore >/dev/null 2>&1 || warn "No se pudieron fijar parámetros de ${AP_NAME}"
 
   while IFS=: read -r name uuid filename; do
     [[ "${name}" != "${AP_NAME}" ]] && continue
@@ -765,12 +799,6 @@ EOF
     [[ "${filename}" == "${target_ap_path}" ]] && continue
     nmcli con delete uuid "${uuid}" >/dev/null 2>&1 || true
   done < <(nmcli -t -f NAME,UUID,FILENAME con show 2>/dev/null || true)
-
-  nmcli con modify "${AP_NAME}" 802-11-wireless.ssid "${AP_SSID}" 802-11-wireless.mode ap 802-11-wireless.band bg 802-11-wireless.channel 1 >/dev/null 2>&1 || warn "No se pudieron fijar parámetros Wi-Fi"
-  nmcli con modify "${AP_NAME}" wifi-sec.key-mgmt wpa-psk wifi-sec.proto rsn 802-11-wireless-security.pmf 2 wifi-sec.psk "${AP_PASS}" >/dev/null 2>&1 || warn "No se pudo configurar la seguridad Wi-Fi"
-  nmcli con modify "${AP_NAME}" ipv4.method shared ipv4.addresses "${AP_GATEWAY}/24" ipv4.gateway "${AP_GATEWAY}" ipv4.never-default yes >/dev/null 2>&1 || warn "No se pudo fijar IPv4 compartida"
-  nmcli con modify "${AP_NAME}" ipv6.method ignore >/dev/null 2>&1 || warn "No se pudo fijar IPv6 ignore"
-  nmcli con modify "${AP_NAME}" connection.interface-name "${AP_IFACE}" connection.autoconnect no connection.autoconnect-priority 0 >/dev/null 2>&1 || warn "No se pudieron fijar parámetros de conexión"
 
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     systemctl disable --now dnsmasq 2>/dev/null || true
