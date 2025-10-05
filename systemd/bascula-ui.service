@@ -1,7 +1,6 @@
 [Unit]
 Description=Bascula Digital Pro - UI (Xorg kiosk)
-After=network-online.target
-Wants=network-online.target
+After=graphical.target systemd-user-sessions.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=3
