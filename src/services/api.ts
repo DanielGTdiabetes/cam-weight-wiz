@@ -65,6 +65,24 @@ export interface GlucoseData {
   timestamp: string;
 }
 
+export interface VoiceInfo {
+  id: string;
+  name?: string;
+  engine: string;
+}
+
+export interface VoiceListResponse {
+  voices: VoiceInfo[];
+  defaultVoice?: string;
+  engine: string;
+}
+
+export interface VoiceTranscriptionResult {
+  ok: boolean;
+  transcript: string | null;
+  reason?: string;
+}
+
 class ApiService {
   constructor() {
     // Update API base URL from settings
@@ -171,8 +189,98 @@ class ApiService {
   }
 
   // Voice/TTS endpoints
-  async speak(text: string, voice?: string): Promise<void> {
-    await apiWrapper.post('/api/voice/speak', { text, voice });
+  async getVoices(): Promise<VoiceListResponse> {
+    const response = await apiWrapper.get<{
+      ok?: boolean;
+      engine?: string;
+      voices?: VoiceInfo[];
+      default_voice?: string;
+    }>('/api/voice/tts/voices');
+
+    const engine = response.engine ?? 'unknown';
+    const voices = (response.voices ?? []).map((voice) => ({
+      id: voice.id,
+      name: voice.name ?? voice.id,
+      engine: voice.engine ?? engine,
+    }));
+
+    return {
+      voices,
+      defaultVoice: response.default_voice ?? voices[0]?.id,
+      engine,
+    };
+  }
+
+  async synthesizeVoice(text: string, voice?: string): Promise<ArrayBuffer> {
+    const settings = storage.getSettings();
+    const params = new URLSearchParams({ text });
+    if (voice) {
+      params.append('voice', voice);
+    }
+
+    const response = await fetch(`${settings.apiUrl}/api/voice/tts/synthesize?${params.toString()}`, {
+      method: 'POST',
+    });
+
+    if (!response.ok) {
+      throw new ApiError('No se pudo sintetizar la voz', response.status);
+    }
+
+    return await response.arrayBuffer();
+  }
+
+  async say(text: string, voice?: string, playLocal = true): Promise<void> {
+    const settings = storage.getSettings();
+    const params = new URLSearchParams({
+      text,
+      play_local: playLocal ? 'true' : 'false',
+    });
+    if (voice) {
+      params.append('voice', voice);
+    }
+
+    const response = await fetch(`${settings.apiUrl}/api/voice/tts/say?${params.toString()}`, {
+      method: 'POST',
+    });
+
+    if (!response.ok) {
+      throw new ApiError('No se pudo reproducir el audio', response.status);
+    }
+
+    // Leer el cuerpo para completar la solicitud aunque no lo usemos.
+    await response.arrayBuffer();
+  }
+
+  async uploadVoiceClip(blob: Blob, filename: string): Promise<void> {
+    const settings = storage.getSettings();
+    const formData = new FormData();
+    formData.append('file', blob, filename);
+
+    const response = await fetch(`${settings.apiUrl}/api/voice/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new ApiError('No se pudo guardar el clip de voz', response.status);
+    }
+  }
+
+  async transcribeVoice(blob: Blob): Promise<VoiceTranscriptionResult> {
+    const settings = storage.getSettings();
+    const formData = new FormData();
+    formData.append('file', blob, 'recording.webm');
+
+    const response = await fetch(`${settings.apiUrl}/api/voice/transcribe`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      throw new ApiError('No se pudo transcribir el audio', response.status);
+    }
+
+    return await response.json();
   }
 
   // Recipe endpoints

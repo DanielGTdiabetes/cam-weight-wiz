@@ -69,7 +69,7 @@ export const TimerFullView = () => {
     }
     completionTriggeredRef.current = true;
     playAlarm();
-    void api.speak("Temporizador finalizado").catch(() => undefined);
+    void api.say("Temporizador finalizado").catch(() => undefined);
   }, [playAlarm]);
 
 

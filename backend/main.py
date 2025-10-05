@@ -29,6 +29,7 @@ import re
 
 from scale_service import HX711Service
 from serial_scale_service import SerialScaleService
+from bascula.api.voice import router as voice_router
 
 
 CHATGPT_MODELS = [
@@ -439,10 +440,6 @@ class BolusData(BaseModel):
     insulin: float
     timestamp: str
 
-class SpeakRequest(BaseModel):
-    text: str
-    voice: Optional[str] = "es_ES-mls_10246-medium"
-
 class RecipeRequest(BaseModel):
     prompt: str
     servings: Optional[int] = None
@@ -561,6 +558,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(voice_router)
 
 # ============= SCALE ENDPOINTS =============
 
@@ -995,43 +994,6 @@ async def export_bolus(data: BolusData):
                 return {"success": True}
             else:
                 raise HTTPException(status_code=500, detail="Failed to export")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ============= VOICE/TTS =============
-
-@app.post("/api/voice/speak")
-async def speak_text(data: SpeakRequest):
-    """Convert text to speech using Piper TTS"""
-    try:
-        # Sanitize text to prevent command injection
-        safe_text = data.text.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-        
-        # Use Piper TTS if installed
-        if os.path.exists("/usr/local/bin/piper"):
-            voice_model = f"/opt/piper/models/{data.voice}.onnx"
-            if os.path.exists(voice_model):
-                # Generate speech using piped commands safely
-                echo_proc = subprocess.Popen(
-                    ["echo", data.text],
-                    stdout=subprocess.PIPE
-                )
-                piper_proc = subprocess.Popen(
-                    ["piper", "--model", voice_model, "--output-raw"],
-                    stdin=echo_proc.stdout,
-                    stdout=subprocess.PIPE
-                )
-                subprocess.Popen(
-                    ["aplay", "-r", "22050", "-f", "S16_LE"],
-                    stdin=piper_proc.stdout
-                )
-                echo_proc.stdout.close()
-                piper_proc.stdout.close()
-                return {"success": True}
-        
-        # Fallback to espeak (already safe with list)
-        subprocess.Popen(["espeak", "-v", "es", data.text])
-        return {"success": True, "fallback": "espeak"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
