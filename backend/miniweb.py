@@ -2041,6 +2041,26 @@ async def scan_networks():
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+def _map_wifi_connect_failure(res: subprocess.CompletedProcess) -> tuple[int, str]:
+    out = (res.stdout or "").strip().lower()
+    err = (res.stderr or "").strip().lower()
+    txt = f"{out}\n{err}"
+
+    if "not authorized" in txt or "requires authorization" in txt or "not privileged" in txt:
+        return 403, "NMCLI_NOT_AUTHORIZED"
+
+    if "no network with ssid" in txt or "not found" in txt:
+        return 400, "ssid_not_found"
+
+    if "wrong password" in txt or "bad password" in txt or "secrets were required" in txt or "invalid wifi password" in txt:
+        return 400, "wrong_password"
+
+    if "timed out" in txt or "timeout" in txt:
+        return 400, "timeout"
+
+    return 400, "wifi_up_failed"
+
+
 async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
     ssid = credentials.ssid.strip()
     if not ssid:
@@ -2060,19 +2080,122 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
 
     sanitized_password = password.replace("\x00", "").replace("\r", "").replace("\n", "") if password else ""
 
-    LOG_NETWORK.info("Received connect request for SSID '%s' (secured=%s)", ssid, credentials.secured)
+    LOG_NETWORK.info("wifi_connect attempt ssid='%s'", ssid)
 
     global _LAST_WIFI_CONNECT_REQUEST
     _LAST_WIFI_CONNECT_REQUEST = ssid
 
     try:
-        await _create_or_update_wifi_profile(
-            ssid,
-            sanitized_password if credentials.secured else None,
-            credentials.secured,
+        await _run_nmcli_async(
+            _nmcli_args("con", "down", AP_CONNECTION_ID),
+            check=False,
+            ok_codes={0, 10},
         )
+        await _run_nmcli_async(
+            _nmcli_args("con", "modify", AP_CONNECTION_ID, "connection.autoconnect", "no"),
+            check=False,
+            ok_codes={0, 10},
+        )
+
+        await _run_nmcli_async(_nmcli_args("radio", "wifi", "on"), check=False)
+
+        saved_profile = False
+        profile_res = await _run_nmcli_async(
+            _nmcli_args("-t", "-f", "NAME,TYPE", "con", "show"),
+            check=False,
+        )
+        if profile_res.returncode == 0:
+            for line in (profile_res.stdout or "").splitlines():
+                name_type = line.split(":", 1)
+                if len(name_type) != 2:
+                    continue
+                name, ctype = name_type
+                if name == ssid and ctype == "802-11-wireless":
+                    saved_profile = True
+                    break
+
+        if saved_profile:
+            connect_cmd = _nmcli_args("-w", "25", "con", "up", ssid, "ifname", WIFI_INTERFACE)
+        else:
+            connect_cmd = _nmcli_args(
+                "-w",
+                "25",
+                "dev",
+                "wifi",
+                "connect",
+                ssid,
+                "ifname",
+                WIFI_INTERFACE,
+            )
+            if credentials.secured and sanitized_password:
+                connect_cmd.extend(["password", sanitized_password])
+
+        connect_res = await _run_nmcli_async(connect_cmd, check=False, timeout=40)
+        if connect_res.returncode != 0:
+            status_code, message = _map_wifi_connect_failure(connect_res)
+            LOG_NETWORK.warning(
+                "wifi_connect failure ssid='%s' rc=%s msg=%r",
+                ssid,
+                connect_res.returncode,
+                (connect_res.stderr or connect_res.stdout or "")[-400:],
+            )
+            raise HTTPException(status_code=status_code, detail=message)
+
+        dev_status = await _run_nmcli_async(
+            _nmcli_args("-t", "-f", "DEVICE,STATE,CONNECTION", "dev"),
+            check=False,
+            timeout=10,
+        )
+        associated = False
+        if dev_status.returncode == 0:
+            for line in (dev_status.stdout or "").splitlines():
+                if line.startswith(f"{WIFI_INTERFACE}:connected:"):
+                    associated = True
+                    break
+
+        if not associated:
+            LOG_NETWORK.warning("wifi_connect association check failed for ssid='%s'", ssid)
+            raise HTTPException(status_code=400, detail="timeout")
+
+        conn_info = await _run_nmcli_async(
+            _nmcli_args("-t", "-f", "GENERAL.CONNECTION", "dev", "show", WIFI_INTERFACE),
+            check=False,
+            timeout=10,
+        )
+        connection_name: Optional[str] = None
+        if conn_info.returncode == 0:
+            for raw in (conn_info.stdout or "").splitlines():
+                if not raw.startswith("GENERAL.CONNECTION:"):
+                    continue
+                value = raw.split(":", 1)[1].strip()
+                if value and value != "--":
+                    connection_name = value
+                    break
+
+        if not connection_name:
+            LOG_NETWORK.warning("wifi_connect ssid='%s' without connection name", ssid)
+            raise HTTPException(status_code=400, detail="timeout")
+
+        LOG_NETWORK.info("wifi_connect associated ssid='%s'", connection_name)
+
+        try:
+            subprocess.Popen(
+                [
+                    "/bin/bash",
+                    "-lc",
+                    "(sleep 0.5; systemctl try-restart bascula-app) >/dev/null 2>&1 &",
+                ]
+            )
+            LOG_NETWORK.info("wifi_connect spawn kiosk restart ssid='%s'", connection_name)
+        except Exception as exc:
+            LOG_NETWORK.warning("wifi_connect could not spawn kiosk restart: %s", exc)
+
+        return {"ok": True, "ssid": connection_name}
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
     except PermissionError as exc:
-        _LAST_WIFI_CONNECT_REQUEST = None
         code = str(exc)
         if code == "NMCLI_NOT_AVAILABLE":
             raise HTTPException(
@@ -2082,171 +2205,11 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
         if code == "NMCLI_NOT_AUTHORIZED":
             raise HTTPException(status_code=403, detail={"code": code}) from exc
         raise HTTPException(status_code=400, detail={"code": code}) from exc
-    except RuntimeError as exc:
-        _LAST_WIFI_CONNECT_REQUEST = None
-        raise HTTPException(status_code=400, detail={"code": "wifi_profile_failed", "message": str(exc)}) from exc
-    except subprocess.CalledProcessError as exc:
-        _LAST_WIFI_CONNECT_REQUEST = None
-        LOG_NETWORK.warning(
-            "Fallo al preparar perfil Wi-Fi %s: rc=%s err=%r", ssid, exc.returncode, (exc.stderr or exc.output or "")[-400:]
-        )
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "wifi_profile_failed",
-                "message": (exc.stderr or exc.output or str(exc))[:500],
-            },
-        ) from exc
-    except FileNotFoundError as exc:
-        _LAST_WIFI_CONNECT_REQUEST = None
-        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
     except Exception as exc:
-        _LAST_WIFI_CONNECT_REQUEST = None
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    ap_disabled = False
-    success = False
-
-    try:
-        await _run_nmcli_async(
-            _nmcli_args("con", "modify", AP_CONNECTION_ID, "connection.autoconnect", "no"),
-            check=False,
-            ok_codes={0, 10},
-        )
-
-        down_res = await _run_nmcli_async(
-            _nmcli_args("con", "down", AP_CONNECTION_ID),
-            check=False,
-            ok_codes={0, 10},
-        )
-        if down_res.returncode in {0, 10}:
-            ap_disabled = True
-
-        await _run_nmcli_async(_nmcli_args("radio", "wifi", "on"), check=False)
-
-        LOG_NETWORK.info("Activating Wi-Fi connection '%s'", ssid)
-        await _run_nmcli_async(_nmcli_args("con", "up", ssid))
-
-        state_check = await _run_nmcli_async(
-            _nmcli_args("-t", "-f", "STATE", "g"),
-            check=False,
-        )
-        state_txt = (state_check.stdout or "").strip()
-        if state_txt:
-            LOG_NETWORK.debug("NetworkManager general state: %s", state_txt)
-
-        ok, ip_address = await _wait_for_wifi_activation(timeout_s=45.0)
-        if ok and ip_address:
-            if _ip_is_ap_subnet(ip_address):
-                LOG_NETWORK.warning(
-                    "Wi-Fi '%s' obtained AP subnet IP %s; keeping AP disabled and reporting failure",
-                    ssid,
-                    ip_address,
-                )
-                if ap_disabled:
-                    await _reactivate_ap_after_failure()
-                raise HTTPException(
-                    status_code=502,
-                    detail={
-                        "code": "WIFI_IP_AP_SUBNET",
-                        "message": "NetworkManager asignó una IP de la red AP (192.168.4.x).",
-                        "ip": ip_address,
-                    },
-                )
-
-            LOG_NETWORK.info("Wi-Fi '%s' connected with IP %s", ssid, ip_address)
-            await _run_nmcli_async(
-                _nmcli_args("con", "down", AP_CONNECTION_ID),
-                check=False,
-                ok_codes={0, 10},
-            )
-            try:
-                await _ensure_ap_autoconnect_disabled(None)
-            except PermissionError as exc:
-                LOG_NETWORK.warning("Could not persist BasculaAP autoconnect=no: %s", exc)
-            success = True
-            try:
-                await asyncio.to_thread(
-                    subprocess.run,
-                    ["systemctl", "restart", "bascula-app"],
-                    check=False,
-                )
-                LOG_NETWORK.info("Servicio bascula-app reiniciado tras conexión Wi-Fi exitosa")
-            except Exception as exc:
-                LOG_NETWORK.debug("No se pudo reiniciar bascula-app: %s", exc)
-            _LAST_WIFI_CONNECT_REQUEST = None
-            return {
-                "success": True,
-                "connected": True,
-                "ssid": ssid,
-                "ip": ip_address,
-                "ap_active": False,
-                "message": f"Conexión Wi-Fi '{ssid}' activada",
-            }
-
-        LOG_NETWORK.warning("Timed out waiting for Wi-Fi '%s' activation", ssid)
-        if ap_disabled:
-            await _reactivate_ap_after_failure()
-        raise HTTPException(status_code=504, detail={"code": "WIFI_ACTIVATION_TIMEOUT", "ssid": ssid})
-    except HTTPException:
-        raise
-    except PermissionError as exc:
-        if ap_disabled:
-            await _reactivate_ap_after_failure()
-        code = str(exc)
-        if code == "NMCLI_NOT_AVAILABLE":
-            raise HTTPException(
-                status_code=503,
-                detail={"code": code, "message": "nmcli no está instalado"},
-            ) from exc
-        raise HTTPException(status_code=400, detail={"code": code}) from exc
-    except RuntimeError as exc:
-        if ap_disabled:
-            await _reactivate_ap_after_failure()
-        message = str(exc)
-        lower = message.lower()
-        if "not authorized" in lower:
-            raise HTTPException(
-                status_code=403,
-                detail={"code": "NMCLI_NOT_AUTHORIZED", "message": message},
-            ) from exc
-        if "secrets were required" in lower:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "NMCLI_SECRETS_REQUIRED",
-                    "message": "NetworkManager requiere secretos adicionales (comprueba la contraseña WPA).",
-                },
-            ) from exc
-        raise HTTPException(status_code=400, detail={"code": "wifi_up_failed", "message": message}) from exc
-    except subprocess.CalledProcessError as exc:
-        LOG_NETWORK.warning(
-            "Fallo al conectar SSID %s: rc=%s, out=%r, err=%r",
-            ssid,
-            exc.returncode,
-            (exc.output or "")[-500:],
-            (exc.stderr or "")[-500:],
-        )
-        if ap_disabled:
-            await _reactivate_ap_after_failure()
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "code": "wifi_up_failed",
-                "message": (exc.stderr or exc.output or str(exc))[:500],
-            },
-        ) from exc
-    except FileNotFoundError as exc:
-        if ap_disabled:
-            await _reactivate_ap_after_failure()
-        raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
-    except Exception as exc:
-        if ap_disabled:
-            await _reactivate_ap_after_failure()
+        LOG_NETWORK.exception("wifi_connect unexpected error ssid='%s'", ssid)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
-        if not success:
-            _LAST_WIFI_CONNECT_REQUEST = None
+        _LAST_WIFI_CONNECT_REQUEST = None
 
 
 @app.post("/api/miniweb/connect")
