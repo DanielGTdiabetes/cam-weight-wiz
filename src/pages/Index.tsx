@@ -12,8 +12,6 @@ import { Mode1515Dialog } from "@/components/Mode1515Dialog";
 import { RecoveryMode } from "@/components/RecoveryMode";
 import { APModeScreen } from "@/components/APModeScreen";
 import { BasculinMascot } from "@/components/BasculinMascot";
-import { Clock, ArrowLeft } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
 import { networkDetector, NetworkStatus } from "@/services/networkDetector";
 import { api } from "@/services/api";
@@ -22,7 +20,9 @@ const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
   const [showTimerDialog, setShowTimerDialog] = useState(false);
   const [timerSeconds, setTimerSeconds] = useState<number | undefined>(undefined);
-  const [notification, setNotification] = useState<string>("");
+  const [notification, setNotification] = useState<
+    { message: string; type?: "info" | "warning" | "success" | "error" }
+  >();
   const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [diabetesMode, setDiabetesMode] = useState(true); // Enable by default for demo
   const [show1515Mode, setShow1515Mode] = useState(false);
@@ -129,6 +129,26 @@ const Index = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const handleBootstrapError = (event: Event) => {
+      const detail = (event as CustomEvent<{ message?: string }>).detail;
+      const message =
+        detail?.message?.trim() ||
+        "No se pudo contactar con la báscula. Continuando en modo sin conexión.";
+
+      setNotification({ message, type: "error" });
+      setNetworkNotice({ message, type: "error" });
+      setBasculinMood("worried");
+      setMascoMsg("Sin conexión con la báscula");
+    };
+
+    window.addEventListener("app:bootstrap-error", handleBootstrapError);
+
+    return () => {
+      window.removeEventListener("app:bootstrap-error", handleBootstrapError);
+    };
+  }, []);
+
   const handleTimerStart = async (seconds: number) => {
     setTimerSeconds(seconds);
     setShowTimerDialog(false);
@@ -205,6 +225,14 @@ const Index = () => {
         enableVoice={isVoiceActive}
       />
 
+      {!showTopBar && notification && (
+        <NotificationBar
+          message={notification.message}
+          type={notification.type ?? "info"}
+          onClose={() => setNotification(undefined)}
+        />
+      )}
+
       {/* Top Bar - Show in most views except menu, timer, recipes */}
       {showTopBar && (
         <>
@@ -233,7 +261,11 @@ const Index = () => {
             />
           )}
           {notification && (
-            <NotificationBar message={notification} type="info" onClose={() => setNotification("")} />
+            <NotificationBar
+              message={notification.message}
+              type={notification.type ?? "info"}
+              onClose={() => setNotification(undefined)}
+            />
           )}
         </>
       )}

@@ -3,6 +3,12 @@ import App from "./App.tsx";
 import "./index.css";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
+declare global {
+  interface WindowEventMap {
+    "app:bootstrap-error": CustomEvent<{ message: string }>;
+  }
+}
+
 const rootElement = document.getElementById("root");
 
 if (!rootElement) {
@@ -27,6 +33,19 @@ type BootstrapState =
     };
 
 const retryDelays = [0, 500, 1000, 2000];
+const isDevelopment = import.meta.env.DEV;
+
+const notifyBootstrapError = (message: string) => {
+  const fallbackMessage =
+    message ||
+    "No se pudo contactar con el backend. La aplicación se iniciará en modo sin conexión.";
+
+  window.dispatchEvent(
+    new CustomEvent("app:bootstrap-error", {
+      detail: { message: fallbackMessage },
+    })
+  );
+};
 
 const BootstrapFallback = (props: BootstrapState) => {
   const { status, attempt, totalAttempts, onRetry } = props;
@@ -101,6 +120,11 @@ const checkBackendReachable = async (): Promise<void> => {
 };
 
 async function bootstrap() {
+  if (isDevelopment) {
+    renderApp();
+    return;
+  }
+
   const totalAttempts = retryDelays.length;
   let lastError = "";
 
@@ -123,13 +147,8 @@ async function bootstrap() {
     }
   }
 
-  renderFallback({
-    status: "error",
-    attempt: totalAttempts,
-    totalAttempts,
-    message: lastError || "No se pudo contactar con el backend. Revisa tu conexión de red.",
-    onRetry: bootstrap,
-  });
+  notifyBootstrapError(lastError);
+  renderApp();
 }
 
 void bootstrap();
