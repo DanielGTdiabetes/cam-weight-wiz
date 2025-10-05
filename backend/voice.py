@@ -172,7 +172,12 @@ def _synthesize_to_file(text: str, voice: Optional[str]) -> Tuple[Path, str]:
         model_entry: Optional[dict] = None
         if voice:
             for candidate_model in models:
-                if voice == candidate_model["id"] or voice == candidate_model["path"]:
+                candidate_path = Path(candidate_model["path"])
+                if (
+                    voice == candidate_model["id"]
+                    or voice == candidate_model["path"]
+                    or voice == candidate_path.name
+                ):
                     model_entry = candidate_model
                     break
             else:
