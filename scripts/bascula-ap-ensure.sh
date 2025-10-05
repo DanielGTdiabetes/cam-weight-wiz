@@ -128,41 +128,76 @@ profile_exists() {
   "${NMCLI_BIN}" -t -f NAME,TYPE connection show 2>/dev/null | grep -Fxq "${AP_NAME}:wifi"
 }
 
-nm_value() {
-  "${NMCLI_BIN}" -g "$1" connection show "${AP_NAME}" 2>/dev/null || true
-}
-
 profile_needs_repair() {
-  local ssid method autoconnect priority
-  ssid="$(nm_value 802-11-wireless.ssid)"
-  method="$(nm_value ipv4.method)"
-  autoconnect="$(nm_value connection.autoconnect)"
-  priority="$(nm_value connection.autoconnect-priority)"
+  local get
+  get() {
+    "${NMCLI_BIN}" -t -g "$1" connection show "${AP_NAME}" 2>/dev/null || echo ""
+  }
 
-  [[ "${ssid}" != "${AP_SSID}" || "${method}" != "shared" || "${autoconnect}" != "no" || "${priority}" != "-999" ]]
+  local cur_ssid cur_mode cur_band cur_channel cur_ipv4 cur_auto cur_prio cur_mgmt cur_proto cur_pmf cur_psk
+  cur_ssid="$(get 802-11-wireless.ssid)"
+  cur_mode="$(get 802-11-wireless.mode)"
+  cur_band="$(get 802-11-wireless.band)"
+  cur_channel="$(get 802-11-wireless.channel)"
+  cur_ipv4="$(get ipv4.method)"
+  cur_auto="$(get connection.autoconnect)"
+  cur_prio="$(get connection.autoconnect-priority)"
+  cur_mgmt="$(get wifi-sec.key-mgmt)"
+  cur_proto="$(get wifi-sec.proto)"
+  cur_proto="${cur_proto,,}"
+  cur_pmf="$(get 802-11-wireless-security.pmf)"
+  cur_psk="$(get wifi-sec.psk)"
+
+  local want_mode="ap" want_band="${AP_BAND:-bg}" want_channel="${AP_CHANNEL:-1}"
+  local want_ipv4="shared" want_auto="no" want_prio="-999" want_mgmt="wpa-psk" want_proto="rsn" want_pmf="1"
+
+  [[ "${cur_ssid}" == "${AP_SSID}" ]] || return 0
+  [[ "${cur_mode}" == "${want_mode}" ]] || return 0
+  [[ "${cur_band}" == "${want_band}" ]] || return 0
+  [[ "${cur_channel:-}" == "${want_channel}" ]] || return 0
+  [[ "${cur_ipv4}" == "${want_ipv4}" ]] || return 0
+  [[ "${cur_auto}" == "${want_auto}" ]] || return 0
+  [[ "${cur_prio}" == "${want_prio}" ]] || return 0
+  [[ "${cur_mgmt}" == "${want_mgmt}" ]] || return 0
+  [[ "${cur_proto}" == *"${want_proto}"* ]] || return 0
+  [[ "${cur_pmf}" == "${want_pmf}" ]] || return 0
+
+  if [[ -n "${AP_PSK:-}" ]]; then
+    [[ "${cur_psk}" == "${AP_PSK}" ]] || return 0
+  fi
+
+  return 1
 }
 
 apply_ap_profile_settings() {
-  run_nmcli connection modify "${AP_NAME}" \
-    802-11-wireless.ssid "${AP_SSID}" \
-    802-11-wireless.mode ap \
-    802-11-wireless.band bg \
-    802-11-wireless.channel 1 \
-    802-11-wireless.hidden yes \
-    802-11-wireless-security.pmf 1 \
-    wifi-sec.key-mgmt wpa-psk \
-    wifi-sec.proto rsn \
-    wifi-sec.psk "${AP_PSK}" \
-    ipv4.method shared \
-    ipv4.addresses "${AP_CIDR}" \
-    ipv4.gateway "${AP_GATEWAY}" \
-    ipv4.never-default yes \
-    ipv6.method ignore \
-    connection.interface-name "${AP_IFACE}" \
-    connection.autoconnect no \
-    connection.autoconnect-priority -999 \
-    connection.autoconnect-retries 0 \
+  local -a modify_cmd=(
+    connection
+    modify "${AP_NAME}"
+    802-11-wireless.ssid "${AP_SSID}"
+    802-11-wireless.mode ap
+    802-11-wireless.band "${AP_BAND:-bg}"
+    802-11-wireless.channel "${AP_CHANNEL:-1}"
+    802-11-wireless.hidden yes
+    802-11-wireless-security.pmf 1
+    wifi-sec.key-mgmt wpa-psk
+    wifi-sec.proto rsn
+    ipv4.method shared
+    ipv4.addresses "${AP_CIDR}"
+    ipv4.gateway "${AP_GATEWAY}"
+    ipv4.never-default yes
+    ipv6.method ignore
+    connection.interface-name "${AP_IFACE}"
+    connection.autoconnect no
+    connection.autoconnect-priority -999
+    connection.autoconnect-retries 0
     connection.permissions "user:root"
+  )
+
+  if [[ -n "${AP_PSK:-}" ]]; then
+    modify_cmd+=(wifi-sec.psk "${AP_PSK}")
+  fi
+
+  run_nmcli "${modify_cmd[@]}"
 }
 
 ensure_ap_profile() {
@@ -212,7 +247,7 @@ main() {
   fi
 
   echo "[bascula-ap-ensure] failed to activate AP"
-  exit 0
+  exit 1
 }
 
 main "$@"
