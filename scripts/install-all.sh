@@ -30,7 +30,12 @@ APT_PACKAGES=(
   v4l-utils
   python3-picamera2
   libcamera-apps
+  xserver-xorg
   xserver-xorg-legacy
+  xinit
+  x11-xserver-utils
+  openbox
+  unclutter
   python3-venv
   tesseract-ocr
   tesseract-ocr-spa
@@ -45,6 +50,16 @@ log "apt-get install -y ${APT_PACKAGES[*]}"
 if ! apt-get install -y "${APT_PACKAGES[@]}"; then
   warn "package installation failed"
 fi
+
+LOG_USER="pi"
+if ! id -u "${LOG_USER}" >/dev/null 2>&1; then
+  warn "user ${LOG_USER} not found; using ${TARGET_USER} for log ownership"
+  LOG_USER="${TARGET_USER}"
+fi
+
+log "ensuring kiosk log directory"
+install -d -m 0755 -o "${LOG_USER}" -g "${LOG_USER}" /var/log/bascula
+install -o "${LOG_USER}" -g "${LOG_USER}" -m 0644 /dev/null /var/log/bascula/app.log
 
 OCR_VENV_DIR="/opt/bascula/venv"
 OCR_CURRENT_DIR="/opt/bascula/current"
