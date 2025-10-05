@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -17,19 +18,39 @@ from starlette.background import BackgroundTask
 VOICE_ROUTER_PREFIX = "/api/voice"
 router = APIRouter(prefix=VOICE_ROUTER_PREFIX, tags=["voice"])
 
-PIPER_MODELS_DIR = Path("/opt/piper/models")
 VOICE_OUTPUT_DIR = Path("/opt/bascula/data/voice")
 WHISPER_DIR = Path("/opt/whisper.cpp")
 SUPPORTED_UPLOAD_EXTENSIONS = {".webm", ".ogg", ".wav", ".mp3"}
 
 
-def _find_piper_models() -> Dict[str, Path]:
-    models: Dict[str, Path] = {}
-    if PIPER_MODELS_DIR.exists():
-        for path in sorted(PIPER_MODELS_DIR.glob("*.onnx")):
-            models[path.name] = path
-            models[path.stem] = path
-    return models
+def _discover_piper() -> list[dict]:
+    bases = [
+        Path("/opt/bascula/voices"),
+        Path("/opt/piper/models"),
+        Path("/usr/local/share/piper/models"),
+        Path("/usr/share/piper/models"),
+    ]
+    out: list[dict] = []
+    seen: set[Path] = set()
+    for base in bases:
+        if base.is_dir():
+            for model_path in sorted(base.glob("*.onnx")):
+                try:
+                    resolved = model_path.resolve()
+                except (FileNotFoundError, OSError):
+                    continue
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                json_path = model_path.with_suffix(model_path.suffix + ".json")
+                out.append(
+                    {
+                        "id": model_path.stem,
+                        "path": str(model_path),
+                        "json": str(json_path) if json_path.exists() else None,
+                    }
+                )
+    return out
 
 
 def _is_espeak_available() -> bool:
@@ -41,24 +62,85 @@ def _is_aplay_available() -> bool:
 
 
 @router.get("/tts/voices")
-def list_voices() -> Dict[str, object]:
-    models = _find_piper_models()
-    unique_models = {path for path in models.values()}
+def list_voices() -> dict[str, object]:
+    models = _discover_piper()
     response_models = [
-        {"id": model_path.stem, "name": model_path.name, "path": str(model_path)}
-        for model_path in sorted(unique_models)
+        {
+            "id": model["id"],
+            "name": Path(model["path"]).name,
+            "path": model["path"],
+            "json": model["json"],
+        }
+        for model in models
     ]
     return {"piper_models": response_models, "espeak_available": _is_espeak_available()}
 
 
-def _synthesize_with_piper(text: str, model_path: Path, output_path: Path) -> None:
-    cmd = ["piper", "--model", str(model_path), "--output_file", str(output_path)]
+def _piper_to_wav(text: str, model_path: str, json_path: Optional[str]) -> bytes:
+    cmd = ["piper", "--model", model_path, "--output_raw"]
+    if json_path:
+        cmd.extend(["--config", json_path])
     try:
-        subprocess.run(cmd, input=text.encode("utf-8"), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = subprocess.run(
+            cmd,
+            input=text.encode("utf-8"),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
     except FileNotFoundError as exc:
         raise RuntimeError("piper_not_found") from exc
     except subprocess.CalledProcessError as exc:  # pragma: no cover - depends on runtime
         raise RuntimeError(f"piper_failed: {exc.stderr.decode(errors='ignore').strip()}") from exc
+
+    pcm_audio = proc.stdout
+
+    sample_rate = 22050
+    if json_path:
+        try:
+            with open(json_path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                rate = data.get("sample_rate")
+                if isinstance(rate, (int, float)):
+                    sample_rate = int(rate)
+                else:
+                    audio_cfg = data.get("audio")
+                    if isinstance(audio_cfg, dict):
+                        audio_rate = audio_cfg.get("sample_rate")
+                        if isinstance(audio_rate, (int, float)):
+                            sample_rate = int(audio_rate)
+        except Exception:  # pragma: no cover - best effort if config unreadable
+            pass
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
+        "-f",
+        "wav",
+        "pipe:1",
+    ]
+    try:
+        ffmpeg_proc = subprocess.run(
+            ffmpeg_cmd,
+            input=pcm_audio,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg_not_found") from exc
+    except subprocess.CalledProcessError as exc:  # pragma: no cover - depends on runtime
+        raise RuntimeError(f"ffmpeg_failed: {exc.stderr.decode(errors='ignore').strip()}") from exc
+
+    return ffmpeg_proc.stdout
 
 
 def _synthesize_with_espeak(text: str, output_path: Path) -> None:
@@ -80,25 +162,34 @@ async def _play_audio_locally(path: Path) -> None:
 
 
 def _synthesize_to_file(text: str, voice: Optional[str]) -> Tuple[Path, str]:
-    models = _find_piper_models()
+    models = _discover_piper()
     selected_backend = "espeak"
     tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp_path = Path(tmp_file.name)
     tmp_file.close()
 
     try:
-        if models:
-            available_models = sorted({path for path in models.values()})
-            model_path: Optional[Path] = None
-            if voice:
-                candidate = Path(voice)
-                if candidate.is_file():
-                    model_path = candidate
-                else:
-                    model_path = models.get(voice)
-            if model_path is None:
-                model_path = available_models[0]
-            _synthesize_with_piper(text, model_path, tmp_path)
+        model_entry: Optional[dict] = None
+        if voice:
+            for candidate_model in models:
+                if voice == candidate_model["id"] or voice == candidate_model["path"]:
+                    model_entry = candidate_model
+                    break
+            else:
+                voice_path = Path(voice)
+                if voice_path.is_file():
+                    json_candidate = voice_path.with_suffix(voice_path.suffix + ".json")
+                    model_entry = {
+                        "id": voice_path.stem,
+                        "path": str(voice_path),
+                        "json": str(json_candidate) if json_candidate.exists() else None,
+                    }
+        if model_entry is None and models:
+            model_entry = models[0]
+
+        if model_entry:
+            wav_bytes = _piper_to_wav(text, model_entry["path"], model_entry.get("json"))
+            tmp_path.write_bytes(wav_bytes)
             selected_backend = "piper"
         else:
             if not _is_espeak_available():
@@ -129,12 +220,14 @@ async def synthesize_tts(text: str, voice: Optional[str] = None, play_local: boo
 
     background = BackgroundTask(lambda: audio_path.unlink(missing_ok=True))
     filename = f"tts_{backend_used}.wav"
-    return FileResponse(
+    response = FileResponse(
         audio_path,
         media_type="audio/wav",
         filename=filename,
         background=background,
     )
+    response.headers["X-TTS-Backend"] = backend_used
+    return response
 
 
 @router.post("/tts/say")
