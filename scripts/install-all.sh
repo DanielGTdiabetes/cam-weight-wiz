@@ -514,6 +514,54 @@ fi
 systemctl_safe enable NetworkManager --now
 systemctl_safe enable NetworkManager-wait-online.service
 
+NM_WAIT_OVERRIDE_DIR="/etc/systemd/system/NetworkManager-wait-online.service.d"
+NM_WAIT_OVERRIDE_FILE="${NM_WAIT_OVERRIDE_DIR}/override.conf"
+if install -d -m 0755 "${NM_WAIT_OVERRIDE_DIR}"; then
+  if [[ -f "${NM_WAIT_OVERRIDE_FILE}" ]]; then
+    TMP_OVERRIDE_FILE="$(mktemp)"
+    awk '
+      BEGIN {
+        section=""
+        service_written=0
+      }
+      /^\[.*\]$/ {
+        section=$0
+        print
+        if (section == "[Service]" && service_written == 0) {
+          print "ExecStart="
+          print "ExecStart=/usr/lib/NetworkManager/NetworkManager-wait-online --timeout=10"
+          service_written=1
+        }
+        next
+      }
+      {
+        if (section == "[Service]" && ($0 ~ /^ExecStart=/ || $0 ~ /^TimeoutStartSec=/)) {
+          next
+        }
+        print
+      }
+      END {
+        if (service_written == 0) {
+          print "[Service]"
+          print "ExecStart="
+          print "ExecStart=/usr/lib/NetworkManager/NetworkManager-wait-online --timeout=10"
+        }
+      }
+    ' "${NM_WAIT_OVERRIDE_FILE}" > "${TMP_OVERRIDE_FILE}"
+    mv "${TMP_OVERRIDE_FILE}" "${NM_WAIT_OVERRIDE_FILE}"
+  else
+    cat > "${NM_WAIT_OVERRIDE_FILE}" <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/lib/NetworkManager/NetworkManager-wait-online --timeout=10
+EOF
+  fi
+  printf '[install] Set NetworkManager-wait-online timeout to 10s\n'
+else
+  warn "No se pudo crear ${NM_WAIT_OVERRIDE_DIR}"
+fi
+systemctl_safe daemon-reload
+
 # Install camera dependencies
 log "[4/20] Instalando dependencias de cámara..."
 if [[ "${NET_OK}" -eq 1 ]]; then
@@ -1405,12 +1453,12 @@ if [[ -f "${SERVICE_FILE}" ]]; then
 
   mv "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-app.service
   log "✓ bascula-app.service copiado desde el proyecto"
+  printf '[install] Updated bascula-app.service to remove network-online.target\n'
 else
   cat > /etc/systemd/system/bascula-app.service <<EOF
 [Unit]
 Description=Bascula Digital Pro - UI (Xorg kiosk)
-After=network-online.target bascula-miniweb.service
-Wants=network-online.target
+After=graphical.target systemd-user-sessions.service bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=3
@@ -1440,6 +1488,7 @@ TTYVHangup=yes
 WantedBy=multi-user.target
 EOF
   log "✓ bascula-app.service creado por defecto"
+  printf '[install] Updated bascula-app.service to remove network-online.target\n'
 fi
 
 systemctl_safe daemon-reload
