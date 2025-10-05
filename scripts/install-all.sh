@@ -1658,3 +1658,31 @@ if command -v ss >/dev/null 2>&1; then
 else
   warn "Herramienta 'ss' no disponible; omitiendo comprobación de puertos"
 fi
+
+# --- Bascula: instalar/activar services idempotente (sin tocar AP) ---
+install_services() {
+  set -euo pipefail
+
+  # Copiar units del repo (solo los nuestros)
+  install -m 0644 systemd/bascula-miniweb.service /etc/systemd/system/bascula-miniweb.service
+  install -m 0644 systemd/bascula-backend.service  /etc/systemd/system/bascula-backend.service
+  install -m 0644 systemd/bascula-ui.service       /etc/systemd/system/bascula-ui.service
+
+  systemctl daemon-reload
+
+  # Habilitar/arrancar si no están activos
+  systemctl enable bascula-miniweb bascula-backend bascula-ui || true
+  systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
+  systemctl is-active --quiet bascula-backend  || systemctl start bascula-backend
+  systemctl is-active --quiet bascula-ui       || systemctl start bascula-ui
+
+  echo "[install] services ok: miniweb:8080, backend:8081, ui:kiosk"
+}
+
+# Llamada protegida (no afecta a AP/timers)
+if [ -f systemd/bascula-miniweb.service ] && [ -f systemd/bascula-backend.service ] && [ -f systemd/bascula-ui.service ]; then
+  install_services
+else
+  echo "[install] aviso: faltan units en systemd/ (miniweb/backend/ui); no se instalaron"
+fi
+# --- Fin bloque ---
