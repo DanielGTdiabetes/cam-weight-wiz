@@ -1342,11 +1342,30 @@ fi
 SERVICE_FILE="${BASCULA_CURRENT_LINK}/systemd/bascula-ui.service"
 if [[ -f "${SERVICE_FILE}" ]]; then
   # Usar el servicio del proyecto reemplazando las variables
+  TMP_SERVICE_FILE="$(mktemp)"
   sed -e "s|/home/pi|${TARGET_HOME}|g" \
       -e "s|User=pi|User=${TARGET_USER}|g" \
       -e "s|Group=pi|Group=${TARGET_GROUP}|g" \
       -e "s|/home/pi/bascula-ui|${BASCULA_CURRENT_LINK}|g" \
-      "${SERVICE_FILE}" > /etc/systemd/system/bascula-app.service
+      "${SERVICE_FILE}" > "${TMP_SERVICE_FILE}"
+
+  if grep -q '^After=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
+    :
+  elif grep -q '^After=' "${TMP_SERVICE_FILE}"; then
+    sed -i 's/^After=\(.*\)$/After=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
+  else
+    sed -i '/^\[Unit\]/a After=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
+  fi
+
+  if grep -q '^Requires=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
+    :
+  elif grep -q '^Requires=' "${TMP_SERVICE_FILE}"; then
+    sed -i 's/^Requires=\(.*\)$/Requires=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
+  else
+    sed -i '/^\[Unit\]/a Requires=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
+  fi
+
+  mv "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-app.service
   log "✓ bascula-app.service copiado desde el proyecto"
 else
   cat > /etc/systemd/system/bascula-app.service <<EOF
