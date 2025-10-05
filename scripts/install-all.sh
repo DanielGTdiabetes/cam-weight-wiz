@@ -31,6 +31,9 @@ APT_PACKAGES=(
   python3-picamera2
   libcamera-apps
   xserver-xorg-legacy
+  python3-venv
+  tesseract-ocr
+  tesseract-ocr-spa
 )
 
 log "apt-get update"
@@ -41,6 +44,57 @@ fi
 log "apt-get install -y ${APT_PACKAGES[*]}"
 if ! apt-get install -y "${APT_PACKAGES[@]}"; then
   warn "package installation failed"
+fi
+
+OCR_VENV_DIR="/opt/bascula/venv"
+OCR_CURRENT_DIR="/opt/bascula/current"
+OCR_VENV_LINK="${OCR_CURRENT_DIR}/.venv"
+OCR_REQUIREMENTS_FILE="${OCR_CURRENT_DIR}/ocr/requirements.txt"
+
+mkdir -p "${OCR_VENV_DIR%/*}" "${OCR_CURRENT_DIR}"
+
+log "preparing OCR virtualenv at ${OCR_VENV_DIR}"
+python3 -m venv --upgrade "${OCR_VENV_DIR}"
+OCR_PYTHON="${OCR_VENV_DIR}/bin/python"
+"${OCR_PYTHON}" -m pip install --upgrade pip wheel
+log "python virtualenv ready: ${OCR_PYTHON}"
+
+if [[ -e "${OCR_VENV_LINK}" && ! -L "${OCR_VENV_LINK}" ]]; then
+  warn "${OCR_VENV_LINK} exists and is not a symlink; replacing"
+  rm -rf "${OCR_VENV_LINK}"
+fi
+
+if [[ -L "${OCR_VENV_LINK}" ]]; then
+  current_target="$(readlink -f "${OCR_VENV_LINK}")"
+  if [[ "${current_target}" == "${OCR_VENV_DIR}" ]]; then
+    log "OCR virtualenv symlink already points to ${OCR_VENV_DIR}"
+  else
+    ln -sfn "${OCR_VENV_DIR}" "${OCR_VENV_LINK}"
+    log "OCR virtualenv symlink updated -> ${OCR_VENV_DIR}"
+  fi
+else
+  ln -sfn "${OCR_VENV_DIR}" "${OCR_VENV_LINK}"
+  log "OCR virtualenv symlink created at ${OCR_VENV_LINK}"
+fi
+
+OCR_PIP_PACKAGES=(
+  fastapi
+  'uvicorn[standard]'
+  pillow
+  numpy
+  opencv-python-headless
+  pytesseract
+  python-multipart
+)
+
+log "installing OCR Python packages: ${OCR_PIP_PACKAGES[*]}"
+"${OCR_PYTHON}" -m pip install --upgrade "${OCR_PIP_PACKAGES[@]}"
+
+if [[ -f "${OCR_REQUIREMENTS_FILE}" ]]; then
+  log "installing additional OCR requirements from ${OCR_REQUIREMENTS_FILE}"
+  "${OCR_PYTHON}" -m pip install -r "${OCR_REQUIREMENTS_FILE}"
+else
+  log "no extra OCR requirements found at ${OCR_REQUIREMENTS_FILE}"
 fi
 
 for group in video render input dialout; do
@@ -147,5 +201,27 @@ log "Chromium managed policy updated"
 aplay -l >/dev/null 2>&1 || warn "aplay not ready"
 arecord -l >/dev/null 2>&1 || warn "arecord not ready"
 python3 -c "from picamera2 import Picamera2; print('Picamera2 OK')" >/dev/null 2>&1 || warn "Picamera2 import failed"
+
+log "systemd daemon-reload"
+if systemctl daemon-reload; then
+  log "systemd daemon reloaded"
+else
+  warn "systemd daemon-reload failed"
+fi
+
+if systemctl list-unit-files --type=service --no-legend --no-pager | awk '{print $1}' | grep -Fxq "ocr-service.service"; then
+  if systemctl enable ocr-service; then
+    log "ocr-service enabled"
+  else
+    warn "failed to enable ocr-service"
+  fi
+  if systemctl restart ocr-service; then
+    log "ocr-service restarted"
+  else
+    warn "failed to restart ocr-service"
+  fi
+else
+  warn "ocr-service.service unit not found; skipping enable/restart"
+fi
 
 log "Install script finished"
