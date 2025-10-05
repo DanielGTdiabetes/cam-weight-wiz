@@ -1,11 +1,11 @@
 [Unit]
 Description=Ensure Bascula AP when no saved Wi-Fi profiles
-After=NetworkManager.service
+After=NetworkManager.service NetworkManager-wait-online.service
+Wants=NetworkManager-wait-online.service
 
 [Service]
 Type=oneshot
-TimeoutStartSec=20
-ExecStartPre=-/usr/bin/nm-online -s -q -t 10
+ExecStartPre=-/usr/bin/nm-online -s -q -t 25
 ExecStart=/opt/bascula/current/scripts/bascula-ap-ensure.sh
 
 [Install]

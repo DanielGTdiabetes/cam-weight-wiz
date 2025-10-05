@@ -1,10 +1,7 @@
 [Unit]
 Description=Bascula Digital Pro - UI (Xorg kiosk)
-Requires=bascula-miniweb.service
-After=bascula-miniweb.service
-Wants=NetworkManager.service
-After=NetworkManager.service graphical.target systemd-user-sessions.service
-PartOf=bascula-miniweb.service
+After=network-online.target
+Wants=network-online.target
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=3
@@ -21,7 +18,6 @@ PermissionsStartOnly=yes
 ExecStartPre=/usr/bin/install -d -m 0755 -o pi -g pi /var/log/bascula
 ExecStartPre=/usr/bin/install -o pi -g pi -m 0644 /dev/null /var/log/bascula/app.log
 ExecStartPre=/usr/bin/install -d -m 0700 -o pi -g pi /home/pi/.local/share/xorg
-ExecStartPre=/bin/bash -c 'for i in {1..5}; do [ -d /sys/class/net/wlan0 ] && exit 0; sleep 1; done; exit 0'
 ExecStart=/bin/bash -lc 'STARTX_BIN="$(command -v startx || command -v xinit)"; if [ -z "$STARTX_BIN" ]; then echo "startx/xinit no disponible" >&2; exit 1; fi; if [ "$(basename "$STARTX_BIN")" = "startx" ]; then exec "$STARTX_BIN" -- :0 vt1; else exec "$STARTX_BIN" "$HOME/.xinitrc" -- :0 vt1; fi'
 Restart=on-failure
 RestartSec=2
