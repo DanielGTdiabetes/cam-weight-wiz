@@ -1,24 +1,33 @@
 [Unit]
-Description=Bascula Digital Pro - UI (Xorg kiosk)
-After=network-online.target bascula-miniweb.service
-Wants=network-online.target
+Description=Bascula Digital Pro - UI (Chromium kiosk)
+After=systemd-user-sessions.service network-online.target bascula-miniweb.service
+Wants=network-online.target bascula-miniweb.service
+Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=3
 
 [Service]
+Type=simple
 User=pi
 Group=pi
 WorkingDirectory=/opt/bascula/current
 Environment=HOME=/home/pi
-PAMName=login
+Environment=USER=pi
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
+TTYVTDisallocate=yes
 StandardInput=tty
 StandardOutput=journal
 StandardError=journal
-ExecStart=/usr/bin/startx -- -nocursor vt1
+PermissionsStartOnly=yes
+ExecStartPre=/usr/bin/chvt 1
+ExecStartPre=/usr/bin/install -d -m 0755 -o pi -g pi /var/log/bascula
+ExecStartPre=/usr/bin/install -o pi -g pi -m 0644 /dev/null /var/log/bascula/ui.log
+ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
 Restart=always
 RestartSec=2
 
