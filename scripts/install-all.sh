@@ -142,16 +142,19 @@ configure_pi_boot_hardware() {
 
   backup_boot_config_once "${bootcfg}" "${ts}" || true
 
-  local start_line
-  local end_line
-  start_line=$(grep -n "^# --- Bascula-Cam: Hardware Configuration ---" "${bootcfg}" | head -n1 | cut -d: -f1)
-  if [[ -n "${start_line}" ]]; then
-    end_line=$(grep -n "^# --- Bascula-Cam (end) ---" "${bootcfg}" | awk -F: -v s="${start_line}" '$1 > s {print $1; exit}')
-  else
-    end_line=""
-  fi
+  local start_line=""
+  local end_line=""
+  read -r start_line end_line <<EOF || true
+$(awk '
+  /^# --- Bascula-Cam: Hardware Configuration ---$/ { if (s==0) s=NR }
+  /^# --- Bascula-Cam \(end\) ---$/ { if (s>0 && e==0 && NR>s) e=NR }
+  END {
+    if (s>0 && e>0) { printf "%d %d\n", s, e }
+  }
+' "${bootcfg}")
+EOF
 
-  if [[ -n "${start_line}" && -n "${end_line}" ]]; then
+  if [[ -n "${start_line:-}" && -n "${end_line:-}" ]]; then
     if sed -i "${start_line},${end_line}d" "${bootcfg}"; then
       printf '[install] Removed previous Bascula-Cam block safely (lines %s-%s)\n' "${start_line}" "${end_line}"
     else
