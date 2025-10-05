@@ -37,14 +37,28 @@ export const SettingsView = () => {
     setHypoAlarm(settings.hypoAlarm.toString());
     setHyperAlarm(settings.hyperAlarm.toString());
 
-    // Fetch network IP
-    api.getNetworkStatus().then(status => {
-      if (status.ip) {
-        setNetworkIP(status.ip);
+    // Fetch network status (IP and SSID)
+    const fetchNetworkStatus = async () => {
+      try {
+        const response = await fetch('/api/miniweb/status');
+        if (response.ok) {
+          const status = await response.json();
+          setNetworkIP(status.ip || status.ip_address || "—");
+          setNetworkSSID(status.ssid || "—");
+          setNetworkIP2(status.ip || status.ip_address || "—");
+        }
+      } catch (err) {
+        console.error("Failed to get network status", err);
+        setNetworkSSID("—");
+        setNetworkIP2("—");
       }
-    }).catch(err => {
-      console.error("Failed to get network status", err);
-    });
+    };
+
+    fetchNetworkStatus();
+
+    // Refresh network status every 10 seconds
+    const interval = setInterval(fetchNetworkStatus, 10000);
+    return () => clearInterval(interval);
   }, []);
   
   const [voiceEnabled, setVoiceEnabled] = useState(true);
@@ -83,6 +97,8 @@ export const SettingsView = () => {
   const [availableUpdates, setAvailableUpdates] = useState<{ available: boolean; version?: string } | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [networkSSID, setNetworkSSID] = useState<string>("—");
+  const [networkIP2, setNetworkIP2] = useState<string>("—");
 
   // Save settings when they change
   useEffect(() => {
@@ -506,12 +522,19 @@ export const SettingsView = () => {
               <div>
                 <Label className="text-lg font-medium mb-2 block">WiFi Conectado</Label>
                 <div className="rounded-lg bg-success/10 p-4">
-                  <p className="text-lg font-medium">Mi_Red_WiFi</p>
-                  <p className="text-sm text-muted-foreground">192.168.1.100</p>
+                  <p className="text-lg font-medium">{networkSSID}</p>
+                  <p className="text-sm text-muted-foreground">{networkIP2}</p>
                 </div>
               </div>
 
-              <Button variant="outline" size="lg" className="w-full">
+              <Button 
+                variant="outline" 
+                size="lg" 
+                className="w-full"
+                onClick={() => {
+                  window.open('/config', '_blank');
+                }}
+              >
                 Cambiar Red WiFi
               </Button>
 
@@ -727,12 +750,12 @@ export const SettingsView = () => {
                 onClick={handleCheckUpdates}
                 disabled={isCheckingUpdates}
               >
-                <Download className="mr-2 h-6 w-6" />
+                <Download className="mr-2 h-6 w-6 animate-bounce" />
                 {isCheckingUpdates ? "Verificando..." : "Buscar Actualizaciones"}
               </Button>
 
               {availableUpdates && (
-                <div className={`rounded-lg border p-4 ${availableUpdates.available ? "border-primary bg-primary/5" : "border-success bg-success/5"}`}>
+                <div className={`rounded-lg border p-4 animate-fade-in ${availableUpdates.available ? "border-primary bg-primary/5" : "border-success bg-success/5"}`}>
                   {availableUpdates.available ? (
                     <>
                       <p className="font-medium text-primary mb-2">
@@ -745,7 +768,17 @@ export const SettingsView = () => {
                         onClick={handleInstallUpdate}
                         disabled={isInstallingUpdate}
                       >
-                        {isInstallingUpdate ? "Instalando..." : "Instalar Actualización"}
+                        {isInstallingUpdate ? (
+                          <>
+                            <Download className="mr-2 h-5 w-5 animate-spin" />
+                            Instalando...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="mr-2 h-5 w-5" />
+                            Instalar Actualización
+                          </>
+                        )}
                       </Button>
                     </>
                   ) : (

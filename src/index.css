@@ -119,4 +119,45 @@ All colors MUST be HSL.
   .text-glow-magenta {
     text-shadow: 0 0 10px hsl(300 80% 55% / 0.5);
   }
+
+  /* Scrollbars táctiles - más anchas para touch */
+  *::-webkit-scrollbar {
+    width: 14px;
+    height: 14px;
+  }
+  
+  *::-webkit-scrollbar-track {
+    background: hsl(var(--muted) / 0.3);
+    border-radius: 8px;
+  }
+  
+  *::-webkit-scrollbar-thumb {
+    background: hsl(var(--primary) / 0.5);
+    border-radius: 8px;
+    border: 2px solid hsl(var(--background));
+  }
+  
+  *::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--primary) / 0.7);
+  }
+  
+  /* Firefox scrollbars */
+  * {
+    scrollbar-width: auto;
+    scrollbar-color: hsl(var(--primary) / 0.5) hsl(var(--muted) / 0.3);
+  }
+
+  /* Permitir copiar/pegar en inputs y áreas de texto */
+  input, textarea, .allow-select {
+    user-select: text;
+    -webkit-user-select: text;
+    -ms-user-select: text;
+    -moz-user-select: text;
+  }
+
+  /* Targets táctiles mínimos */
+  button, a, [role="button"], input[type="checkbox"], input[type="radio"] {
+    min-width: 40px;
+    min-height: 40px;
+  }
 }

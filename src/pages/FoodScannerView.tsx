@@ -452,25 +452,6 @@ export const FoodScannerView = () => {
             )}
 
             <div className="flex flex-wrap items-center gap-3">
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                capture="environment"
-                className="hidden"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) {
-                    setUploadedFile(file);
-                  }
-                }}
-              />
-              <Button
-                variant="outline"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <ImageIcon className="mr-2 h-4 w-4" /> Subir foto
-              </Button>
               <Button
                 onClick={handleAnalyze}
                 disabled={isScanning}

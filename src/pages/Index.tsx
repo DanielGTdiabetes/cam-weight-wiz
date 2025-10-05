@@ -240,25 +240,25 @@ const Index = () => {
         {renderView()}
       </div>
 
-      {/* Back to Menu Button - Show in all views except menu */}
+      {/* Back to Menu Button - Show in all views except menu - Moved higher to avoid TARA overlap */}
       {currentView !== "menu" && (
         <Button
           onClick={handleBackToMenu}
           size="icon"
           variant="outline"
-          className="fixed bottom-6 left-6 h-16 w-16 rounded-full"
+          className="fixed top-20 left-6 h-16 w-16 rounded-full z-50 shadow-lg"
         >
           <ArrowLeft className="h-8 w-8" />
         </Button>
       )}
 
-      {/* Floating Timer Button - Only show in scale and scanner views */}
+      {/* Floating Timer Button - Only show in scale and scanner views - Moved higher to avoid button overlap */}
       {(currentView === "scale" || currentView === "scanner") && !timerSeconds && (
         <Button
           onClick={() => setShowTimerDialog(true)}
           size="icon"
           variant="glow"
-          className="fixed bottom-6 right-6 h-16 w-16 rounded-full glow-cyan"
+          className="fixed top-20 right-6 h-16 w-16 rounded-full glow-cyan z-50 shadow-lg"
         >
           <Clock className="h-8 w-8" />
         </Button>

@@ -313,18 +313,19 @@ export const MiniWebConfig = () => {
             </p>
           </div>
 
-          <div className="space-y-6">
-            <div className="space-y-2">
-              <Label className="text-lg">PIN de Acceso</Label>
-              <Input
-                type="password"
-                value={pinInput}
-                onChange={(e) => setPinInput(e.target.value)}
-                onKeyPress={(e) => e.key === 'Enter' && checkPin(pinInput)}
-                placeholder="Ingresa el PIN de 4 dígitos"
-                className="text-2xl text-center h-16 tracking-wider"
-                maxLength={4}
-              />
+            <div className="space-y-6">
+              <div className="space-y-2">
+                <Label className="text-lg">PIN de Acceso</Label>
+                <Input
+                  type="password"
+                  value={pinInput}
+                  onChange={(e) => setPinInput(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && checkPin(pinInput)}
+                  placeholder="Ingresa el PIN de 4 dígitos"
+                  className="text-2xl text-center h-16 tracking-wider allow-select"
+                  maxLength={4}
+                  autoComplete="off"
+                />
               {devicePin ? (
                 <div className="text-center space-y-1">
                   <p className="text-xs uppercase tracking-widest text-muted-foreground">PIN actual</p>
@@ -448,8 +449,9 @@ export const MiniWebConfig = () => {
                       setConnectionStatus({ type: 'idle', message: '' });
                     }}
                     placeholder="Ingresa la contraseña"
-                    className="text-lg h-14"
+                    className="text-lg h-14 allow-select"
                     onKeyPress={(e) => e.key === 'Enter' && handleConnect()}
+                    autoComplete="off"
                   />
                 ) : (
                   <p className="text-sm text-muted-foreground">
