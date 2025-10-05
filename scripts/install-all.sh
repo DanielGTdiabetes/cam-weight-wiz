@@ -98,6 +98,83 @@ ensure_enable_uart() {
   fi
 }
 
+backup_boot_config_once() {
+  local bootcfg="$1"
+  local ts="$2"
+  if [[ ! -f "${bootcfg}" ]]; then
+    warn "config.txt no existe en ${bootcfg}"
+    return 1
+  fi
+  local backup_path="${bootcfg}.bak-${ts}"
+  if cp -a "${bootcfg}" "${backup_path}"; then
+    printf '[install] Backup: %s\n' "${backup_path}"
+  else
+    warn "No se pudo crear copia de seguridad ${backup_path}"
+    return 1
+  fi
+}
+
+ensure_bootcfg_line() {
+  local bootcfg="$1"
+  local re="$2"
+  local line="$3"
+  if grep -Eq "^[[:space:]]*#?[[:space:]]*$re[[:space:]]*$" "${bootcfg}"; then
+    sed -ri "s~^[[:space:]]*#?[[:space:]]*$re[[:space:]]*$~${line}~g" "${bootcfg}"
+  else
+    printf '%s\n' "${line}" >> "${bootcfg}"
+  fi
+}
+
+configure_pi_boot_hardware() {
+  local bootcfg="${CONF}"
+  local ts="$(date +%Y%m%d-%H%M%S)"
+  local dac_name="${HW_DAC_NAME:-hifiberry-dac}"
+
+  if [[ ! -f "${bootcfg}" ]]; then
+    warn "config.txt no existe en ${bootcfg}"
+    return 1
+  fi
+
+  if [[ ! -w "${bootcfg}" ]]; then
+    warn "No se puede escribir en ${bootcfg}"
+    return 1
+  fi
+
+  backup_boot_config_once "${bootcfg}" "${ts}" || true
+
+  if ! grep -q "Bascula-Cam: Hardware Configuration" "${bootcfg}"; then
+    {
+      printf '\n# --- Bascula-Cam: Hardware Configuration ---\n'
+      printf '# (autoconfig generado por install-all.sh)\n'
+    } >> "${bootcfg}"
+  fi
+
+  if grep -q '^# --- Bascula-Cam (end) ---' "${bootcfg}"; then
+    sed -i '/^# --- Bascula-Cam (end) ---$/d' "${bootcfg}"
+  fi
+
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2c_arm=.*' 'dtparam=i2c_arm=on'
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2s=.*' 'dtparam=i2s=on'
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=spi=.*' 'dtparam=spi=on'
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=audio=.*' 'dtparam=audio=off'
+  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=i2s-mmap' 'dtoverlay=i2s-mmap'
+  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=hifiberry-[[:alnum:]_-]+' "dtoverlay=${dac_name}"
+  ensure_bootcfg_line "${bootcfg}" 'camera_auto_detect=.*' 'camera_auto_detect=1'
+  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=imx708' 'dtoverlay=imx708'
+
+  printf '# --- Bascula-Cam (end) ---\n' >> "${bootcfg}"
+
+  local tmp_file="${bootcfg}.tmp.$$"
+  if awk 'NR==1 {prev=$0; print; next} {if ($0 != prev) print; prev=$0}' "${bootcfg}" > "${tmp_file}"; then
+    mv "${tmp_file}" "${bootcfg}"
+  else
+    rm -f "${tmp_file}"
+    warn "No se pudo limpiar duplicados en ${bootcfg}"
+  fi
+
+  printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708). Requiere reboot.\n' "${dac_name}"
+}
+
 # --- Require root privileges ---
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   err "Ejecuta con sudo: sudo ./install-all.sh"
@@ -492,51 +569,12 @@ if [[ ! -f "${CONF}" ]]; then
   warn "No se encontró ${CONF}; omitiendo configuración de arranque"
 elif [[ "${SKIP_HARDWARE_CONFIG:-0}" == "1" ]]; then
   warn "SKIP_HARDWARE_CONFIG=1, saltando modificación de config.txt"
+elif grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
+  if ! configure_pi_boot_hardware; then
+    warn "No se pudo completar la autoconfiguración de hardware"
+  fi
 else
-  # Limpiar configuración anterior
-  sed -i '/# --- Bascula-Cam/,/# --- Bascula-Cam (end) ---/d' "${CONF}" || warn "No se pudo limpiar configuración previa"
-
-  # Añadir configuración mínima segura por defecto
-  # El usuario puede habilitar más hardware después del primer arranque exitoso
-  cat >> "${CONF}" <<'EOF'
-# --- Bascula-Cam: Hardware Configuration ---
-# HDMI forzado + modo 1024x600@60Hz
-hdmi_force_hotplug=1
-hdmi_group=2
-hdmi_mode=87
-hdmi_cvt=1024 600 60 3 0 0 0
-dtoverlay=vc4-kms-v3d-pi5
-disable_overscan=1
-
-# I2C
-dtparam=i2c_arm=on
-
-# UART para ESP32 (báscula)
-enable_uart=1
-dtoverlay=disable-bt
-
-# Configuración avanzada opcional (comentado por seguridad):
-# Descomentar solo si tienes el hardware conectado y verificado
-
-# HDMI Personalizado alternativo
-#hdmi_group=2
-#hdmi_mode=87
-#hdmi_cvt=800 480 60 6 0 0 0  # ejemplo para 800x480
-
-# Audio I2S - HifiBerry DAC / MAX98357A (descomentar si tienes DAC I2S)
-#dtparam=audio=off
-#dtoverlay=i2s-mmap
-#dtoverlay=hifiberry-dac
-
-# Camera Module 3 IMX708 (descomentar si tienes Camera Module 3 conectada)
-#camera_auto_detect=1
-#dtoverlay=imx708
-# --- Bascula-Cam (end) ---
-EOF
-
-  log "✓ Configuración mínima segura añadida a ${CONF}"
-  warn "Hardware específico (cámara, audio I2S, HDMI custom) comentado por seguridad"
-  warn "Edita ${CONF} para habilitar después del primer arranque exitoso"
+  warn "Equipo no identificado como Raspberry Pi; omitiendo autoconfiguración de hardware"
 fi
 
 ensure_enable_uart "${CONF}"
