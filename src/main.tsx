@@ -147,8 +147,10 @@ async function bootstrap() {
     }
   }
 
-  notifyBootstrapError(lastError);
   renderApp();
+  window.setTimeout(() => {
+    notifyBootstrapError(lastError);
+  }, 0);
 }
 
 void bootstrap();
