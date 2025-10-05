@@ -142,42 +142,27 @@ configure_pi_boot_hardware() {
 
   backup_boot_config_once "${bootcfg}" "${ts}" || true
 
-  local start_line=""
-  local end_line=""
-  read -r start_line end_line <<EOF || true
-$(awk '
-  /^# --- Bascula-Cam: Hardware Configuration ---$/ { if (s==0) s=NR }
-  /^# --- Bascula-Cam \(end\) ---$/ { if (s>0 && e==0 && NR>s) e=NR }
-  END {
-    if (s>0 && e>0) { printf "%d %d\n", s, e }
-  }
-' "${bootcfg}")
-EOF
-
-  if [[ -n "${start_line:-}" && -n "${end_line:-}" ]]; then
-    if sed -i "${start_line},${end_line}d" "${bootcfg}"; then
-      printf '[install] Removed previous Bascula-Cam block safely (lines %s-%s)\n' "${start_line}" "${end_line}"
-    else
-      warn "No se pudo eliminar bloque previo Bascula-Cam en ${bootcfg}"
-    fi
-  else
-    printf '[install] No complete Bascula-Cam block found, skipping safe delete\n'
+  if ! grep -q "Bascula-Cam: Hardware Configuration" "${bootcfg}"; then
+    {
+      printf '\n# --- Bascula-Cam: Hardware Configuration ---\n'
+      printf '# (autoconfig generado por install-all.sh)\n'
+    } >> "${bootcfg}"
   fi
 
-  {
-    printf '\n'
-    printf '# --- Bascula-Cam: Hardware Configuration ---\n'
-    printf '# (autoconfig generado por install-all.sh)\n'
-    printf 'dtparam=i2c_arm=on\n'
-    printf 'dtparam=i2s=on\n'
-    printf 'dtparam=spi=on\n'
-    printf 'dtparam=audio=off\n'
-    printf 'dtoverlay=i2s-mmap\n'
-    printf 'dtoverlay=%s\n' "${dac_name}"
-    printf 'camera_auto_detect=1\n'
-    printf 'dtoverlay=imx708\n'
-    printf '# --- Bascula-Cam (end) ---\n'
-  } >> "${bootcfg}" || warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
+  if grep -q '^# --- Bascula-Cam (end) ---' "${bootcfg}"; then
+    sed -i '/^# --- Bascula-Cam (end) ---$/d' "${bootcfg}"
+  fi
+
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2c_arm=.*' 'dtparam=i2c_arm=on'
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=i2s=.*' 'dtparam=i2s=on'
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=spi=.*' 'dtparam=spi=on'
+  ensure_bootcfg_line "${bootcfg}" 'dtparam=audio=.*' 'dtparam=audio=off'
+  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=i2s-mmap' 'dtoverlay=i2s-mmap'
+  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=hifiberry-[[:alnum:]_-]+' "dtoverlay=${dac_name}"
+  ensure_bootcfg_line "${bootcfg}" 'camera_auto_detect=.*' 'camera_auto_detect=1'
+  ensure_bootcfg_line "${bootcfg}" 'dtoverlay=imx708' 'dtoverlay=imx708'
+
+  printf '# --- Bascula-Cam (end) ---\n' >> "${bootcfg}"
 
   local tmp_file="${bootcfg}.tmp.$$"
   if awk 'NR==1 {prev=$0; print; next} {if ($0 != prev) print; prev=$0}' "${bootcfg}" > "${tmp_file}"; then
@@ -528,54 +513,6 @@ else
 fi
 systemctl_safe enable NetworkManager --now
 systemctl_safe enable NetworkManager-wait-online.service
-
-NM_WAIT_OVERRIDE_DIR="/etc/systemd/system/NetworkManager-wait-online.service.d"
-NM_WAIT_OVERRIDE_FILE="${NM_WAIT_OVERRIDE_DIR}/override.conf"
-if install -d -m 0755 "${NM_WAIT_OVERRIDE_DIR}"; then
-  if [[ -f "${NM_WAIT_OVERRIDE_FILE}" ]]; then
-    TMP_OVERRIDE_FILE="$(mktemp)"
-    awk '
-      BEGIN {
-        section=""
-        service_written=0
-      }
-      /^\[.*\]$/ {
-        section=$0
-        print
-        if (section == "[Service]" && service_written == 0) {
-          print "ExecStart="
-          print "ExecStart=/usr/lib/NetworkManager/NetworkManager-wait-online --timeout=10"
-          service_written=1
-        }
-        next
-      }
-      {
-        if (section == "[Service]" && ($0 ~ /^ExecStart=/ || $0 ~ /^TimeoutStartSec=/)) {
-          next
-        }
-        print
-      }
-      END {
-        if (service_written == 0) {
-          print "[Service]"
-          print "ExecStart="
-          print "ExecStart=/usr/lib/NetworkManager/NetworkManager-wait-online --timeout=10"
-        }
-      }
-    ' "${NM_WAIT_OVERRIDE_FILE}" > "${TMP_OVERRIDE_FILE}"
-    mv "${TMP_OVERRIDE_FILE}" "${NM_WAIT_OVERRIDE_FILE}"
-  else
-    cat > "${NM_WAIT_OVERRIDE_FILE}" <<'EOF'
-[Service]
-ExecStart=
-ExecStart=/usr/lib/NetworkManager/NetworkManager-wait-online --timeout=10
-EOF
-  fi
-  printf '[install] Set NetworkManager-wait-online timeout to 10s\n'
-else
-  warn "No se pudo crear ${NM_WAIT_OVERRIDE_DIR}"
-fi
-systemctl_safe daemon-reload
 
 # Install camera dependencies
 log "[4/20] Instalando dependencias de cámara..."
@@ -1450,31 +1387,30 @@ if [[ -f "${SERVICE_FILE}" ]]; then
       -e "s|/home/pi/bascula-ui|${BASCULA_CURRENT_LINK}|g" \
       "${SERVICE_FILE}" > "${TMP_SERVICE_FILE}"
 
-  if grep -q '^After=' "${TMP_SERVICE_FILE}"; then
-    if ! grep -q '^After=.*NetworkManager\.service' "${TMP_SERVICE_FILE}"; then
-      sed -i 's/^After=\(.*\)$/After=\1 NetworkManager.service/' "${TMP_SERVICE_FILE}"
-    fi
+  if grep -q '^After=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
+    :
+  elif grep -q '^After=' "${TMP_SERVICE_FILE}"; then
+    sed -i 's/^After=\(.*\)$/After=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
   else
-    sed -i '/^\[Unit\]/a After=NetworkManager.service' "${TMP_SERVICE_FILE}"
+    sed -i '/^\[Unit\]/a After=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
   fi
 
-  if grep -q '^Wants=' "${TMP_SERVICE_FILE}"; then
-    if ! grep -q '^Wants=.*NetworkManager\.service' "${TMP_SERVICE_FILE}"; then
-      sed -i 's/^Wants=\(.*\)$/Wants=\1 NetworkManager.service/' "${TMP_SERVICE_FILE}"
-    fi
+  if grep -q '^Requires=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
+    :
+  elif grep -q '^Requires=' "${TMP_SERVICE_FILE}"; then
+    sed -i 's/^Requires=\(.*\)$/Requires=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
   else
-    sed -i '/^\[Unit\]/a Wants=NetworkManager.service' "${TMP_SERVICE_FILE}"
+    sed -i '/^\[Unit\]/a Requires=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
   fi
 
   mv "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-app.service
   log "✓ bascula-app.service copiado desde el proyecto"
-  printf '[install] Updated bascula-app.service to remove network-online.target\n'
 else
   cat > /etc/systemd/system/bascula-app.service <<EOF
 [Unit]
 Description=Bascula Digital Pro - UI (Xorg kiosk)
-After=graphical.target systemd-user-sessions.service NetworkManager.service
-Wants=NetworkManager.service
+After=network-online.target bascula-miniweb.service
+Wants=network-online.target
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=3
@@ -1491,7 +1427,6 @@ PermissionsStartOnly=yes
 ExecStartPre=/usr/bin/install -d -m 0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula
 ExecStartPre=/usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/app.log
 ExecStartPre=/usr/bin/install -d -m 0700 -o ${TARGET_USER} -g ${TARGET_GROUP} ${TARGET_HOME}/.local/share/xorg
-ExecStartPre=/bin/bash -c 'for i in {1..5}; do [ -d /sys/class/net/wlan0 ] && exit 0; sleep 1; done; exit 0'
 ExecStart=${STARTX_CMD}
 Restart=on-failure
 RestartSec=2
@@ -1505,7 +1440,6 @@ TTYVHangup=yes
 WantedBy=multi-user.target
 EOF
   log "✓ bascula-app.service creado por defecto"
-  printf '[install] Updated bascula-app.service to remove network-online.target\n'
 fi
 
 systemctl_safe daemon-reload
