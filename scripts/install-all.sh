@@ -1154,6 +1154,42 @@ if [[ -f "package.json" ]]; then
   npm install || warn "npm install falló, continuar con backend"
   npm run build || warn "npm build falló"
   log "✓ Frontend compilado"
+
+  if [[ -d "dist" ]]; then
+    install -d -m 0755 dist
+    if [[ ! -f "dist/index.html" ]]; then
+      warn "dist/index.html no encontrado tras la compilación"
+    fi
+    if [[ ! -d "dist/assets" ]]; then
+      warn "dist/assets no encontrado tras la compilación"
+    fi
+  else
+    warn "Directorio dist no generado; creando estructura vacía"
+    install -d -m 0755 dist
+  fi
+
+  if [[ -d "public" ]]; then
+    install -d -m 0755 public
+  else
+    warn "Directorio public no encontrado; creando estructura vacía"
+    install -d -m 0755 public
+  fi
+
+  required_public=(manifest.json icon-192.png icon-512.png robots.txt)
+  for asset in "${required_public[@]}"; do
+    if [[ ! -f "public/${asset}" ]]; then
+      warn "Falta public/${asset} tras la compilación"
+    fi
+  done
+
+  if [[ -d "dist" ]]; then
+    chmod -R a+rX dist || warn "No se pudieron ajustar permisos en dist"
+  fi
+  if [[ -d "public" ]]; then
+    chmod -R a+rX public || warn "No se pudieron ajustar permisos en public"
+  fi
+
+  log "✓ Directorios dist/ y public/ preparados"
 fi
 
 # Install and configure Nginx
@@ -1443,6 +1479,8 @@ echo "  x735off          # apagar el sistema de forma segura"
 echo ""
 log "Instalación finalizada"
 log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
+log "Reiniciando bascula-miniweb para aplicar la última compilación"
+systemctl_safe restart bascula-miniweb.service
 systemctl_safe status bascula-miniweb --no-pager -l
 if command -v ss >/dev/null 2>&1; then
   ss -ltnp | grep 8080 || true

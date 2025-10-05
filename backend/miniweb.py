@@ -34,16 +34,18 @@ from backend.serial_scale_service import SerialScaleService
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = BASE_DIR / "dist"
+PUBLIC_DIR = BASE_DIR / "public"
 INDEX_HTML_PATH = DIST_DIR / "index.html"
 
-CACHE_CONTROL_NO_STORE = "no-store, must-revalidate"
+CACHE_CONTROL_NO_STORE = "no-store"
+CACHE_CONTROL_IMMUTABLE_ASSET = "public, max-age=31536000, immutable"
 
 
 class NoStoreStaticFiles(StaticFiles):
     async def get_response(self, path: str, scope):  # type: ignore[override]
         response = await super().get_response(path, scope)
         if response.status_code < 400:
-            response.headers["Cache-Control"] = CACHE_CONTROL_NO_STORE
+            response.headers["Cache-Control"] = CACHE_CONTROL_IMMUTABLE_ASSET
         return response
 
 
@@ -1342,6 +1344,20 @@ def _is_ap_active() -> bool:
     return _is_ap_mode_legacy()
 
 
+def _is_same_lan_client(client_host: Optional[str]) -> bool:
+    if not client_host:
+        return False
+    try:
+        ip = ipaddress.ip_address(client_host)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    if ip.version == 4 and ip in ipaddress.ip_network("192.168.0.0/16"):
+        return True
+    return ip.is_private
+
+
 def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
     if client_host in {"127.0.0.1", "::1"}:
         return True
@@ -1866,33 +1882,40 @@ if DIST_DIR.exists():
     if assets_dir.exists():
         app.mount("/assets", NoStoreStaticFiles(directory=assets_dir), name="assets")
 
-    @app.get("/manifest.json")
-    async def manifest():
-        return _no_store_file_response(DIST_DIR / "manifest.json")
-
-    @app.get("/favicon.ico")
-    async def favicon():
-        return _no_store_file_response(DIST_DIR / "favicon.ico")
-
-    @app.get("/icon-192.png")
-    async def icon_192():
-        return _no_store_file_response(DIST_DIR / "icon-192.png")
-
-    @app.get("/icon-512.png")
-    async def icon_512():
-        return _no_store_file_response(DIST_DIR / "icon-512.png")
-
-    @app.get("/robots.txt")
-    async def robots():
-        return _no_store_file_response(DIST_DIR / "robots.txt")
-
     @app.get("/")
     async def root_index():
         return _no_store_file_response(DIST_DIR / "index.html")
 
     @app.get("/config")
     async def config_index():
-        return _no_store_file_response(DIST_DIR / "index.html")
+        response = _no_store_file_response(DIST_DIR / "index.html")
+        response.headers["Cache-Control"] = CACHE_CONTROL_NO_STORE
+        return response
+
+if PUBLIC_DIR.exists():
+
+    def _public_file_response(filename: str) -> FileResponse:
+        return FileResponse(PUBLIC_DIR / filename)
+
+    @app.get("/manifest.json")
+    async def manifest():
+        return _public_file_response("manifest.json")
+
+    @app.get("/favicon.ico")
+    async def favicon():
+        return _public_file_response("favicon.ico")
+
+    @app.get("/icon-192.png")
+    async def icon_192():
+        return _public_file_response("icon-192.png")
+
+    @app.get("/icon-512.png")
+    async def icon_512():
+        return _public_file_response("icon-512.png")
+
+    @app.get("/robots.txt")
+    async def robots():
+        return _public_file_response("robots.txt")
 
 
 class PinVerification(BaseModel):
@@ -1941,9 +1964,12 @@ async def health():
 @app.get("/api/miniweb/pin")
 async def get_pin(request: Request):
     client_host = request.client.host if request.client else ""
+    pin_required = not _is_same_lan_client(client_host)
+    response_payload: Dict[str, Any] = {"pinRequired": pin_required}
     if _allow_pin_disclosure(client_host):
-        return {"pin": CURRENT_PIN}
-    raise HTTPException(status_code=403, detail="Not allowed")
+        response_payload["pin"] = CURRENT_PIN
+        response_payload["pinRequired"] = False
+    return response_payload
 
 
 @app.post("/api/miniweb/verify-pin")
