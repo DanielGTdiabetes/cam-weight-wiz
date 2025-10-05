@@ -142,12 +142,15 @@ configure_pi_boot_hardware() {
 
   backup_boot_config_once "${bootcfg}" "${ts}" || true
 
-  if grep -q "Bascula-Cam: Hardware Configuration" "${bootcfg}"; then
+  if grep -q "Bascula-Cam: Hardware Configuration" "${bootcfg}" && \
+     grep -q "# --- Bascula-Cam (end) ---" "${bootcfg}"; then
     if sed -i '/# --- Bascula-Cam: Hardware Configuration ---/,/# --- Bascula-Cam (end) ---/d' "${bootcfg}"; then
-      printf '[install] Removed previous Bascula-Cam block\n'
+      printf '[install] Removed previous Bascula-Cam block safely\n'
     else
       warn "No se pudo eliminar bloque previo Bascula-Cam en ${bootcfg}"
     fi
+  else
+    printf '[install] Bascula-Cam block not fully delimited, skipping safe delete\n'
   fi
 
   {
