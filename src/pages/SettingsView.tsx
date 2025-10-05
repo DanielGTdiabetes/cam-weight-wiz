@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Settings, Scale, Wifi, Heart, Download, Save, Upload, Trash2, Volume2, CheckCircle2 } from "lucide-react";
+import { Settings, Scale, Wifi, Heart, Download, Save, Upload, Trash2, Volume2, CheckCircle2, ClipboardPaste } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -13,10 +13,12 @@ import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { cn } from "@/lib/utils";
 import { api, setApiBaseUrl } from "@/services/api";
+import { isLocalClient } from "@/lib/network";
 
 export const SettingsView = () => {
   const { toast } = useToast();
   const { weight } = useScaleWebSocket();
+  const localClient = isLocalClient();
   const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
   
   // Load settings on mount
@@ -75,7 +77,7 @@ export const SettingsView = () => {
     max?: number;
     allowEmpty?: boolean;
   }>({ title: "", type: "text", field: "" });
-  
+
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
   const [decimals, setDecimals] = useState("1");
   const [apiUrl, setApiUrl] = useState("http://127.0.0.1:8080");
@@ -99,6 +101,7 @@ export const SettingsView = () => {
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [networkSSID, setNetworkSSID] = useState<string>("—");
   const [networkIP2, setNetworkIP2] = useState<string>("—");
+  const [internalKeyboardEnabled, setInternalKeyboardEnabled] = useState(localClient);
 
   // Save settings when they change
   useEffect(() => {
@@ -199,6 +202,22 @@ export const SettingsView = () => {
       toast({
         title: "Guardado",
         description: "Configuración actualizada correctamente",
+      });
+    }
+  };
+
+  const handlePasteToField = async (setter: (value: string) => void) => {
+    try {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        throw new Error("clipboard_unavailable");
+      }
+      const text = await navigator.clipboard.readText();
+      setter(text);
+    } catch (err) {
+      toast({
+        title: "No hay permisos de portapapeles",
+        description: "Concede acceso al portapapeles desde el navegador.",
+        variant: "destructive",
       });
     }
   };
@@ -517,8 +536,24 @@ export const SettingsView = () => {
         <TabsContent value="network" className="space-y-4">
           <Card className="p-6">
             <h3 className="mb-4 text-2xl font-bold">Configuración de Red</h3>
-            
+
             <div className="space-y-6">
+              <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/20 p-4">
+                <div>
+                  <Label className="text-lg font-medium">Teclado interno</Label>
+                  <p className="text-sm text-muted-foreground">
+                    {internalKeyboardEnabled
+                      ? "Usar teclado táctil integrado para introducir datos sensibles."
+                      : "Usar teclado del sistema y pegado nativo."}
+                  </p>
+                </div>
+                <Switch
+                  checked={internalKeyboardEnabled}
+                  onCheckedChange={setInternalKeyboardEnabled}
+                  className="scale-125"
+                />
+              </div>
+
               <div>
                 <Label className="text-lg font-medium mb-2 block">WiFi Conectado</Label>
                 <div className="rounded-lg bg-success/10 p-4">
@@ -540,16 +575,31 @@ export const SettingsView = () => {
 
               <div className="space-y-2">
                 <Label className="text-lg font-medium">API Key de ChatGPT</Label>
-                <Input
-                  type="password"
-                  value={chatGptKey}
-                  readOnly
-                  onClick={() =>
-                    openKeyboard("API Key de ChatGPT", "apikey", "chatGptKey", false, undefined, undefined, true)
-                  }
-                  placeholder="sk-..."
-                  className="text-lg cursor-pointer"
-                />
+                <div className="relative">
+                  <Input
+                    type="password"
+                    value={chatGptKey}
+                    readOnly={internalKeyboardEnabled}
+                    onClick={() => {
+                      if (!internalKeyboardEnabled) {
+                        return;
+                      }
+                      openKeyboard("API Key de ChatGPT", "apikey", "chatGptKey", false, undefined, undefined, true);
+                    }}
+                    placeholder="sk-..."
+                    className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                    onClick={() => void handlePasteToField(setChatGptKey)}
+                  >
+                    <ClipboardPaste className="h-4 w-4" />
+                    <span className="sr-only">Pegar API Key</span>
+                  </Button>
+                </div>
               </div>
 
               <Button 
@@ -609,6 +659,20 @@ export const SettingsView = () => {
 
               {diabetesMode && (
                 <>
+                  <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/20 p-4">
+                    <div>
+                      <Label className="text-lg font-medium">Teclado interno</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Activa el teclado táctil para los campos de Nightscout.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={internalKeyboardEnabled}
+                      onCheckedChange={setInternalKeyboardEnabled}
+                      className="scale-125"
+                    />
+                  </div>
+
                   <div className="flex items-center justify-between">
                     <div>
                       <Label className="text-lg font-medium">Asistente de Bolos</Label>
@@ -626,29 +690,59 @@ export const SettingsView = () => {
                   <div className="space-y-4">
                     <div className="space-y-2">
                       <Label>URL Nightscout</Label>
-                      <Input
-                        value={nightscoutUrl}
-                        readOnly
-                        onClick={() =>
-                          openKeyboard("URL Nightscout", "url", "nightscoutUrl", false, undefined, undefined, true)
-                        }
-                        placeholder="https://mi-nightscout.herokuapp.com"
-                        className="cursor-pointer"
-                      />
+                      <div className="relative">
+                        <Input
+                          value={nightscoutUrl}
+                          readOnly={internalKeyboardEnabled}
+                          onClick={() => {
+                            if (!internalKeyboardEnabled) {
+                              return;
+                            }
+                            openKeyboard("URL Nightscout", "url", "nightscoutUrl", false, undefined, undefined, true);
+                          }}
+                          placeholder="https://mi-nightscout.herokuapp.com"
+                          className={cn("pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                          onClick={() => void handlePasteToField(setNightscoutUrl)}
+                        >
+                          <ClipboardPaste className="h-4 w-4" />
+                          <span className="sr-only">Pegar URL Nightscout</span>
+                        </Button>
+                      </div>
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label>API Token</Label>
-                      <Input
-                        type="password"
-                        value={nightscoutToken}
-                        readOnly
-                        onClick={() =>
-                          openKeyboard("API Token", "password", "nightscoutToken", false, undefined, undefined, true)
-                        }
-                        placeholder="Token de acceso"
-                        className="cursor-pointer"
-                      />
+                      <div className="relative">
+                        <Input
+                          type="password"
+                          value={nightscoutToken}
+                          readOnly={internalKeyboardEnabled}
+                          onClick={() => {
+                            if (!internalKeyboardEnabled) {
+                              return;
+                            }
+                            openKeyboard("API Token", "password", "nightscoutToken", false, undefined, undefined, true);
+                          }}
+                          placeholder="Token de acceso"
+                          className={cn("pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                          onClick={() => void handlePasteToField(setNightscoutToken)}
+                        >
+                          <ClipboardPaste className="h-4 w-4" />
+                          <span className="sr-only">Pegar token Nightscout</span>
+                        </Button>
+                      </div>
                     </div>
 
                     {bolusAssistant && (

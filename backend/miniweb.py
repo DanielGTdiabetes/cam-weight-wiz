@@ -13,18 +13,19 @@ import random
 import string
 import asyncio
 import time
+import threading
 import shlex
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Union, Sequence, Set
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple
 
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -64,6 +65,10 @@ ScaleServiceType = Union[HX711Service, SerialScaleService]
 scale_service: Optional[ScaleServiceType] = None
 _LAST_AP_ACTION_TS = 0.0
 _LAST_WIFI_CONNECT_REQUEST: Optional[str] = None
+
+_last_weight_lock = threading.Lock()
+_last_weight_value: Optional[float] = None
+_last_weight_ts: Optional[datetime] = None
 
 # ---------- Modelos ----------
 class CalibrationPayload(BaseModel):
@@ -1850,6 +1855,93 @@ async def close_scale() -> None:
         scale_service = None
 
 
+def _coerce_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.endswith("Z"):
+            candidate = f"{candidate[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    return None
+
+
+def _get_cached_weight() -> Tuple[Optional[float], Optional[datetime]]:
+    with _last_weight_lock:
+        return _last_weight_value, _last_weight_ts
+
+
+def _update_last_weight(value: Optional[float], ts: Optional[datetime]) -> None:
+    global _last_weight_value, _last_weight_ts
+    with _last_weight_lock:
+        previous_value = _last_weight_value
+        previous_ts = _last_weight_ts
+        if previous_value == value and previous_ts == ts:
+            return
+        _last_weight_value = value
+        _last_weight_ts = ts
+    LOG_SCALE.info(
+        "[scale] last_weight updated: value=%s ts=%s",
+        value,
+        ts.isoformat() if ts else None,
+    )
+
+
+def _extract_weight_payload(data: Dict[str, Any]) -> Tuple[Optional[float], Optional[datetime]]:
+    raw_value = data.get("grams")
+    if raw_value is None:
+        raw_value = data.get("weight")
+
+    try:
+        numeric_value = float(raw_value) if raw_value is not None else None
+    except (TypeError, ValueError):
+        numeric_value = None
+
+    ts_value = _coerce_timestamp(data.get("ts"))
+    return numeric_value, ts_value
+
+
+def _read_scale_snapshot() -> Tuple[Dict[str, Any], Optional[float], Optional[datetime]]:
+    service = _get_scale_service()
+    if service is None or not hasattr(service, "get_reading"):
+        cached_value, cached_ts = _get_cached_weight()
+        return {"ok": False, "reason": "service_not_initialized"}, cached_value, cached_ts
+
+    try:
+        raw = service.get_reading()
+    except Exception as exc:  # pragma: no cover - defensive
+        LOG_SCALE.error("Failed to get scale reading: %s", exc)
+        cached_value, cached_ts = _get_cached_weight()
+        return {"ok": False, "reason": "exception"}, cached_value, cached_ts
+
+    data: Dict[str, Any] = raw if isinstance(raw, dict) else {}
+    value, ts_value = _extract_weight_payload(data)
+
+    if data.get("ok"):
+        if ts_value is None:
+            ts_value = datetime.now(timezone.utc)
+        _update_last_weight(value, ts_value)
+        if ts_value and "ts" not in data:
+            data["ts"] = ts_value.isoformat()
+        return data, value, ts_value
+
+    cached_value, cached_ts = _get_cached_weight()
+    if value is None:
+        value = cached_value
+    if ts_value is None:
+        ts_value = cached_ts
+    return data, value, ts_value
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Solo levantar AP en frío si procede
@@ -1889,10 +1981,71 @@ async def api_scale_status():
 
 @app.get("/api/scale/read")
 async def api_scale_read():
-    service = _get_scale_service()
-    if service is None:
-        return {"ok": False, "reason": "service_not_initialized"}
-    return service.get_reading()
+    data, _, _ = _read_scale_snapshot()
+    return data
+
+
+@app.get("/api/scale/weight")
+async def api_scale_weight():
+    _, value, ts_value = _read_scale_snapshot()
+    if value is None and ts_value is None:
+        value, ts_value = _get_cached_weight()
+    ts_str = ts_value.isoformat() if ts_value else None
+    return {"value": value, "ts": ts_str}
+
+
+@app.get("/api/scale/events")
+async def api_scale_events(request: Request) -> StreamingResponse:
+    client_host = request.client.host if request.client else "unknown"
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        LOG_SCALE.info("[sse] client connected: %s", client_host)
+        last_sent_value: Optional[float] = None
+        has_sent_initial = False
+        last_emit = 0.0
+        last_keepalive = time.monotonic()
+        hysteresis = 10.0  # 10 g ≈ 0.01 kg
+        min_interval = 0.15
+
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+
+                _, value, ts_value = _read_scale_snapshot()
+                ts_str = ts_value.isoformat() if ts_value else None
+                now = time.monotonic()
+
+                should_emit = False
+                if not has_sent_initial:
+                    should_emit = True
+                elif value is None:
+                    should_emit = last_sent_value is not None
+                elif last_sent_value is None:
+                    should_emit = True
+                else:
+                    should_emit = abs(value - last_sent_value) >= hysteresis
+
+                if should_emit and now - last_emit >= min_interval:
+                    payload = json.dumps({"value": value, "ts": ts_str})
+                    yield "event: weight\n"
+                    yield f"data: {payload}\n\n"
+                    last_sent_value = value
+                    has_sent_initial = True
+                    last_emit = now
+                    last_keepalive = now
+                elif now - last_keepalive >= 1.0:
+                    yield ": keep-alive\n\n"
+                    last_keepalive = now
+
+                await asyncio.sleep(0.1)
+        except asyncio.CancelledError:  # pragma: no cover - stream cancelled by client
+            pass
+        finally:
+            LOG_SCALE.info("[sse] client disconnected: %s", client_host)
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.post("/api/scale/tare")
@@ -2540,6 +2693,10 @@ async def ws_scale(websocket: WebSocket):
                     "stable": bool(stable_value),
                     "ts": data.get("ts", time.time()),
                 }
+                ts_value = _coerce_timestamp(payload.get("ts"))
+                if ts_value is None:
+                    ts_value = datetime.now(timezone.utc)
+                _update_last_weight(payload.get("weight"), ts_value)
                 await websocket.send_json(payload)
             else:
                 await websocket.send_json({"ok": False, **data})

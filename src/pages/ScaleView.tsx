@@ -7,16 +7,32 @@ import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { api } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
 import { storage } from "@/services/storage";
+import { isLocalClient } from "@/lib/network";
 
 interface ScaleViewProps {
   onNavigate: (view: string) => void;
 }
 
 export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
-  const { weight, isStable, unit, isConnected, error, reconnectAttempts } = useScaleWebSocket();
+  const { weight, isStable, unit, isConnected, error, reconnectAttempts, connectionState } = useScaleWebSocket();
   const [displayUnit, setDisplayUnit] = useState<"g" | "ml">("g");
   const [decimals, setDecimals] = useState(1);
   const { toast } = useToast();
+  const localClient = isLocalClient();
+
+  const statusLabelMap = {
+    connected: "Conectado",
+    reconnecting: "Reconectando",
+    "no-data": "Sin datos",
+  } as const;
+  const statusColorMap = {
+    connected: "bg-success",
+    reconnecting: "bg-amber-500",
+    "no-data": "bg-destructive",
+  } as const;
+
+  const statusLabel = statusLabelMap[connectionState];
+  const statusDotClass = statusColorMap[connectionState];
 
   // Load decimals preference
   useEffect(() => {
@@ -71,13 +87,14 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   return (
     <div className="flex h-full flex-col bg-background p-4">
       {/* Connection Status */}
-      {!isConnected && (
+      {connectionState !== "connected" && (
         <div className="mb-4 rounded-lg border-warning/50 bg-warning/10 p-3 text-center animate-fade-in">
           <p className="text-sm font-medium text-warning">
-            {reconnectAttempts > 0 
-              ? `Reconectando... Intento ${reconnectAttempts}/10`
-              : 'Conectando con la báscula...'
-            }
+            {connectionState === "reconnecting"
+              ? localClient && reconnectAttempts > 0
+                ? `Reconectando... Intento ${reconnectAttempts}/10`
+                : "Reconectando con la báscula..."
+              : "Sin datos de la báscula"}
           </p>
         </div>
       )}
@@ -88,6 +105,10 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
         isStable ? "border-success/50 glow-green" : "border-primary/30"
       )}>
         <div className="gradient-holographic absolute inset-0 opacity-30" />
+        <div className="absolute right-4 top-4 flex items-center gap-2 rounded-full border border-border bg-background/80 px-3 py-1 text-sm font-medium shadow-sm backdrop-blur">
+          <span className={cn("h-2.5 w-2.5 rounded-full", statusDotClass)} />
+          <span>{statusLabel}</span>
+        </div>
         <div className="relative flex h-full flex-col items-center justify-center">
           <div className={cn(
             "mb-3 rounded-full p-4 transition-smooth",
