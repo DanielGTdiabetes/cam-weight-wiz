@@ -1251,17 +1251,29 @@ for voice in "${voices[@]}"; do
   fi
 done
 
+install -d -m 0755 /opt/piper
+if [[ ! -e /opt/piper/models && ! -L /opt/piper/models ]]; then
+  ln -s /opt/bascula/voices /opt/piper/models
+fi
+
 # Create say.sh wrapper
 cat > /usr/local/bin/say.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 TEXT="${*:-Prueba de voz}"
-VOICE="${PIPER_VOICE:-es_ES-mls_10246-medium}"
-MODEL="/opt/piper/models/${VOICE}.onnx"
-CONFIG="/opt/piper/models/${VOICE}.onnx.json"
+VOICE="${PIPER_VOICE:-es_ES-sharvard-medium}"
+MODEL=""
+CONFIG=""
+for BASE in /opt/bascula/voices /opt/piper/models; do
+  if [[ -f "${BASE}/${VOICE}.onnx" ]]; then
+    MODEL="${BASE}/${VOICE}.onnx"
+    CONFIG="${BASE}/${VOICE}.onnx.json"
+    break
+  fi
+done
 BIN="$(command -v piper || echo "/opt/piper/bin/piper")"
 
-if [[ -x "${BIN}" && -f "${MODEL}" && -f "${CONFIG}" ]]; then
+if [[ -x "${BIN}" && -n "${MODEL}" && -f "${MODEL}" && -f "${CONFIG}" ]]; then
   echo -n "${TEXT}" | "${BIN}" -m "${MODEL}" -c "${CONFIG}" --length-scale 1.0 --noise-scale 0.5 | aplay -q -r 22050 -f S16_LE -t raw -
 else
   espeak-ng -v es -s 170 "${TEXT}" >/dev/null 2>&1 || true
