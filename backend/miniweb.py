@@ -1001,15 +1001,16 @@ def ethernet_carrier(ifname: str = "eth0") -> bool:
     return False
 
 
-def _get_wifi_client_info() -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
-    """Return connection status, connection id, SSID and IP for wlan0."""
+def _wifi_client_connected() -> bool:
+    """Return True if wlan0 is associated to a Wi-Fi network."""
 
     try:
         _, state_connected = _get_wifi_device_state()
     except PermissionError:
-        raise
-    except Exception:
-        state_connected = False
+        return False
+
+    if not state_connected:
+        return False
 
     try:
         active_connection_raw = _nmcli_get_first_value(
@@ -1023,25 +1024,18 @@ def _get_wifi_client_info() -> tuple[bool, Optional[str], Optional[str], Optiona
             timeout=5,
         )
     except PermissionError:
-        raise
+        return False
     except Exception:
         active_connection_raw = None
 
-    active_connection: Optional[str] = None
+    active_connection = None
     if active_connection_raw and active_connection_raw not in {"", "--"}:
         active_connection = active_connection_raw
 
-    if active_connection == AP_CONNECTION_ID:
-        active_connection = None
+    if not active_connection or active_connection == AP_CONNECTION_ID:
+        return False
 
-    ssid: Optional[str] = None
-    if active_connection:
-        ssid = _connection_ssid(active_connection)
-    if not ssid:
-        ssid = _current_wifi_ssid()
-    if not ssid and active_connection:
-        ssid = active_connection
-
+    wlan_ip = None
     try:
         wlan_ip_raw = _nmcli_get_first_value(
             [
@@ -1054,36 +1048,19 @@ def _get_wifi_client_info() -> tuple[bool, Optional[str], Optional[str], Optiona
             timeout=5,
         )
     except PermissionError:
-        raise
+        return False
     except Exception:
         wlan_ip_raw = None
 
-    wlan_ip: Optional[str] = None
     if wlan_ip_raw:
         wlan_ip = wlan_ip_raw.split("/", 1)[0].strip()
     if not wlan_ip:
         wlan_ip = get_iface_ip(WIFI_INTERFACE)
 
-    ssid_valid = bool(ssid and ssid not in {"", "--"})
-
     if wlan_ip and _ip_is_ap_subnet(wlan_ip):
-        ssid_valid = False
-        active_connection = None
-
-    wifi_connected = bool(state_connected and active_connection and ssid_valid)
-
-    return wifi_connected, active_connection, ssid if ssid_valid else None, wlan_ip
-
-
-def _wifi_client_connected() -> bool:
-    """Return True if wlan0 is associated to a Wi-Fi network."""
-
-    try:
-        connected, _, _, _ = _get_wifi_client_info()
-    except PermissionError:
         return False
 
-    return connected
+    return True
 
 
 def _nm_active_ap() -> bool:
@@ -1740,26 +1717,69 @@ def _get_wifi_status() -> Dict[str, Any]:
         ethernet_active = False
 
     try:
-        wifi_connected, active_connection, ssid, wlan_ip = _get_wifi_client_info()
+        _, wifi_state_connected = _get_wifi_device_state()
     except PermissionError:
         raise
+    except Exception:
+        wifi_state_connected = False
+
+    try:
+        active_connection_raw = _nmcli_get_first_value([
+            "-g",
+            "GENERAL.CONNECTION",
+            "device",
+            "show",
+            WIFI_INTERFACE,
+        ], timeout=5)
+    except PermissionError:
+        raise
+    except Exception:
+        active_connection_raw = None
+
+    active_connection = None
+    if active_connection_raw and active_connection_raw != "--":
+        active_connection = active_connection_raw
+
+    try:
+        wlan_ip_raw = _nmcli_get_first_value([
+            "-g",
+            "IP4.ADDRESS",
+            "device",
+            "show",
+            WIFI_INTERFACE,
+        ], timeout=5)
+    except PermissionError:
+        raise
+    except Exception:
+        wlan_ip_raw = None
+
+    wlan_ip = None
+    if wlan_ip_raw:
+        wlan_ip = wlan_ip_raw.split("/", 1)[0].strip()
+    if not wlan_ip:
+        wlan_ip = get_iface_ip(WIFI_INTERFACE)
+
+    ip_is_ap = bool(wlan_ip and _ip_is_ap_subnet(wlan_ip))
+    wifi_connected = bool(
+        wifi_state_connected
+        and active_connection
+        and active_connection != AP_CONNECTION_ID
+        and not ip_is_ap
+    )
+
+    ssid: Optional[str] = None
+    if active_connection:
+        if active_connection == AP_CONNECTION_ID:
+            ssid = AP_DEFAULT_SSID
+        else:
+            ssid = _connection_ssid(active_connection) or _current_wifi_ssid() or active_connection
 
     if not ssid and ap_active:
         ssid = AP_DEFAULT_SSID
-    elif not ssid:
+    elif not ssid and not wifi_connected:
         ssid = _current_wifi_ssid()
 
     if wifi_connected:
-        if ap_active:
-            try:
-                _run_nmcli_command(
-                    _nmcli_args("con", "down", AP_CONNECTION_ID),
-                    check=False,
-                    ok_codes={0, 10},
-                    timeout=5,
-                )
-            except Exception as exc:
-                LOG_NETWORK.debug("Unable to bring down AP while Wi-Fi connected: %s", exc)
         ap_active = False
 
     ip_address: Optional[str] = None
@@ -1772,8 +1792,6 @@ def _get_wifi_status() -> Dict[str, Any]:
 
     internet_available = connectivity == "full"
 
-    should_activate_ap = bool(ap_active or (not wifi_connected and not ethernet_active))
-
     return {
         "connected": wifi_connected,
         "ssid": ssid,
@@ -1783,11 +1801,10 @@ def _get_wifi_status() -> Dict[str, Any]:
         "ethernet_connected": ethernet_active,
         "interface": WIFI_INTERFACE,
         "active_connection": active_connection,
-        "should_activate_ap": should_activate_ap,
+        "should_activate_ap": ap_active,
         "connectivity": connectivity,
         "saved_wifi_profiles": saved_wifi_profiles,
         "internet": internet_available,
-        "internet_status": connectivity,
     }
 
 
