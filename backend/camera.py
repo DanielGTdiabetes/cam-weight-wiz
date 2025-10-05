@@ -61,7 +61,8 @@ def capture_jpeg():
             status_code=503,
         )
     try:
-        arr = cam.capture_array()
+        with _CAMERA_LOCK:
+            arr = cam.capture_array()
         buf = io.BytesIO()
         Image.fromarray(arr).save(buf, format="JPEG", quality=85)
         return Response(content=buf.getvalue(), media_type="image/jpeg")
@@ -84,7 +85,8 @@ def stream_mjpeg():
 
     def gen():
         while True:
-            arr = cam.capture_array()
+            with _CAMERA_LOCK:
+                arr = cam.capture_array()
             b = io.BytesIO()
             Image.fromarray(arr).save(b, format="JPEG", quality=80)
             yield boundary + b"Content-Type: image/jpeg\r\n\r\n" + b.getvalue() + b"\r\n"
