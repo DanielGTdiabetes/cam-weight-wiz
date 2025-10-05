@@ -18,7 +18,7 @@ export const useVoice = (enabled: boolean): UseVoiceReturn => {
       try {
         setIsSpeaking(true);
         setError(null);
-        await api.say(text);
+        await api.speak(text);
       } catch (err) {
         console.error("Failed to speak:", err);
         setError("Error al reproducir voz");

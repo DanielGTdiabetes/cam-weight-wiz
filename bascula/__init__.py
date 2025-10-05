@@ -1,1 +1,0 @@
-"""Bascula Python package."""
