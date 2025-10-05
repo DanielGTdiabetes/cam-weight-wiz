@@ -172,29 +172,51 @@ profile_needs_repair() {
 apply_ap_profile_settings() {
   local -a modify_cmd=(
     connection
-    modify "${AP_NAME}"
-    802-11-wireless.ssid "${AP_SSID}"
-    802-11-wireless.mode ap
-    802-11-wireless.band "${AP_BAND:-bg}"
-    802-11-wireless.channel "${AP_CHANNEL:-1}"
-    802-11-wireless.hidden yes
-    802-11-wireless-security.pmf 1
-    wifi-sec.key-mgmt wpa-psk
-    wifi-sec.proto rsn
-    ipv4.method shared
-    ipv4.addresses "${AP_CIDR}"
-    ipv4.gateway "${AP_GATEWAY}"
-    ipv4.never-default yes
-    ipv6.method ignore
-    connection.interface-name "${AP_IFACE}"
-    connection.autoconnect no
-    connection.autoconnect-priority -999
-    connection.autoconnect-retries 0
-    connection.permissions "user:root"
+    modify
+    "${AP_NAME}"
+    802-11-wireless.ssid
+    "${AP_SSID}"
+    802-11-wireless.mode
+    ap
+    802-11-wireless.band
+    "${AP_BAND:-bg}"
+    802-11-wireless.channel
+    "${AP_CHANNEL:-1}"
+    802-11-wireless.hidden
+    yes
+    802-11-wireless-security.pmf
+    1
+    wifi-sec.key-mgmt
+    wpa-psk
+    wifi-sec.proto
+    rsn
+    ipv4.method
+    shared
+    ipv4.addresses
+    "${AP_CIDR}"
+    ipv4.gateway
+    "${AP_GATEWAY}"
+    ipv4.never-default
+    yes
+    ipv6.method
+    ignore
+    connection.interface-name
+    "${AP_IFACE}"
+    connection.autoconnect
+    no
+    connection.autoconnect-priority
+    -999
+    connection.autoconnect-retries
+    0
+    connection.permissions
+    "user:root"
   )
 
   if [[ -n "${AP_PSK:-}" ]]; then
-    modify_cmd+=(wifi-sec.psk "${AP_PSK}")
+    modify_cmd+=(
+      wifi-sec.psk
+      "${AP_PSK}"
+    )
   fi
 
   run_nmcli "${modify_cmd[@]}"
