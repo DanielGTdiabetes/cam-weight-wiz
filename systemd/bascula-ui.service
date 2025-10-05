@@ -1,7 +1,10 @@
 [Unit]
 Description=Bascula Digital Pro - UI (Xorg kiosk)
-After=graphical.target systemd-user-sessions.service NetworkManager.service
+Requires=bascula-miniweb.service
+After=bascula-miniweb.service
 Wants=NetworkManager.service
+After=NetworkManager.service graphical.target systemd-user-sessions.service
+PartOf=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=120
 StartLimitBurst=3
