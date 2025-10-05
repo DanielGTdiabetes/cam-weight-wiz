@@ -22,7 +22,7 @@ from typing import Optional, Dict, Any, List, Union, Sequence, Set
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,6 +34,21 @@ from backend.serial_scale_service import SerialScaleService
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = BASE_DIR / "dist"
+INDEX_HTML_PATH = DIST_DIR / "index.html"
+
+CACHE_CONTROL_NO_STORE = "no-store, must-revalidate"
+
+
+class NoStoreStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):  # type: ignore[override]
+        response = await super().get_response(path, scope)
+        if response.status_code < 400:
+            response.headers["Cache-Control"] = CACHE_CONTROL_NO_STORE
+        return response
+
+
+def _no_store_file_response(path: Path) -> FileResponse:
+    return FileResponse(path, headers={"Cache-Control": CACHE_CONTROL_NO_STORE})
 
 CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
 PIN_PATH = CFG_DIR / "miniweb_pin"
@@ -1849,39 +1864,35 @@ async def api_scale_calibrate(payload: CalibrationPayload):
 if DIST_DIR.exists():
     assets_dir = DIST_DIR / "assets"
     if assets_dir.exists():
-        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+        app.mount("/assets", NoStoreStaticFiles(directory=assets_dir), name="assets")
 
-    @app.get("/manifest.json", response_class=FileResponse)
+    @app.get("/manifest.json")
     async def manifest():
-        return DIST_DIR / "manifest.json"
+        return _no_store_file_response(DIST_DIR / "manifest.json")
 
-    @app.get("/service-worker.js", response_class=FileResponse)
-    async def service_worker():
-        return DIST_DIR / "service-worker.js"
-
-    @app.get("/favicon.ico", response_class=FileResponse)
+    @app.get("/favicon.ico")
     async def favicon():
-        return DIST_DIR / "favicon.ico"
+        return _no_store_file_response(DIST_DIR / "favicon.ico")
 
-    @app.get("/icon-192.png", response_class=FileResponse)
+    @app.get("/icon-192.png")
     async def icon_192():
-        return DIST_DIR / "icon-192.png"
+        return _no_store_file_response(DIST_DIR / "icon-192.png")
 
-    @app.get("/icon-512.png", response_class=FileResponse)
+    @app.get("/icon-512.png")
     async def icon_512():
-        return DIST_DIR / "icon-512.png"
+        return _no_store_file_response(DIST_DIR / "icon-512.png")
 
-    @app.get("/robots.txt", response_class=FileResponse)
+    @app.get("/robots.txt")
     async def robots():
-        return DIST_DIR / "robots.txt"
+        return _no_store_file_response(DIST_DIR / "robots.txt")
 
-    @app.get("/", response_class=FileResponse)
+    @app.get("/")
     async def root_index():
-        return DIST_DIR / "index.html"
+        return _no_store_file_response(DIST_DIR / "index.html")
 
-    @app.get("/config", response_class=FileResponse)
+    @app.get("/config")
     async def config_index():
-        return DIST_DIR / "index.html"
+        return _no_store_file_response(DIST_DIR / "index.html")
 
 
 class PinVerification(BaseModel):
@@ -2456,6 +2467,15 @@ async def ws_scale(websocket: WebSocket):
         LOG_SCALE.error("WebSocket error: %s", exc)
         if websocket in active_ws_clients:
             active_ws_clients.remove(websocket)
+
+
+if INDEX_HTML_PATH.exists():
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        if full_path.startswith("api/"):
+            return Response(status_code=404)
+        return _no_store_file_response(INDEX_HTML_PATH)
 
 
 # Mensaje de arranque útil

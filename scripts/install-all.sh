@@ -1152,13 +1152,6 @@ if [[ -f "package.json" ]]; then
     cp -f .env.device .env
   fi
   npm install || warn "npm install falló, continuar con backend"
-  if command -v node >/dev/null 2>&1; then
-    if ! node scripts/generate-service-worker.mjs; then
-      warn "No se pudo generar service worker"
-    fi
-  else
-    warn "Node.js no disponible para generar service worker"
-  fi
   npm run build || warn "npm build falló"
   log "✓ Frontend compilado"
 fi

@@ -59,6 +59,7 @@ class NetworkDetector {
         // Try to ping the backend
         const response = await fetch('/api/miniweb/status', {
           method: 'GET',
+          cache: 'no-store',
           signal: AbortSignal.timeout(5000),
         });
 
