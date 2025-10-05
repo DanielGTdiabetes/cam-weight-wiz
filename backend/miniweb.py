@@ -24,7 +24,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -1344,21 +1344,11 @@ def _is_ap_active() -> bool:
     return _is_ap_mode_legacy()
 
 
-def _is_same_lan_client(client_host: Optional[str]) -> bool:
-    if not client_host:
-        return False
-    try:
-        ip = ipaddress.ip_address(client_host)
-    except ValueError:
-        return False
-    if ip.is_loopback:
-        return True
-    if ip.version == 4 and ip in ipaddress.ip_network("192.168.0.0/16"):
-        return True
-    return ip.is_private
+def _allow_pin_disclosure(request: Optional[Request]) -> bool:
+    client_host: Optional[str] = None
+    if request and request.client:
+        client_host = request.client.host
 
-
-def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
     if client_host in {"127.0.0.1", "::1"}:
         return True
     if os.getenv("BASCULA_ALLOW_PIN_READ", "0") == "1":
@@ -1937,6 +1927,10 @@ class NetworkConnectRequest(BaseModel):
 # ---------- PIN persistente ----------
 CURRENT_PIN = _get_or_create_pin()
 
+
+def get_current_pin() -> str:
+    return CURRENT_PIN
+
 # Rate limit básico en memoria (por IP)
 FAILED_ATTEMPTS: Dict[str, List[datetime]] = {}
 MAX_ATTEMPTS = 10
@@ -1963,20 +1957,32 @@ async def health():
 
 @app.get("/api/miniweb/pin")
 async def get_pin(request: Request):
-    client_host = request.client.host if request.client else ""
-    pin_required = not _is_same_lan_client(client_host)
-    response_payload: Dict[str, Any] = {"pinRequired": pin_required}
-    if _allow_pin_disclosure(client_host):
-        response_payload["pin"] = CURRENT_PIN
-        response_payload["pinRequired"] = False
-    return response_payload
+    try:
+        status = _get_wifi_status()
+    except PermissionError:
+        status = {}
+    except Exception:
+        status = {}
+
+    pin_required = True
+    if os.getenv("MINIWEB_PIN_DISABLED") == "1":
+        pin_required = False
+    elif status.get("ap_active") is True and not status.get("saved_wifi_profiles"):
+        pin_required = False
+
+    payload: Dict[str, Any] = {"pinRequired": pin_required}
+
+    if _allow_pin_disclosure(request):
+        payload["pin"] = get_current_pin()
+
+    return JSONResponse(payload, status_code=200)
 
 
 @app.post("/api/miniweb/verify-pin")
 async def verify_pin(data: PinVerification, request: Request):
     ip = request.client.host if request.client else "unknown"
     _check_rate_limit(ip)
-    if data.pin == CURRENT_PIN:
+    if data.pin == get_current_pin():
         return {"success": True}
     _register_fail(ip)
     raise HTTPException(status_code=403, detail="Invalid PIN")

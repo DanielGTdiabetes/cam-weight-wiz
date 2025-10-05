@@ -171,7 +171,7 @@ export const MiniWebConfig = () => {
         if (response.ok) {
           const data = (await response.json().catch(() => null)) as PinStatusResponse | null;
           const pinValue = data && typeof data.pin === 'string' ? data.pin : null;
-          const requiresPin = data?.pinRequired !== false;
+          const requiresPin = data?.pinRequired === false ? false : true;
 
           if (cancelled) {
             return;
