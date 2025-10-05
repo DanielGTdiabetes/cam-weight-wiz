@@ -1261,6 +1261,11 @@ fi
 install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
 log "✓ Mini-web backend configurado"
 
+# --- Mini-Web wait helper ---
+log "Instalando helper wait-miniweb..."
+install -Dm755 "${PROJECT_ROOT}/scripts/wait-miniweb.sh" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh"
+chown "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh" || true
+
 # Install AP ensure service and script
 log "[17a/20] Configurando servicio de arranque de AP..."
 AP_ENSURE_SERVICE_INSTALLED=0
@@ -1416,6 +1421,7 @@ fi
 
 systemctl_safe daemon-reload
 systemctl_safe disable getty@tty1.service
+systemctl_safe enable bascula-miniweb.service
 systemctl_safe enable bascula-app.service
 log "✓ UI kiosk configurado"
 
@@ -1481,6 +1487,8 @@ log "Instalación finalizada"
 log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
 log "Reiniciando bascula-miniweb para aplicar la última compilación"
 systemctl_safe restart bascula-miniweb.service
+log "Reiniciando bascula-app (UI kiosk) para aplicar la espera de Mini-Web"
+systemctl_safe restart bascula-app.service
 systemctl_safe status bascula-miniweb --no-pager -l
 if command -v ss >/dev/null 2>&1; then
   ss -ltnp | grep 8080 || true
