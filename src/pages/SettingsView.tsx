@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { Settings, Scale, Wifi, Heart, Download, Save, Upload, Trash2, Volume2, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -18,6 +19,7 @@ export const SettingsView = () => {
   const { toast } = useToast();
   const { weight } = useScaleWebSocket();
   const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
+  const navigate = useNavigate();
   
   // Load settings on mount
   useEffect(() => {
@@ -277,7 +279,7 @@ export const SettingsView = () => {
   const handleTestAudio = async () => {
     setIsTestingAudio(true);
     try {
-      await api.speak("Hola, este es un test del sistema de audio");
+      await api.say("Hola, este es un test del sistema de audio");
       toast({
         title: "Test de Audio",
         description: "Audio funcionando correctamente",
@@ -437,15 +439,23 @@ export const SettingsView = () => {
                 </select>
               </div>
 
-              <Button 
-                variant="outline" 
-                size="lg" 
+              <Button
+                variant="outline"
+                size="lg"
                 className="w-full justify-start"
                 onClick={handleTestAudio}
                 disabled={isTestingAudio || !voiceEnabled}
               >
                 <Volume2 className="mr-2 h-5 w-5" />
                 {isTestingAudio ? "Probando..." : "Probar Audio"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="lg"
+                className="w-full justify-start"
+                onClick={() => navigate("/settings/voice")}
+              >
+                Abrir pruebas avanzadas de voz
               </Button>
             </div>
           </Card>
