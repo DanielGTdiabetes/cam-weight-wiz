@@ -31,6 +31,8 @@ from pydantic import BaseModel
 
 from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
+from backend.voice import router as voice_router
+from backend.camera import router as camera_router
 
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -1963,6 +1965,14 @@ app.add_middleware(
     allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+
+app.include_router(voice_router)
+app.include_router(camera_router)
+
+
+@app.get("/health")
+async def health() -> Dict[str, bool]:
+    return {"ok": True}
 
 @app.get("/api/scale/status")
 async def api_scale_status():
