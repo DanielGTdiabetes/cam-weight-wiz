@@ -1,4 +1,4 @@
-import { Volume2, VolumeX, Wifi, WifiOff, Settings, Clock } from "lucide-react";
+import { Volume2, VolumeX, Wifi, WifiOff, Settings, Clock, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -11,6 +11,9 @@ interface TopBarProps {
   onSettingsClick: () => void;
   onTimerClick?: () => void;
   onVoiceToggle?: () => void;
+  onBackClick?: () => void;
+  showBackButton?: boolean;
+  showTimerButton?: boolean;
 }
 
 export const TopBar = ({
@@ -22,6 +25,9 @@ export const TopBar = ({
   onSettingsClick,
   onTimerClick,
   onVoiceToggle,
+  onBackClick,
+  showBackButton = false,
+  showTimerButton = false,
 }: TopBarProps) => {
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -31,7 +37,7 @@ export const TopBar = ({
 
   return (
     <div className="flex items-center justify-between border-b-2 border-border bg-card/90 px-5 py-3 backdrop-blur-sm">
-      {/* Left side - Voice & WiFi */}
+      {/* Left side - Voice, WiFi & Back button */}
       <div className="flex items-center gap-3">
         <Button
           size="icon"
@@ -49,6 +55,17 @@ export const TopBar = ({
           <Wifi className="h-7 w-7 text-success" />
         ) : (
           <WifiOff className="h-7 w-7 text-destructive" />
+        )}
+
+        {showBackButton && (
+          <Button
+            size="icon"
+            variant="outline"
+            onClick={onBackClick}
+            className="h-10 w-10"
+          >
+            <ArrowLeft className="h-6 w-6" />
+          </Button>
         )}
       </div>
 
@@ -83,14 +100,26 @@ export const TopBar = ({
         )}
       </div>
 
-      {/* Right side - Settings */}
-      <Button
-        size="icon"
-        variant="ghost"
-        onClick={onSettingsClick}
-      >
-        <Settings className="h-7 w-7" />
-      </Button>
+      {/* Right side - Timer & Settings */}
+      <div className="flex items-center gap-3">
+        {showTimerButton && (
+          <Button
+            size="icon"
+            variant="glow"
+            onClick={onTimerClick}
+            className="h-10 w-10 glow-cyan"
+          >
+            <Clock className="h-6 w-6" />
+          </Button>
+        )}
+        <Button
+          size="icon"
+          variant="ghost"
+          onClick={onSettingsClick}
+        >
+          <Settings className="h-7 w-7" />
+        </Button>
+      </div>
     </div>
   );
 };

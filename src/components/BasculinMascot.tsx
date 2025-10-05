@@ -158,7 +158,7 @@ export const BasculinMascot = ({
     <div
       className={cn(
         "fixed z-50 transition-all duration-500",
-        position === "corner" ? "top-24 right-24" : "bottom-1/2 left-1/2 -translate-x-1/2 translate-y-1/2"
+        position === "corner" ? "top-32 right-20" : "bottom-1/2 left-1/2 -translate-x-1/2 translate-y-1/2"
       )}
     >
       {/* Message Bubble */}
