@@ -22,9 +22,9 @@ from typing import Optional, Dict, Any, List, Union, Sequence, Set
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -34,23 +34,6 @@ from backend.serial_scale_service import SerialScaleService
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = BASE_DIR / "dist"
-PUBLIC_DIR = BASE_DIR / "public"
-INDEX_HTML_PATH = DIST_DIR / "index.html"
-
-CACHE_CONTROL_NO_STORE = "no-store"
-CACHE_CONTROL_IMMUTABLE_ASSET = "public, max-age=31536000, immutable"
-
-
-class NoStoreStaticFiles(StaticFiles):
-    async def get_response(self, path: str, scope):  # type: ignore[override]
-        response = await super().get_response(path, scope)
-        if response.status_code < 400:
-            response.headers["Cache-Control"] = CACHE_CONTROL_IMMUTABLE_ASSET
-        return response
-
-
-def _no_store_file_response(path: Path) -> FileResponse:
-    return FileResponse(path, headers={"Cache-Control": CACHE_CONTROL_NO_STORE})
 
 CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
 PIN_PATH = CFG_DIR / "miniweb_pin"
@@ -1344,11 +1327,7 @@ def _is_ap_active() -> bool:
     return _is_ap_mode_legacy()
 
 
-def _allow_pin_disclosure(request: Optional[Request]) -> bool:
-    client_host: Optional[str] = None
-    if request and request.client:
-        client_host = request.client.host
-
+def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
     if client_host in {"127.0.0.1", "::1"}:
         return True
     if os.getenv("BASCULA_ALLOW_PIN_READ", "0") == "1":
@@ -1870,42 +1849,39 @@ async def api_scale_calibrate(payload: CalibrationPayload):
 if DIST_DIR.exists():
     assets_dir = DIST_DIR / "assets"
     if assets_dir.exists():
-        app.mount("/assets", NoStoreStaticFiles(directory=assets_dir), name="assets")
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-    @app.get("/")
-    async def root_index():
-        return _no_store_file_response(DIST_DIR / "index.html")
-
-    @app.get("/config")
-    async def config_index():
-        response = _no_store_file_response(DIST_DIR / "index.html")
-        response.headers["Cache-Control"] = CACHE_CONTROL_NO_STORE
-        return response
-
-if PUBLIC_DIR.exists():
-
-    def _public_file_response(filename: str) -> FileResponse:
-        return FileResponse(PUBLIC_DIR / filename)
-
-    @app.get("/manifest.json")
+    @app.get("/manifest.json", response_class=FileResponse)
     async def manifest():
-        return _public_file_response("manifest.json")
+        return DIST_DIR / "manifest.json"
 
-    @app.get("/favicon.ico")
+    @app.get("/service-worker.js", response_class=FileResponse)
+    async def service_worker():
+        return DIST_DIR / "service-worker.js"
+
+    @app.get("/favicon.ico", response_class=FileResponse)
     async def favicon():
-        return _public_file_response("favicon.ico")
+        return DIST_DIR / "favicon.ico"
 
-    @app.get("/icon-192.png")
+    @app.get("/icon-192.png", response_class=FileResponse)
     async def icon_192():
-        return _public_file_response("icon-192.png")
+        return DIST_DIR / "icon-192.png"
 
-    @app.get("/icon-512.png")
+    @app.get("/icon-512.png", response_class=FileResponse)
     async def icon_512():
-        return _public_file_response("icon-512.png")
+        return DIST_DIR / "icon-512.png"
 
-    @app.get("/robots.txt")
+    @app.get("/robots.txt", response_class=FileResponse)
     async def robots():
-        return _public_file_response("robots.txt")
+        return DIST_DIR / "robots.txt"
+
+    @app.get("/", response_class=FileResponse)
+    async def root_index():
+        return DIST_DIR / "index.html"
+
+    @app.get("/config", response_class=FileResponse)
+    async def config_index():
+        return DIST_DIR / "index.html"
 
 
 class PinVerification(BaseModel):
@@ -1926,10 +1902,6 @@ class NetworkConnectRequest(BaseModel):
 
 # ---------- PIN persistente ----------
 CURRENT_PIN = _get_or_create_pin()
-
-
-def get_current_pin() -> str:
-    return CURRENT_PIN
 
 # Rate limit básico en memoria (por IP)
 FAILED_ATTEMPTS: Dict[str, List[datetime]] = {}
@@ -1957,32 +1929,17 @@ async def health():
 
 @app.get("/api/miniweb/pin")
 async def get_pin(request: Request):
-    try:
-        status = _get_wifi_status()
-    except PermissionError:
-        status = {}
-    except Exception:
-        status = {}
-
-    pin_required = True
-    if os.getenv("MINIWEB_PIN_DISABLED") == "1":
-        pin_required = False
-    elif status.get("ap_active") is True and not status.get("saved_wifi_profiles"):
-        pin_required = False
-
-    payload: Dict[str, Any] = {"pinRequired": pin_required}
-
-    if _allow_pin_disclosure(request):
-        payload["pin"] = get_current_pin()
-
-    return JSONResponse(payload, status_code=200)
+    client_host = request.client.host if request.client else ""
+    if _allow_pin_disclosure(client_host):
+        return {"pin": CURRENT_PIN}
+    raise HTTPException(status_code=403, detail="Not allowed")
 
 
 @app.post("/api/miniweb/verify-pin")
 async def verify_pin(data: PinVerification, request: Request):
     ip = request.client.host if request.client else "unknown"
     _check_rate_limit(ip)
-    if data.pin == get_current_pin():
+    if data.pin == CURRENT_PIN:
         return {"success": True}
     _register_fail(ip)
     raise HTTPException(status_code=403, detail="Invalid PIN")
@@ -2499,15 +2456,6 @@ async def ws_scale(websocket: WebSocket):
         LOG_SCALE.error("WebSocket error: %s", exc)
         if websocket in active_ws_clients:
             active_ws_clients.remove(websocket)
-
-
-if INDEX_HTML_PATH.exists():
-
-    @app.get("/{full_path:path}")
-    async def spa_fallback(full_path: str):
-        if full_path.startswith("api/"):
-            return Response(status_code=404)
-        return _no_store_file_response(INDEX_HTML_PATH)
 
 
 # Mensaje de arranque útil

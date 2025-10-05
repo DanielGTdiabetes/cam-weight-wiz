@@ -127,39 +127,16 @@ systemctl_safe() {
 safe_install() {
   local src="$1"
   local dst="$2"
-  local mode="${3:-}"
-  local owner="${4:-}"
-  local src_real dst_real
-
-  src_real="$(readlink -f -- "${src}" 2>/dev/null || true)"
-  if [[ -e "${dst}" || -L "${dst}" ]]; then
-    dst_real="$(readlink -f -- "${dst}" 2>/dev/null || true)"
-  else
-    dst_real=""
-  fi
-
-  if [[ -n "${src_real}" && -n "${dst_real}" && "${src_real}" == "${dst_real}" ]]; then
-    log "skip (same file): ${dst}"
-    return 0
-  fi
-
-  install -d "$(dirname -- "${dst}")"
-
-  local install_args=()
-  if [[ -n "${mode}" ]]; then
-    install_args+=(-m "${mode}")
-  fi
-
-  if [[ -n "${owner}" ]]; then
-    local owner_user="${owner%%:*}"
-    local owner_group="${owner#*:}"
-    install_args+=(-o "${owner_user}")
-    if [[ "${owner_group}" != "${owner}" && -n "${owner_group}" ]]; then
-      install_args+=(-g "${owner_group}")
+  if [ -e "${src}" ] && [ -e "${dst}" ]; then
+    local src_real dst_real
+    src_real=$(readlink -f "${src}" 2>/dev/null || echo "")
+    dst_real=$(readlink -f "${dst}" 2>/dev/null || echo "")
+    if [[ -n "${src_real}" && -n "${dst_real}" && "${src_real}" == "${dst_real}" ]]; then
+      echo "[inst][info] skip install: ${dst} ya es el mismo fichero"
+      return 0
     fi
   fi
-
-  install "${install_args[@]}" -- "${src}" "${dst}"
+  install -m 0755 "${src}" "${dst}"
 }
 
 install_x735() {
@@ -1175,44 +1152,15 @@ if [[ -f "package.json" ]]; then
     cp -f .env.device .env
   fi
   npm install || warn "npm install falló, continuar con backend"
+  if command -v node >/dev/null 2>&1; then
+    if ! node scripts/generate-service-worker.mjs; then
+      warn "No se pudo generar service worker"
+    fi
+  else
+    warn "Node.js no disponible para generar service worker"
+  fi
   npm run build || warn "npm build falló"
   log "✓ Frontend compilado"
-
-  if [[ -d "dist" ]]; then
-    install -d -m 0755 dist
-    if [[ ! -f "dist/index.html" ]]; then
-      warn "dist/index.html no encontrado tras la compilación"
-    fi
-    if [[ ! -d "dist/assets" ]]; then
-      warn "dist/assets no encontrado tras la compilación"
-    fi
-  else
-    warn "Directorio dist no generado; creando estructura vacía"
-    install -d -m 0755 dist
-  fi
-
-  if [[ -d "public" ]]; then
-    install -d -m 0755 public
-  else
-    warn "Directorio public no encontrado; creando estructura vacía"
-    install -d -m 0755 public
-  fi
-
-  required_public=(manifest.json icon-192.png icon-512.png robots.txt)
-  for asset in "${required_public[@]}"; do
-    if [[ ! -f "public/${asset}" ]]; then
-      warn "Falta public/${asset} tras la compilación"
-    fi
-  done
-
-  if [[ -d "dist" ]]; then
-    chmod -R a+rX dist || warn "No se pudieron ajustar permisos en dist"
-  fi
-  if [[ -d "public" ]]; then
-    chmod -R a+rX public || warn "No se pudieron ajustar permisos en public"
-  fi
-
-  log "✓ Directorios dist/ y public/ preparados"
 fi
 
 # Install and configure Nginx
@@ -1281,17 +1229,8 @@ if [[ ! -f "${SYSTEMD_SRC}" ]]; then
   exit 1
 fi
 
-safe_install "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service 0644
+install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
 log "✓ Mini-web backend configurado"
-
-# --- Mini-Web wait helper ---
-log "Instalando helper wait-miniweb..."
-safe_install "${PROJECT_ROOT}/scripts/wait-miniweb.sh" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh" 0755
-chown "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_CURRENT_LINK}/scripts/wait-miniweb.sh" || true
-
-log "Instalando launcher del kiosko..."
-safe_install "${PROJECT_ROOT}/scripts/kiosk-launch.sh" "${BASCULA_CURRENT_LINK}/scripts/kiosk-launch.sh" 0755
-chown "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_CURRENT_LINK}/scripts/kiosk-launch.sh" || true
 
 # Install AP ensure service and script
 log "[17a/20] Configurando servicio de arranque de AP..."
@@ -1301,7 +1240,7 @@ AP_ENSURE_SCRIPT_SRC="${PROJECT_ROOT}/scripts/bascula-ap-ensure.sh"
 AP_ENSURE_SCRIPT_DST="${BASCULA_CURRENT_LINK}/scripts/bascula-ap-ensure.sh"
 if [[ -f "${AP_ENSURE_SCRIPT_SRC}" ]]; then
   install -d "${BASCULA_CURRENT_LINK}/scripts"
-  safe_install "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}" 0755
+  safe_install "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}"
   chown "${TARGET_USER}:${TARGET_GROUP}" "${AP_ENSURE_SCRIPT_DST}" || true
   log "✓ Script bascula-ap-ensure.sh desplegado en ${AP_ENSURE_SCRIPT_DST}"
 else
@@ -1448,7 +1387,6 @@ fi
 
 systemctl_safe daemon-reload
 systemctl_safe disable getty@tty1.service
-systemctl_safe enable bascula-miniweb.service
 systemctl_safe enable bascula-app.service
 log "✓ UI kiosk configurado"
 
@@ -1512,16 +1450,6 @@ echo "  x735off          # apagar el sistema de forma segura"
 echo ""
 log "Instalación finalizada"
 log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
-systemctl_safe daemon-reload
-log "Reiniciando bascula-miniweb para aplicar la última compilación"
-systemctl_safe restart bascula-miniweb.service || true
-if [[ "${HAS_SYSTEMD}" -eq 1 ]] && systemctl list-unit-files | grep -q '^bascula-kiosk\.service'; then
-  log "Reiniciando bascula-kiosk (UI kiosk)"
-  systemctl_safe restart bascula-kiosk.service || true
-else
-  log "Reiniciando bascula-app (UI kiosk)"
-  systemctl_safe restart bascula-app.service || true
-fi
 systemctl_safe status bascula-miniweb --no-pager -l
 if command -v ss >/dev/null 2>&1; then
   ss -ltnp | grep 8080 || true

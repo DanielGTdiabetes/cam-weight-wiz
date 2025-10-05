@@ -3,12 +3,6 @@ import { Wifi, QrCode, Settings, KeyRound, CheckCircle2, AlertCircle, Loader2 } 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
-interface PinStatusResponse {
-  pin?: string;
-  pinRequired?: boolean;
-  message?: string;
-}
-
 export const APModeScreen = () => {
   const apSSID = "Bascula-AP";
   const apPassword = "Bascula1234";
@@ -27,25 +21,25 @@ export const APModeScreen = () => {
 
     const fetchPin = async () => {
       try {
-        const response = await fetch("/api/miniweb/pin", { cache: "no-store" });
-
-        if (!isMounted) return;
+        const response = await fetch("/api/miniweb/pin");
 
         if (response.ok) {
-          const data = (await response.json().catch(() => null)) as PinStatusResponse | null;
-          const pinValue = data && typeof data.pin === "string" ? data.pin : null;
-          const requiresPin = data?.pinRequired === false ? false : true;
+          const data = await response.json();
+          if (!isMounted) return;
 
-          setMiniWebPin(pinValue);
-
-          if (requiresPin) {
-            setPinMessage(
-              data?.message ?? "El PIN se muestra directamente en la pantalla del dispositivo"
-            );
+          if (data?.pin) {
+            setMiniWebPin(data.pin);
+            setPinMessage(null);
           } else {
-            setPinMessage(data?.message ?? "No se requiere PIN en esta red");
+            setMiniWebPin(null);
+            setPinMessage("PIN no disponible en este momento");
           }
+        } else if (response.status === 403) {
+          if (!isMounted) return;
+          setMiniWebPin(null);
+          setPinMessage("El PIN se muestra directamente en la pantalla del dispositivo");
         } else {
+          if (!isMounted) return;
           setMiniWebPin(null);
           setPinMessage("No se pudo obtener el PIN. Verifica la conexión.");
         }

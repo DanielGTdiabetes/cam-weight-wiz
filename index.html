@@ -24,19 +24,13 @@
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>
+      // Register service worker for PWA
       if ('serviceWorker' in navigator) {
-        // Unregister any previously installed SW to avoid stale caches/offline pages
-        navigator.serviceWorker
-          .getRegistrations()
-          .then((regs) => Promise.all(regs.map((r) => r.unregister())))
-          .catch(() => {});
-        // Optional: also clear caches created by old SWs
-        if (window.caches && caches.keys) {
-          caches
-            .keys()
-            .then((keys) => keys.forEach((k) => caches.delete(k)))
-            .catch(() => {});
-        }
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/service-worker.js')
+            .then(reg => console.log('Service Worker registered'))
+            .catch(err => console.error('Service Worker registration failed:', err));
+        });
       }
     </script>
   </body>
