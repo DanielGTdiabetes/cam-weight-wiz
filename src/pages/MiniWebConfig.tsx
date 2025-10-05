@@ -253,7 +253,11 @@ export const MiniWebConfig = () => {
               continue;
             }
             const status = await statusResponse.json();
-            if (status?.connected === true && status?.ap_active === false) {
+            if (
+              status?.ap_active === false &&
+              typeof status?.connectivity === "string" &&
+              status.connectivity.toLowerCase() === "full"
+            ) {
               const targetIp = status.ip || status.ip_address || window.location.hostname;
               const panelUrl = `http://${targetIp}:8080/`;
               setConnectionStatus({

@@ -1202,8 +1202,6 @@ if [[ ! -f "${SYSTEMD_SRC}" ]]; then
 fi
 
 install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
-systemctl_safe daemon-reload
-systemctl_safe enable --now bascula-miniweb.service
 log "✓ Mini-web backend configurado"
 
 # Install AP ensure service and script
@@ -1239,20 +1237,21 @@ if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
   fi
   systemctl disable --now bascula-ap-ensure.timer 2>/dev/null || true
   if [[ "${AP_ENSURE_SERVICE_INSTALLED}" -eq 1 ]]; then
-    if systemctl enable bascula-ap-ensure.service; then
-      log "✓ Servicio bascula-ap-ensure habilitado"
-      if systemctl start bascula-ap-ensure.service; then
-        log "✓ Servicio bascula-ap-ensure ejecutado (oneshot)"
-      else
-        warn "No se pudo iniciar bascula-ap-ensure.service"
-        systemctl status bascula-ap-ensure.service --no-pager || true
-      fi
+    if systemctl enable --now bascula-ap-ensure.service bascula-miniweb.service; then
+      log "✓ Servicios bascula-ap-ensure y bascula-miniweb habilitados"
     else
-      warn "No se pudo habilitar bascula-ap-ensure.service"
+      warn "No se pudieron habilitar bascula-ap-ensure/bascula-miniweb"
       systemctl status bascula-ap-ensure.service --no-pager || true
+      systemctl status bascula-miniweb.service --no-pager || true
     fi
   else
-    warn "Servicio bascula-ap-ensure no instalado; omitiendo enable"
+    warn "Servicio bascula-ap-ensure no instalado; habilitando solo bascula-miniweb"
+    if systemctl enable --now bascula-miniweb.service; then
+      log "✓ Servicio bascula-miniweb habilitado"
+    else
+      warn "No se pudo habilitar bascula-miniweb.service"
+      systemctl status bascula-miniweb.service --no-pager || true
+    fi
   fi
 else
   warn "systemd no disponible: BasculaAP dependerá de connection.autoconnect"

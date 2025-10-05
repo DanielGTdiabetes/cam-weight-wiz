@@ -1,6 +1,7 @@
 [Unit]
 Description=Bascula Mini-Web Backend
-After=network.target NetworkManager.service
+After=NetworkManager.service NetworkManager-wait-online.service bascula-ap-ensure.service
+Wants=NetworkManager-wait-online.service
 
 [Service]
 Type=simple
@@ -9,11 +10,10 @@ Group=pi
 WorkingDirectory=/opt/bascula/current
 Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=BASCULA_CFG_DIR=/home/pi/.bascula
-# Permite consultar el PIN localmente y durante modo AP (la API decide). 0 para desactivar.
-Environment=BASCULA_ALLOW_PIN_READ=1
+ExecStartPre=-/usr/bin/nm-online -s -q -t 25
 ExecStart=/opt/bascula/current/.venv/bin/python -m uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
 Restart=always
-RestartSec=5
+RestartSec=2s
 
 [Install]
 WantedBy=multi-user.target

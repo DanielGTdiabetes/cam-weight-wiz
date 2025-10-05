@@ -292,7 +292,11 @@ def _prepare_nmcli_args(*cmd_parts: Sequence[str] | str) -> list[str]:
         parts = cmd_parts[0]
     else:
         parts = cmd_parts
-    return [str(part) for part in parts]
+
+    prepared = [str(part) for part in parts]
+    if prepared and prepared[0] == "nmcli":
+        prepared[0] = str(NMCLI_BIN)
+    return prepared
 
 
 def _run_nmcli_command(
@@ -335,6 +339,35 @@ def _run_nmcli_command(
         LOG_NETWORK.debug("nmcli stderr: %s", result.stderr.strip())
 
     return result
+
+
+def _run_nmcli_text(
+    cmd: Sequence[str] | str,
+    *,
+    check: bool = True,
+    ok_codes: Set[int] | None = None,
+    timeout: int = 30,
+) -> str:
+    result = _run_nmcli_command(
+        cmd,
+        check=check,
+        ok_codes=ok_codes,
+        timeout=timeout,
+    )
+    return result.stdout or ""
+
+
+def _run_nmcli_bool(
+    cmd: Sequence[str] | str,
+    *,
+    match: str,
+    timeout: int = 30,
+) -> bool:
+    text = _run_nmcli_text(cmd, check=False, timeout=timeout)
+    for line in text.splitlines():
+        if line.strip() == match:
+            return True
+    return False
 
 
 async def _run_nmcli_async(
@@ -589,7 +622,7 @@ async def _list_client_profiles_state() -> list[_ClientProfileState]:
     return res
 
 
-async def _down_active_wifi_clients() -> None:
+async def _down_active_wifi_clients() -> list[str]:
     cp = await _run_nmcli_async(
         _nmcli_args(
             "-t",
@@ -601,17 +634,20 @@ async def _down_active_wifi_clients() -> None:
         ),
         check=False,
     )
+    downed: list[str] = []
     for line in (cp.stdout or "").strip().splitlines():
         parts = line.split(":")
         if len(parts) < 4:
             continue
         name, ctype, dev, _state = parts[0], parts[1], parts[2], parts[3]
         if ctype == "802-11-wireless" and dev == WIFI_INTERFACE and name != AP_CONNECTION_ID:
+            downed.append(name)
             await _run_nmcli_async(
                 _nmcli_args("con", "down", name),
                 check=False,
                 ok_codes={0, 10},
             )
+    return downed
 
 
 async def _create_or_update_wifi_profile(
@@ -982,8 +1018,89 @@ def _wifi_client_connected() -> bool:
     return False
 
 
+def _nm_active_ap() -> bool:
+    try:
+        return _run_nmcli_bool(
+            [
+                "nmcli",
+                "-t",
+                "-f",
+                "NAME,DEVICE",
+                "con",
+                "show",
+                "--active",
+            ],
+            match=f"{AP_CONNECTION_ID}:{WIFI_INTERFACE}",
+            timeout=5,
+        )
+    except FileNotFoundError as exc:
+        raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
+    except Exception as exc:
+        LOG_NETWORK.debug("_nm_active_ap fallback due to error: %s", exc)
+        return False
+
+
+def _nm_connectivity() -> str:
+    try:
+        raw = _run_nmcli_text(
+            ["nmcli", "-g", "CONNECTIVITY", "general"],
+            check=False,
+            timeout=5,
+        )
+    except FileNotFoundError as exc:
+        raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
+    except Exception as exc:
+        LOG_NETWORK.debug("_nm_connectivity failed: %s", exc)
+        return "unknown"
+
+    state = raw.strip().lower()
+    if not state:
+        return "unknown"
+    if state not in {"full", "limited", "portal", "none", "unknown"}:
+        return "unknown"
+    return state
+
+
+def _nm_has_saved_wifi_profiles() -> bool:
+    try:
+        out = _run_nmcli_text(
+            [
+                "nmcli",
+                "-t",
+                "-f",
+                "TYPE,AUTOCONNECT",
+                "connection",
+                "show",
+            ],
+            check=False,
+            timeout=5,
+        )
+    except FileNotFoundError as exc:
+        raise PermissionError("NMCLI_NOT_AVAILABLE") from exc
+    except Exception as exc:
+        LOG_NETWORK.debug("_nm_has_saved_wifi_profiles failed: %s", exc)
+        return False
+
+    for line in out.splitlines():
+        parts = line.split(":")
+        if len(parts) < 2:
+            continue
+        typ, autoconnect = parts[0], parts[1]
+        if typ == "802-11-wireless" and autoconnect.lower() == "yes":
+            return True
+    return False
+
+
 def _ap_active() -> bool:
     """Check if BasculaAP is active and properly configured as AP mode."""
+    try:
+        if _nm_active_ap():
+            return True
+    except PermissionError:
+        pass
+    except Exception as exc:
+        LOG_NETWORK.debug("_ap_active nmcli detection failed: %s", exc)
+
     try:
         # Check active connections
         res = _run_nmcli_command(
@@ -1515,8 +1632,11 @@ def _current_wifi_ssid() -> Optional[str]:
 
 
 def _get_wifi_status() -> Dict[str, Any]:
+    ap_active = _nm_active_ap()
+    connectivity = _nm_connectivity()
+    saved_wifi_profiles = _nm_has_saved_wifi_profiles()
+
     eth_ip = get_iface_ip("eth0")
-    ap_active = _is_ap_active()
 
     try:
         ethernet_active = _ethernet_connected()
@@ -1561,10 +1681,13 @@ def _get_wifi_status() -> Dict[str, Any]:
 
     ip_is_ap = bool(wlan_ip and _ip_is_ap_subnet(wlan_ip))
     connected = bool(
-        wlan_ip
-        and not ip_is_ap
-        and active_connection
-        and active_connection != AP_CONNECTION_ID
+        connectivity == "full"
+        or (
+            wlan_ip
+            and not ip_is_ap
+            and active_connection
+            and active_connection != AP_CONNECTION_ID
+        )
     )
 
     ssid: Optional[str] = None
@@ -1582,10 +1705,6 @@ def _get_wifi_status() -> Dict[str, Any]:
     if connected:
         ap_active = False
 
-    should_activate_ap = not connected and not ethernet_active
-    if connected:
-        should_activate_ap = False
-
     ip_address: Optional[str] = None
     if eth_ip:
         ip_address = eth_ip
@@ -1595,7 +1714,7 @@ def _get_wifi_status() -> Dict[str, Any]:
         ip_address = wlan_ip
 
     return {
-        "connected": connected,
+        "connected": connectivity == "full" or connected,
         "ssid": ssid,
         "ip": wlan_ip,
         "ip_address": ip_address,
@@ -1603,7 +1722,9 @@ def _get_wifi_status() -> Dict[str, Any]:
         "ethernet_connected": ethernet_active,
         "interface": WIFI_INTERFACE,
         "active_connection": active_connection,
-        "should_activate_ap": False if connected else should_activate_ap,
+        "should_activate_ap": ap_active,
+        "connectivity": connectivity,
+        "saved_wifi_profiles": saved_wifi_profiles,
     }
 
 
@@ -2089,10 +2210,13 @@ async def enable_ap():
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    downed_clients: list[str] = []
     try:
-        await _down_active_wifi_clients()
+        downed_clients = await _down_active_wifi_clients()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
+
+    last_active_client = downed_clients[0] if downed_clients else None
 
     await _run_nmcli_async(
         _nmcli_args(
@@ -2154,6 +2278,7 @@ async def enable_ap():
     except FileNotFoundError as exc:
         raise HTTPException(status_code=503, detail="nmcli no disponible") from exc
     except subprocess.CalledProcessError as e:
+        restored_wifi = False
         for st in prev:
             await _run_nmcli_async(
                 _nmcli_args(
@@ -2182,18 +2307,36 @@ async def enable_ap():
                 key=lambda s: ((s.autoconnect == "yes"), int(s.priority or "0")),
                 reverse=True,
             )
-            for s in sorted_prev:
-                if s.autoconnect == "yes":
+            attempted: set[str] = set()
+            if last_active_client:
+                attempted.add(last_active_client)
+                try:
                     rc = await _run_nmcli_async(
-                        _nmcli_args("con", "up", s.name),
+                        _nmcli_args("con", "up", last_active_client),
                         check=False,
                     )
                     if rc.returncode == 0:
-                        break
+                        restored_wifi = True
+                except Exception as restore_exc:
+                    LOG_NETWORK.debug("Failed to restore last Wi-Fi %s: %s", last_active_client, restore_exc)
+            if not restored_wifi:
+                for s in sorted_prev:
+                    if s.autoconnect == "yes" and s.name not in attempted:
+                        rc = await _run_nmcli_async(
+                            _nmcli_args("con", "up", s.name),
+                            check=False,
+                        )
+                        if rc.returncode == 0:
+                            restored_wifi = True
+                            break
         except Exception:
             pass
         detail = (e.stderr or e.output or str(e))[:500]
-        raise HTTPException(status_code=500, detail=f"Enable AP failed: {detail}")
+        if restored_wifi:
+            detail = f"Enable AP failed: {detail}; previous Wi-Fi restored"
+        else:
+            detail = f"Enable AP failed: {detail}"
+        raise HTTPException(status_code=500, detail=detail)
 
 
 @app.post("/api/network/disable-ap")
