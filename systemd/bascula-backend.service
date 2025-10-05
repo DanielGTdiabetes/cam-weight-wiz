@@ -1,16 +1,26 @@
 [Unit]
-Description=Bascula Backend - FastAPI Server
-After=network.target
+Description=Bascula Backend API (FastAPI)
+After=network-online.target bascula-miniweb.service
+Wants=network-online.target bascula-miniweb.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=pi
 Group=pi
 WorkingDirectory=/opt/bascula/current
-Environment="PATH=/opt/bascula/current/.venv/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStart=/opt/bascula/current/.venv/bin/uvicorn backend.main:app --host 0.0.0.0 --port 8081 --workers 2 --log-level info
+Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=BASCULA_CFG_DIR=/home/pi/.bascula
+Environment=PYTHONUNBUFFERED=1
+Environment=UVICORN_WORKERS=2
+ExecStartPre=/usr/bin/install -d -m 0755 -o pi -g pi /var/log/bascula
+ExecStartPre=/usr/bin/install -o pi -g pi -m 0644 /dev/null /var/log/bascula/backend.log
+ExecStart=/opt/bascula/current/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8081 --workers ${UVICORN_WORKERS} --log-level info --proxy-headers --forwarded-allow-ips="*"
 Restart=always
-RestartSec=3
+RestartSec=5
+TimeoutStopSec=30
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target
