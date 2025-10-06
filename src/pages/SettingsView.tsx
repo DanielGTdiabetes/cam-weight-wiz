@@ -372,7 +372,7 @@ export const SettingsView = () => {
     setWakeWordEnabled(settings.wakeWordEnabled ?? false);
     setDiabetesMode(settings.diabetesMode);
     setCalibrationFactor(settings.calibrationFactor.toString());
-    setDecimals(settings.decimals?.toString() || "1");
+    setDecimals(settings.scale?.decimals?.toString() ?? "1");
     setApiUrl(settings.apiUrl);
     setWsUrl(settings.wsUrl);
     setChatGptKey(settings.chatGptKey);
@@ -732,7 +732,7 @@ export const SettingsView = () => {
   const handleKeyboardConfirm = () => {
     const setters: Record<string, (value: string) => void> = {
       calibrationFactor: setCalibrationFactor,
-      decimals: setDecimals,
+      decimals: (value: string) => setDecimals(parseDecimalsPreference(value).toString()),
       chatGptKey: setChatGptKey,
       nightscoutUrl: setNightscoutUrl,
       nightscoutToken: setNightscoutToken,
@@ -765,7 +765,7 @@ export const SettingsView = () => {
       if (field === 'calibrationFactor') {
         storage.saveSettings({ calibrationFactor: parseFloat(tempValue) || 1 });
       } else if (field === 'decimals') {
-        storage.saveSettings({ decimals: parseInt(tempValue) || 1 });
+        storage.saveSettings({ scale: { decimals: parseDecimalsPreference(tempValue) } });
       } else if (field === 'chatGptKey') {
         storage.saveSettings({ chatGptKey: tempValue });
       } else if (field === 'nightscoutUrl') {
@@ -1692,8 +1692,9 @@ export const SettingsView = () => {
                   className="w-full rounded-lg border border-input bg-background px-4 py-3 text-lg"
                   value={decimals}
                   onChange={(e) => {
-                    setDecimals(e.target.value);
-                    storage.saveSettings({ decimals: parseInt(e.target.value) });
+                    const nextDecimals = parseDecimalsPreference(e.target.value);
+                    setDecimals(nextDecimals.toString());
+                    storage.saveSettings({ scale: { decimals: nextDecimals } });
                     toast({
                       title: "Guardado",
                       description: "Preferencia de decimales actualizada",
@@ -2565,3 +2566,11 @@ sudo systemctl restart bascula-miniweb bascula-app`}
     </div>
   );
 };
+  const parseDecimalsPreference = (value: string): 0 | 1 => {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isNaN(parsed)) {
+      return 1;
+    }
+    return parsed >= 1 ? 1 : 0;
+  };
+

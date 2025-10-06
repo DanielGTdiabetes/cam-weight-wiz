@@ -3,7 +3,7 @@
  * Maneja la persistencia de configuraciones y datos locales
  */
 
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 4;
 const VERSION_KEY = 'storage_version';
 
 const parseJson = <T>(value: string | null): T | undefined => {
@@ -37,11 +37,15 @@ export interface UiSettings {
   flags: FeatureFlags;
 }
 
+export interface ScaleSettings {
+  decimals: 0 | 1;
+}
+
 export interface AppSettings {
   // Scale settings
   calibrationFactor: number;
   defaultUnit: 'g' | 'ml';
-  decimals: number;
+  scale: ScaleSettings;
   
   // API settings
   chatGptKey: string;
@@ -71,7 +75,8 @@ export interface AppSettings {
   ui: UiSettings;
 }
 
-export type AppSettingsUpdate = Partial<Omit<AppSettings, 'ui'>> & {
+export type AppSettingsUpdate = Partial<Omit<AppSettings, 'ui' | 'scale'>> & {
+  scale?: Partial<ScaleSettings>;
   ui?: {
     flags?: Partial<FeatureFlags>;
   };
@@ -288,7 +293,8 @@ const isQueuedScannerAction = (value: unknown): value is QueuedScannerAction => 
   );
 };
 
-const SETTINGS_KEY = 'bascula_settings';
+export const SETTINGS_STORAGE_KEY = 'bascula_settings';
+const SETTINGS_KEY = SETTINGS_STORAGE_KEY;
 const HISTORY_KEY = 'bascula_history';
 const MAX_HISTORY_ITEMS = 100;
 
@@ -306,10 +312,54 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   mascotMotion: false,
 };
 
+const DEFAULT_SCALE_DECIMALS: 0 | 1 = 1;
+
+const parseScaleDecimals = (value: unknown): 0 | 1 | undefined => {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  if (value === 0 || value === '0') {
+    return 0;
+  }
+
+  if (value === 1 || value === '1') {
+    return 1;
+  }
+
+  if (value === false) {
+    return 0;
+  }
+
+  if (value === true) {
+    return 1;
+  }
+
+  if (typeof value === 'number') {
+    return value <= 0 ? 0 : 1;
+  }
+
+  if (typeof value === 'string') {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isNaN(parsed)) {
+      return parsed <= 0 ? 0 : 1;
+    }
+  }
+
+  return undefined;
+};
+
+const normaliseScaleDecimals = (value: unknown, fallback: 0 | 1 = DEFAULT_SCALE_DECIMALS): 0 | 1 => {
+  const parsed = parseScaleDecimals(value);
+  return parsed ?? fallback;
+};
+
 const DEFAULT_SETTINGS: AppSettings = {
   calibrationFactor: 1,
   defaultUnit: 'g',
-  decimals: 1,
+  scale: {
+    decimals: DEFAULT_SCALE_DECIMALS,
+  },
   chatGptKey: '',
   // Dispositivo: usar loopback 127.0.0.1 por defecto
   apiUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8080',
@@ -336,6 +386,9 @@ const DEFAULT_SETTINGS: AppSettings = {
 
 const cloneSettings = (settings: AppSettings): AppSettings => ({
   ...settings,
+  scale: {
+    ...settings.scale,
+  },
   ui: {
     ...settings.ui,
     flags: { ...settings.ui.flags },
@@ -352,12 +405,30 @@ const mergeSettings = (base: AppSettings, overrides?: AppSettingsUpdate): AppSet
   const next = cloneSettings(base);
 
   if (!overrides) {
+    next.scale.decimals = normaliseScaleDecimals(next.scale.decimals);
     return next;
   }
 
-  const { ui: overridesUi, ...rest } = overrides;
+  const { ui: overridesUi, scale: overridesScale, ...rest } = overrides;
 
-  Object.assign(next, rest);
+  const sanitizedRest = { ...rest } as Record<string, unknown>;
+  if ('decimals' in sanitizedRest) {
+    delete sanitizedRest.decimals;
+  }
+  if ('showDecimal' in sanitizedRest) {
+    delete sanitizedRest.showDecimal;
+  }
+
+  Object.assign(next, sanitizedRest);
+
+  if (overridesScale) {
+    next.scale = {
+      ...next.scale,
+      ...overridesScale,
+    };
+  }
+
+  next.scale.decimals = normaliseScaleDecimals(next.scale.decimals);
 
   next.ui = {
     ...next.ui,
@@ -380,6 +451,43 @@ const migrations: Record<number, (data: StorageMigrationData) => StorageMigratio
   },
   3: (data) => {
     data.settings = mergeSettings(DEFAULT_SETTINGS, data.settings);
+    return data;
+  },
+  4: (data) => {
+    const legacySettings = { ...(data.settings ?? {}) } as Record<string, unknown>;
+
+    const existingScale =
+      typeof legacySettings.scale === 'object' && legacySettings.scale !== null
+        ? { ...(legacySettings.scale as Record<string, unknown>) }
+        : {};
+
+    const decimals =
+      parseScaleDecimals(existingScale.decimals) ??
+      parseScaleDecimals(legacySettings.decimals) ??
+      (typeof legacySettings.showDecimal === 'boolean'
+        ? legacySettings.showDecimal
+          ? 1
+          : 0
+        : undefined) ??
+      DEFAULT_SCALE_DECIMALS;
+
+    const overrides: AppSettingsUpdate = {
+      ...(legacySettings as AppSettingsUpdate),
+    };
+
+    overrides.scale = {
+      ...(existingScale as Partial<ScaleSettings>),
+      decimals,
+    };
+
+    delete (overrides as Record<string, unknown>).decimals;
+    delete (overrides as Record<string, unknown>).showDecimal;
+
+    if (overrides.scale) {
+      overrides.scale.decimals = normaliseScaleDecimals(overrides.scale.decimals);
+    }
+
+    data.settings = mergeSettings(DEFAULT_SETTINGS, overrides);
     return data;
   },
 };

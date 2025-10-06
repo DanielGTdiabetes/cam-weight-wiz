@@ -8,6 +8,8 @@ import { api } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
 import { storage } from "@/services/storage";
 import { isLocalClient } from "@/lib/network";
+import { formatWeight } from "@/lib/format";
+import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 
 interface ScaleViewProps {
   onNavigate: (view: string) => void;
@@ -16,7 +18,7 @@ interface ScaleViewProps {
 export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   const { weight, isStable, unit, isConnected, error, reconnectAttempts, connectionState } = useScaleWebSocket();
   const [displayUnit, setDisplayUnit] = useState<"g" | "ml">("g");
-  const [decimals, setDecimals] = useState(1);
+  const decimals = useScaleDecimals();
   const [calibrationV2Enabled, setCalibrationV2Enabled] = useState(() => {
     try {
       return storage.getSettings().ui.flags.calibrationV2;
@@ -40,12 +42,6 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
 
   const statusLabel = statusLabelMap[connectionState];
   const statusDotClass = statusColorMap[connectionState];
-
-  // Load decimals preference
-  useEffect(() => {
-    const settings = storage.getSettings();
-    setDecimals(settings.decimals || 1);
-  }, []);
 
   useEffect(() => {
     const handleStorageChange = () => {
@@ -102,14 +98,6 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
     ? weight // Simple 1:1 conversion for water, can be improved
     : weight;
 
-  // Format weight according to decimals preference
-  const formatWeight = (w: number) => {
-    if (decimals === 0) {
-      return Math.round(w).toString();
-    }
-    return w.toFixed(1);
-  };
-
   return (
     <div className="flex h-full flex-col bg-background p-4">
       {/* Connection Status */}
@@ -146,11 +134,14 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
             )} />
           </div>
           
-          <div className={cn(
-            "mb-3 min-h-[140px] flex items-center text-8xl font-bold tracking-tight transition-smooth",
-            isStable ? "text-success text-glow-green" : "text-primary text-glow-cyan"
-          )}>
-            {formatWeight(displayWeight)}
+          <div
+            className={cn(
+              "mb-3 min-h-[140px] flex items-center text-8xl font-bold tracking-tight transition-smooth",
+              isStable ? "text-success text-glow-green" : "text-primary text-glow-cyan"
+            )}
+            style={{ fontFeatureSettings: '"tnum"' }}
+          >
+            {formatWeight(displayWeight, decimals)}
           </div>
           
           <Button

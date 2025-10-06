@@ -4,6 +4,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Trash2, Calendar } from "lucide-react";
 import { useWeightHistory } from "@/hooks/useWeightHistory";
 import { Skeleton } from "@/components/ui/skeleton";
+import { formatWeight } from "@/lib/format";
+import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 
 interface WeightHistoryDialogProps {
   open: boolean;
@@ -12,6 +14,7 @@ interface WeightHistoryDialogProps {
 
 export const WeightHistoryDialog = ({ open, onClose }: WeightHistoryDialogProps) => {
   const { history, isLoading, deleteRecord, clearHistory } = useWeightHistory();
+  const decimals = useScaleDecimals();
 
   const formatDate = (timestamp: number) => {
     const date = new Date(timestamp);
@@ -81,8 +84,8 @@ export const WeightHistoryDialog = ({ open, onClose }: WeightHistoryDialogProps)
                   >
                     <div className="flex-1">
                       <div className="flex items-baseline gap-3 mb-1">
-                        <span className="text-3xl font-bold text-primary">
-                          {record.weight.toFixed(1)}
+                        <span className="text-3xl font-bold text-primary" style={{ fontFeatureSettings: '"tnum"' }}>
+                          {formatWeight(record.weight, decimals)}
                         </span>
                         <span className="text-lg text-muted-foreground">
                           {record.unit}

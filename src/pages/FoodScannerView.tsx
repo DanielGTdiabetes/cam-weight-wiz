@@ -12,6 +12,8 @@ import { logger } from "@/services/logger";
 import { api } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
 import { buildFoodItem, toFoodItem, type FoodScannerConfirmedPayload, type FoodItem } from "@/features/food-scanner/foodItem";
+import { formatWeight } from "@/lib/format";
+import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 
 export const FoodScannerView = () => {
   const { weight: scaleWeight } = useScaleWebSocket();
@@ -35,6 +37,11 @@ export const FoodScannerView = () => {
   const preservedScannerEntriesRef = useRef<ScannerHistoryEntry[]>([]);
 
   const { toast } = useToast();
+  const decimals = useScaleDecimals();
+  const renderWeight = (value: number | null | undefined) => {
+    const formatted = formatWeight(value, decimals);
+    return formatted === '–' ? formatted : `${formatted} g`;
+  };
 
   const settings = storage.getSettings();
   const isDiabetesMode = settings.diabetesMode;
@@ -264,7 +271,7 @@ export const FoodScannerView = () => {
     setFoods((prev) => [...prev, item]);
     setSelectedId(item.id);
     logger.info("Food registered", { name: item.name, weight: item.weight, source: item.source });
-    toast({ title: "Alimento añadido", description: `${item.name} - ${item.weight.toFixed(1)} g` });
+    toast({ title: "Alimento añadido", description: `${item.name} - ${renderWeight(item.weight)}` });
     if (navigator.vibrate) {
       navigator.vibrate(25);
     }
@@ -349,7 +356,7 @@ export const FoodScannerView = () => {
     });
     toast({
       title: "Resumen guardado",
-      description: `Peso total: ${totals.weight.toFixed(1)} g`
+      description: `Peso total: ${renderWeight(totals.weight)}`
     });
   };
 
@@ -398,8 +405,8 @@ export const FoodScannerView = () => {
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <h2 className="text-2xl font-bold">Captura con cámara</h2>
-                <p className="text-sm text-muted-foreground">
-                  Peso detectado: {scaleWeight.toFixed(1)} g
+                <p className="text-sm text-muted-foreground" style={{ fontFeatureSettings: '"tnum"' }}>
+                  Peso detectado: {renderWeight(scaleWeight)}
                 </p>
               </div>
               <div className="flex gap-2">
@@ -514,7 +521,9 @@ export const FoodScannerView = () => {
                         )}
                       </p>
                     </div>
-                    <span className="text-xl font-bold text-primary">{food.weight.toFixed(1)} g</span>
+                    <span className="text-xl font-bold text-primary" style={{ fontFeatureSettings: '"tnum"' }}>
+                      {renderWeight(food.weight)}
+                    </span>
                   </div>
 
                   <div className="grid grid-cols-5 gap-2 text-sm">
@@ -572,7 +581,9 @@ export const FoodScannerView = () => {
             <div className="mb-4 grid grid-cols-4 gap-4 text-center">
               <div>
                 <p className="text-sm text-muted-foreground">Peso</p>
-                <p className="text-2xl font-bold text-primary">{totals.weight.toFixed(1)} g</p>
+                <p className="text-2xl font-bold text-primary" style={{ fontFeatureSettings: '"tnum"' }}>
+                  {renderWeight(totals.weight)}
+                </p>
               </div>
               <div>
                 <p className="text-sm text-muted-foreground">HC</p>
