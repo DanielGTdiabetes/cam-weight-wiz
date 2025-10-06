@@ -3,7 +3,7 @@
  * Maneja la persistencia de configuraciones y datos locales
  */
 
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
 const VERSION_KEY = 'storage_version';
 
 const parseJson = <T>(value: string | null): T | undefined => {
@@ -18,6 +18,23 @@ const parseJson = <T>(value: string | null): T | undefined => {
     return undefined;
   }
 };
+
+export type FeatureFlagKey =
+  | 'navSafeExit'
+  | 'voiceSelector'
+  | 'timerAlarms'
+  | 'calibrationV2'
+  | 'networkModal'
+  | 'miniEbStable'
+  | 'otaCheck'
+  | 'otaApply'
+  | 'debugLogs';
+
+export type FeatureFlags = Record<FeatureFlagKey, boolean>;
+
+export interface UiSettings {
+  flags: FeatureFlags;
+}
 
 export interface AppSettings {
   // Scale settings
@@ -45,7 +62,14 @@ export interface AppSettings {
   // UI settings
   isVoiceActive: boolean;
   theme: 'dark' | 'light';
+  ui: UiSettings;
 }
+
+export type AppSettingsUpdate = Partial<Omit<AppSettings, 'ui'>> & {
+  ui?: {
+    flags?: Partial<FeatureFlags>;
+  };
+};
 
 export interface WeightRecord {
   id: string;
@@ -95,7 +119,7 @@ interface QueuedScannerAction extends ScannerQueueAction {
 }
 
 interface StorageMigrationData {
-  settings?: Partial<AppSettings>;
+  settings?: AppSettingsUpdate;
   history?: WeightRecord[];
 }
 
@@ -263,6 +287,18 @@ const HISTORY_KEY = 'bascula_history';
 const MAX_HISTORY_ITEMS = 100;
 
 // Default settings
+export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
+  navSafeExit: false,
+  voiceSelector: false,
+  timerAlarms: false,
+  calibrationV2: false,
+  networkModal: false,
+  miniEbStable: false,
+  otaCheck: false,
+  otaApply: false,
+  debugLogs: false,
+};
+
 const DEFAULT_SETTINGS: AppSettings = {
   calibrationFactor: 1,
   defaultUnit: 'g',
@@ -281,15 +317,51 @@ const DEFAULT_SETTINGS: AppSettings = {
   hyperAlarm: 180,
   isVoiceActive: false,
   theme: 'dark',
+  ui: {
+    flags: { ...DEFAULT_FEATURE_FLAGS },
+  },
+};
+
+const cloneSettings = (settings: AppSettings): AppSettings => ({
+  ...settings,
+  ui: {
+    ...settings.ui,
+    flags: { ...settings.ui.flags },
+  },
+});
+
+const mergeSettings = (base: AppSettings, overrides?: AppSettingsUpdate): AppSettings => {
+  const next = cloneSettings(base);
+
+  if (!overrides) {
+    return next;
+  }
+
+  const { ui: overridesUi, ...rest } = overrides;
+
+  Object.assign(next, rest);
+
+  next.ui = {
+    ...next.ui,
+    ...overridesUi,
+    flags: {
+      ...next.ui.flags,
+      ...(overridesUi?.flags ?? {}),
+    },
+  };
+
+  return next;
 };
 
 // Migration functions for each version
 const migrations: Record<number, (data: StorageMigrationData) => StorageMigrationData> = {
   1: (data) => data,
   2: (data) => {
-    if (data.settings) {
-      data.settings = { ...DEFAULT_SETTINGS, ...data.settings };
-    }
+    data.settings = mergeSettings(DEFAULT_SETTINGS, data.settings);
+    return data;
+  },
+  3: (data) => {
+    data.settings = mergeSettings(DEFAULT_SETTINGS, data.settings);
     return data;
   },
 };
@@ -338,21 +410,21 @@ class StorageService {
   getSettings(): AppSettings {
     try {
       const stored = localStorage.getItem(SETTINGS_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        // Merge with defaults to handle new settings
-        return { ...DEFAULT_SETTINGS, ...parsed };
-      }
-    } catch (error) {
-      console.error('Error loading settings:', error);
+    if (stored) {
+      const parsed = JSON.parse(stored) as AppSettingsUpdate;
+      // Merge with defaults to handle new settings
+      return mergeSettings(DEFAULT_SETTINGS, parsed);
     }
-    return DEFAULT_SETTINGS;
+  } catch (error) {
+    console.error('Error loading settings:', error);
+  }
+    return cloneSettings(DEFAULT_SETTINGS);
   }
 
-  saveSettings(settings: Partial<AppSettings>): void {
+  saveSettings(settings: AppSettingsUpdate): void {
     try {
       const current = this.getSettings();
-      const updated = { ...current, ...settings };
+      const updated = mergeSettings(current, settings);
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(updated));
     } catch (error) {
       console.error('Error saving settings:', error);
@@ -535,7 +607,8 @@ class StorageService {
       const data = parsed as Partial<StorageMigrationData>;
 
       if (data.settings && typeof data.settings === 'object') {
-        localStorage.setItem(SETTINGS_KEY, JSON.stringify({ ...DEFAULT_SETTINGS, ...data.settings }));
+        const merged = mergeSettings(DEFAULT_SETTINGS, data.settings as AppSettingsUpdate);
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(merged));
       }
 
       if (Array.isArray(data.history)) {
