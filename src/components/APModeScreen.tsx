@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Wifi,
   QrCode,
@@ -12,6 +12,9 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { api } from "@/services/api";
+import { apiWrapper } from "@/services/apiWrapper";
+import { logger } from "@/services/logger";
 
 type ApInfo = {
   ssid: string;
@@ -39,6 +42,18 @@ export const APModeScreen = () => {
     code?: string;
     ip?: string;
   }>({ status: "idle" });
+  const [toastState, setToastState] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  const redirectRef = useRef(false);
+
+  const resolveAppBaseUrl = useCallback(() => {
+    const candidate = apiWrapper.getBaseUrl();
+    const fallback = typeof window !== "undefined" ? window.location.origin : "";
+    const base = (candidate && candidate.trim()) || fallback || "";
+    if (!base) {
+      return "/";
+    }
+    return `${base.replace(/\/+$/, "")}/`;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -148,6 +163,135 @@ export const APModeScreen = () => {
       window.clearInterval(interval);
     };
   }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const baseCandidate = apiWrapper.getBaseUrl();
+    const fallback = window.location.origin;
+    let eventSource: EventSource | null = null;
+    let redirectTimer: number | undefined;
+
+    try {
+      const origin = (baseCandidate && baseCandidate.trim()) || fallback || "";
+      if (!origin) {
+        return;
+      }
+      const url = new URL("/api/net/events", origin).toString();
+      eventSource = new EventSource(url);
+    } catch (error) {
+      logger.debug("No se pudo iniciar el stream SSE de red", { error });
+      return;
+    }
+
+    const issueRedirect = () => {
+      if (redirectRef.current) {
+        return;
+      }
+      redirectRef.current = true;
+      const target = resolveAppBaseUrl();
+      redirectTimer = window.setTimeout(() => {
+        try {
+          window.location.replace(target);
+        } catch (err) {
+          logger.warn("No se pudo redirigir tras wifi_connected", { error: err });
+        }
+      }, 1_500);
+    };
+
+    const handleConnected = (event: MessageEvent) => {
+      let message = "Conectado. Reiniciando…";
+      try {
+        const raw = event.data;
+        if (typeof raw === "string" && raw.trim()) {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          const eventSsid = typeof parsed.ssid === "string" ? parsed.ssid : undefined;
+          if (eventSsid) {
+            message = `Conectado a ${eventSsid}. Reiniciando…`;
+          }
+        }
+      } catch (error) {
+        logger.debug("No se pudo parsear evento wifi_connected", { error });
+      }
+      setToastState({ type: "success", msg: message });
+      issueRedirect();
+    };
+
+    const handleFailed = (event: MessageEvent) => {
+      let message = "No se pudo conectar";
+      try {
+        const raw = event.data;
+        if (typeof raw === "string" && raw.trim()) {
+          const parsed = JSON.parse(raw) as Record<string, unknown>;
+          const detail = typeof parsed.message === "string" ? parsed.message : undefined;
+          const code = typeof parsed.code === "string" ? parsed.code : undefined;
+          if (detail) {
+            message = detail;
+          } else if (code) {
+            message = `No se pudo conectar (${code})`;
+          }
+        }
+      } catch (error) {
+        logger.debug("No se pudo parsear evento wifi_failed", { error });
+      }
+      setToastState({ type: "error", msg: message });
+    };
+
+    const connectedListener = (event: Event) => {
+      handleConnected(event as MessageEvent);
+    };
+    const failedListener = (event: Event) => {
+      handleFailed(event as MessageEvent);
+    };
+
+    eventSource.addEventListener("wifi_connected", connectedListener);
+    eventSource.addEventListener("wifi_failed", failedListener);
+    eventSource.onerror = (event) => {
+      logger.debug("SSE de red reportó un error", { event });
+    };
+
+    return () => {
+      if (redirectTimer !== undefined) {
+        window.clearTimeout(redirectTimer);
+      }
+      eventSource?.removeEventListener("wifi_connected", connectedListener);
+      eventSource?.removeEventListener("wifi_failed", failedListener);
+      eventSource?.close();
+    };
+  }, [redirectRef, resolveAppBaseUrl]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    let cancelled = false;
+
+    const checkStatus = async () => {
+      try {
+        const status = await api.miniwebStatus();
+        if (!cancelled && status?.mode === "kiosk" && !redirectRef.current) {
+          redirectRef.current = true;
+          window.location.replace(resolveAppBaseUrl());
+        }
+      } catch (error) {
+        logger.debug("Fallo al consultar miniweb status durante polling", { error });
+      }
+    };
+
+    const interval = window.setInterval(() => {
+      void checkStatus();
+    }, 1_500);
+
+    void checkStatus();
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [redirectRef, resolveAppBaseUrl]);
 
   const handleOpenMiniWeb = () => {
     window.location.href = "/config";
@@ -261,6 +405,21 @@ export const APModeScreen = () => {
             </p>
           </div>
         </div>
+
+        {toastState && (
+          <div
+            className={`mb-8 rounded-lg border p-4 text-left text-sm ${
+              toastState.type === "success"
+                ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-50"
+                : "border-destructive/40 bg-destructive/10 text-destructive"
+            }`}
+          >
+            <p className="font-semibold">
+              {toastState.type === "success" ? "Conexión exitosa" : "Error de conexión"}
+            </p>
+            <p className="mt-1 text-muted-foreground/80 dark:text-foreground/70">{toastState.msg}</p>
+          </div>
+        )}
 
         <div className="mb-8 space-y-6">
           {/* AP Info */}

@@ -527,6 +527,7 @@ export const MiniWebConfig = () => {
     }
 
     const connectWifi = async () => {
+      let attemptMessageTimer: number | undefined;
       try {
         setConnectionStatus({ type: 'idle', message: '' });
 
@@ -544,6 +545,10 @@ export const MiniWebConfig = () => {
         }
 
         setUi((prev) => ({ ...prev, connecting: true }));
+
+        attemptMessageTimer = window.setTimeout(() => {
+          setConnectionStatus({ type: 'info', message: 'Intentando conexión…' });
+        }, 250);
 
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), 15_000);
@@ -565,19 +570,21 @@ export const MiniWebConfig = () => {
             typeof err?.detail === 'string'
               ? err.detail
               : typeof err?.detail === 'object' && err.detail !== null
-                ? (() => {
+            ? (() => {
                     const message = (err.detail as { message?: unknown }).message;
                     return typeof message === 'string' ? message : undefined;
                   })()
                 : undefined;
           const message =
             (typeof err?.message === 'string' ? err.message : undefined) || detail || 'Error al conectar';
+          if (attemptMessageTimer !== undefined) {
+            window.clearTimeout(attemptMessageTimer);
+            attemptMessageTimer = undefined;
+          }
           setConnectionStatus({ type: 'error', message });
           setUi((prev) => ({ ...prev, connecting: false }));
           return;
         }
-
-        setConnectionStatus({ type: 'info', message: 'Conectando… verificando el estado de la red.' });
 
         const started = Date.now();
         const timeoutMs = 30_000;
@@ -603,7 +610,6 @@ export const MiniWebConfig = () => {
                 message: `Conectado a ${payload.ssid}`,
                 panelUrl,
               });
-              setUi((prev) => ({ ...prev, connecting: false }));
               return;
             }
           } catch (statusError) {
@@ -625,8 +631,15 @@ export const MiniWebConfig = () => {
         const message = isNetworkChangeError
           ? 'Conectando… Si pierdes esta página es normal: cambia tu Wi-Fi al punto de acceso/red seleccionada y vuelve a abrir la app.'
           : 'Error al conectar';
+        if (attemptMessageTimer !== undefined) {
+          window.clearTimeout(attemptMessageTimer);
+          attemptMessageTimer = undefined;
+        }
         setConnectionStatus({ type: isNetworkChangeError ? 'info' : 'error', message });
       } finally {
+        if (attemptMessageTimer !== undefined) {
+          window.clearTimeout(attemptMessageTimer);
+        }
         setUi((prev) => ({ ...prev, connecting: false }));
       }
     };
