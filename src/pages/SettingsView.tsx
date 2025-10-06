@@ -992,32 +992,34 @@ export const SettingsView = () => {
                   Factor de calibración actual: {calibrationFactor}
                 </p>
                 <div className="flex gap-2">
-                <Input
-                  type="text"
-                  value={calibrationFactor}
-                  readOnly
-                  onClick={() => openKeyboard("Factor de Calibración", "numeric", "calibrationFactor", true, 0.1, 10000)}
-                  placeholder="Nuevo factor"
-                  className="flex-1 text-lg cursor-pointer"
-                />
-                  <Button 
-                    size="lg" 
-                    variant="secondary"
-                    onClick={() => setShowCalibrationWizard(true)}
-                  >
-                    Calibrar
-                  </Button>
+                  <Input
+                    type="text"
+                    value={calibrationFactor}
+                    readOnly
+                    onClick={() => openKeyboard("Factor de Calibración", "numeric", "calibrationFactor", true, 0.1, 10000)}
+                    placeholder="Nuevo factor"
+                    className="flex-1 cursor-pointer text-lg"
+                  />
+                  {!featureFlags.calibrationV2 && (
+                    <Button
+                      size="lg"
+                      variant="secondary"
+                      onClick={() => setShowCalibrationWizard(true)}
+                    >
+                      Calibrar
+                    </Button>
+                  )}
                 </div>
               </div>
 
-              <Button 
-                variant="glow" 
-                size="lg" 
+              <Button
+                variant="glow"
+                size="lg"
                 className="w-full"
                 onClick={() => setShowCalibrationWizard(true)}
               >
                 <Scale className="mr-2 h-5 w-5" />
-                Ejecutar Asistente de Calibración
+                {featureFlags.calibrationV2 ? "Asistente de calibración" : "Ejecutar Asistente de Calibración"}
               </Button>
             </div>
           </Card>
@@ -1402,6 +1404,7 @@ export const SettingsView = () => {
         open={showCalibrationWizard}
         onClose={() => setShowCalibrationWizard(false)}
         currentWeight={weight}
+        isCalibrationV2={featureFlags.calibrationV2}
       />
     </div>
   );

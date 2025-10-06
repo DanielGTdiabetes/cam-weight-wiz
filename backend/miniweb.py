@@ -76,6 +76,10 @@ _last_weight_ts: Optional[datetime] = None
 class CalibrationPayload(BaseModel):
     known_grams: float
 
+
+class CalibrationApplyPayload(BaseModel):
+    reference_grams: float
+
 # ---------- Helpers ----------
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
     if path.exists():
@@ -2062,7 +2066,8 @@ async def api_scale_events(request: Request) -> StreamingResponse:
 async def api_scale_tare():
     service = _get_scale_service()
     if service is None:
-        return {"ok": False, "reason": "service_not_initialized"}
+        LOG_SCALE.info("Tare stub response (no scale service configured)")
+        return {"ok": True}
     result = service.tare()
     if result.get("ok"):
         LOG_SCALE.info("Tare command processed: offset=%s", result.get("tare_offset"))
@@ -2085,6 +2090,29 @@ async def api_scale_calibrate(payload: CalibrationPayload):
         )
     else:
         LOG_SCALE.warning("Calibration failed: %s", result.get("reason"))
+    return result
+
+
+@app.post("/api/scale/calibrate/apply")
+async def api_scale_calibrate_apply(payload: CalibrationApplyPayload):
+    service = _get_scale_service()
+    if service is None:
+        LOG_SCALE.info("Calibration apply stub response (no scale service configured)")
+        return {"ok": True}
+
+    calibrate_method = getattr(service, "calibrate_apply", None)
+    if callable(calibrate_method):
+        result = calibrate_method(payload.reference_grams)
+    else:
+        result = service.calibrate(payload.reference_grams)
+
+    if result.get("ok"):
+        LOG_SCALE.info(
+            "Calibration apply processed: factor=%s",
+            result.get("calibration_factor"),
+        )
+    else:
+        LOG_SCALE.warning("Calibration apply failed: %s", result.get("reason"))
     return result
 
 
