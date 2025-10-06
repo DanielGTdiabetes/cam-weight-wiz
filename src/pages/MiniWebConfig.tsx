@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { Wifi, Lock, Save, RefreshCw, Check, AlertCircle } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Wifi, Lock, Save, RefreshCw, Check, AlertCircle, Eye, EyeOff, TestTube } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -31,6 +31,22 @@ interface ApiErrorResponse {
   detail?: string | { code?: string; message?: string };
 }
 
+interface OpenAISettingsResponse {
+  hasKey?: boolean;
+}
+
+interface NightscoutSettingsResponse {
+  url?: string;
+  hasToken?: boolean;
+}
+
+type TestStatus = "idle" | "success" | "error";
+
+interface TestState {
+  status: TestStatus;
+  message?: string;
+}
+
 export const MiniWebConfig = () => {
   const [networks, setNetworks] = useState<WifiNetwork[]>([]);
   const [selectedSSID, setSelectedSSID] = useState("");
@@ -47,9 +63,131 @@ export const MiniWebConfig = () => {
   const [pinMessage, setPinMessage] = useState<string | null>(null);
   const [isPinValid, setIsPinValid] = useState(false);
   const [isRecoveryMode, setIsRecoveryMode] = useState(false);
+  const [openaiInput, setOpenaiInput] = useState("");
+  const [openaiHasKey, setOpenaiHasKey] = useState(false);
+  const [openaiVisible, setOpenaiVisible] = useState(false);
+  const [openaiDirty, setOpenaiDirty] = useState(false);
+  const [openaiTestState, setOpenaiTestState] = useState<TestState>({ status: "idle" });
+  const [isTestingOpenAI, setIsTestingOpenAI] = useState(false);
+  const [nightscoutUrl, setNightscoutUrl] = useState("");
+  const [nightscoutUrlDirty, setNightscoutUrlDirty] = useState(false);
+  const [nightscoutToken, setNightscoutToken] = useState("");
+  const [nightscoutTokenDirty, setNightscoutTokenDirty] = useState(false);
+  const [nightscoutHasToken, setNightscoutHasToken] = useState(false);
+  const [nightscoutTestState, setNightscoutTestState] = useState<TestState>({ status: "idle" });
+  const [isTestingNightscout, setIsTestingNightscout] = useState(false);
+  const [isSavingServices, setIsSavingServices] = useState(false);
   const { toast } = useToast();
+  const externalSettingsRef = useRef<{ openai: OpenAISettingsResponse | null; nightscout: NightscoutSettingsResponse | null } | null>(null);
+
+  const hasServiceChanges = openaiDirty || nightscoutUrlDirty || nightscoutTokenDirty;
 
   const selectedNetwork = networks.find((network) => network.ssid === selectedSSID);
+
+  const formatErrorMessage = useCallback((value: unknown): string => {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+
+    if (value && typeof value === "object") {
+      const payload = value as Record<string, unknown>;
+      const candidate = payload.detail ?? payload.message ?? payload.error;
+      if (typeof candidate === "string" && candidate.trim().length > 0) {
+        return candidate;
+      }
+      try {
+        return JSON.stringify(payload);
+      } catch (error) {
+        logger.debug("Failed to stringify error payload", { error, payload });
+      }
+    }
+
+    return "Error desconocido";
+  }, []);
+
+  const parseErrorResponse = useCallback(
+    async (response: Response): Promise<string> => {
+      try {
+        const data = (await response.json()) as Record<string, unknown>;
+        return formatErrorMessage(data);
+      } catch {
+        try {
+          const text = await response.text();
+          if (text.trim().length > 0) {
+            return text;
+          }
+        } catch {
+          // ignore secondary error
+        }
+        return response.statusText || "Error desconocido";
+      }
+    },
+    [formatErrorMessage],
+  );
+
+  const applyExternalSettings = useCallback(
+    (openaiData?: OpenAISettingsResponse | null, nightscoutData?: NightscoutSettingsResponse | null) => {
+      setOpenaiHasKey(Boolean(openaiData?.hasKey));
+      setOpenaiInput("");
+      setOpenaiDirty(false);
+      setOpenaiVisible(false);
+      setOpenaiTestState({ status: "idle" });
+
+      setNightscoutUrl(typeof nightscoutData?.url === "string" ? nightscoutData.url : "");
+      setNightscoutUrlDirty(false);
+      setNightscoutToken("");
+      setNightscoutTokenDirty(false);
+      setNightscoutHasToken(Boolean(nightscoutData?.hasToken));
+      setNightscoutTestState({ status: "idle" });
+      externalSettingsRef.current = {
+        openai: openaiData ?? null,
+        nightscout: nightscoutData ?? null,
+      };
+    },
+    [externalSettingsRef],
+  );
+
+  const refreshExternalSettings = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const [openaiRes, nightscoutRes] = await Promise.all([
+          fetch("/api/settings/openai", { cache: "no-store", signal }),
+          fetch("/api/settings/nightscout", { cache: "no-store", signal }),
+        ]);
+
+        let openaiData: OpenAISettingsResponse | null = null;
+        if (openaiRes.ok) {
+          openaiData = (await openaiRes.json().catch(() => null)) as OpenAISettingsResponse | null;
+        } else if (!signal?.aborted) {
+          const errorMessage = await parseErrorResponse(openaiRes);
+          logger.warn("Failed to load OpenAI settings", { error: errorMessage });
+        }
+
+        let nightscoutData: NightscoutSettingsResponse | null = null;
+        if (nightscoutRes.ok) {
+          nightscoutData = (await nightscoutRes.json().catch(() => null)) as NightscoutSettingsResponse | null;
+        } else if (!signal?.aborted) {
+          const errorMessage = await parseErrorResponse(nightscoutRes);
+          logger.warn("Failed to load Nightscout settings", { error: errorMessage });
+        }
+
+        if (!signal?.aborted) {
+          applyExternalSettings(openaiData, nightscoutData);
+        }
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+        logger.error("Failed to refresh external service settings", { error });
+        toast({
+          title: "Error al cargar servicios",
+          description: "No se pudieron cargar los ajustes de OpenAI o Nightscout.",
+          variant: "destructive",
+        });
+      }
+    },
+    [applyExternalSettings, parseErrorResponse, toast],
+  );
 
   useEffect(() => {
     const fetchPin = async () => {
@@ -120,6 +258,162 @@ export const MiniWebConfig = () => {
       controller.abort();
     };
   }, []);
+
+  useEffect(() => {
+    if (!isPinValid) {
+      return;
+    }
+
+    const controller = new AbortController();
+    void refreshExternalSettings(controller.signal);
+    return () => controller.abort();
+  }, [isPinValid, refreshExternalSettings]);
+
+  const handleTestOpenAI = async () => {
+    setIsTestingOpenAI(true);
+    setOpenaiTestState({ status: "idle" });
+    try {
+      const response = await fetch("/api/test/openai", { cache: "no-store" });
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = (await response.json()) as Record<string, unknown>;
+      } catch {
+        data = null;
+      }
+
+      if (response.ok && data?.ok) {
+        const voicesRaw = Array.isArray(data.voices) ? (data.voices as unknown[]) : [];
+        const voices = voicesRaw
+          .map((voice) => {
+            if (typeof voice === "string") {
+              return voice;
+            }
+            if (voice && typeof voice === "object") {
+              const record = voice as Record<string, unknown>;
+              const candidate = record.name ?? record.id ?? record.slug;
+              if (typeof candidate === "string" && candidate.trim().length > 0) {
+                return candidate;
+              }
+            }
+            return null;
+          })
+          .filter((voice): voice is string => Boolean(voice));
+        let message = "Conexión correcta.";
+        if (voices.length > 0) {
+          const preview = voices.slice(0, 3).join(", ");
+          const extra = voices.length > 3 ? ` +${voices.length - 3} más` : "";
+          message = `Conexión correcta (${voices.length} voces): ${preview}${extra}`;
+        }
+        setOpenaiTestState({ status: "success", message });
+      } else {
+        const errorSource = data?.error ?? data?.detail ?? data;
+        setOpenaiTestState({ status: "error", message: formatErrorMessage(errorSource) });
+      }
+    } catch (error) {
+      logger.error("Failed to test OpenAI settings", { error });
+      setOpenaiTestState({ status: "error", message: "No se pudo conectar con OpenAI." });
+    } finally {
+      setIsTestingOpenAI(false);
+    }
+  };
+
+  const handleTestNightscout = async () => {
+    setIsTestingNightscout(true);
+    setNightscoutTestState({ status: "idle" });
+    try {
+      const response = await fetch("/api/test/nightscout", { cache: "no-store" });
+      let data: Record<string, unknown> | null = null;
+      try {
+        data = (await response.json()) as Record<string, unknown>;
+      } catch {
+        data = null;
+      }
+
+      if (response.ok && data?.ok) {
+        let summary = "OK";
+        const status = data.status;
+        if (typeof status === "string" && status.trim().length > 0) {
+          summary = status;
+        } else if (status && typeof status === "object") {
+          const statusData = status as Record<string, unknown>;
+          const candidate = statusData.status ?? statusData.state ?? statusData.message ?? statusData.name;
+          if (typeof candidate === "string" && candidate.trim().length > 0) {
+            summary = candidate;
+          }
+        }
+        setNightscoutTestState({ status: "success", message: `Conexión correcta (${summary})` });
+      } else {
+        const errorSource = data?.error ?? data?.detail ?? data;
+        setNightscoutTestState({ status: "error", message: formatErrorMessage(errorSource) });
+      }
+    } catch (error) {
+      logger.error("Failed to test Nightscout settings", { error });
+      setNightscoutTestState({ status: "error", message: "No se pudo conectar con Nightscout." });
+    } finally {
+      setIsTestingNightscout(false);
+    }
+  };
+
+  const handleSaveExternalServices = async () => {
+    if (!hasServiceChanges) {
+      toast({
+        title: "Sin cambios",
+        description: "No hay cambios para guardar.",
+      });
+      return;
+    }
+
+    setIsSavingServices(true);
+    try {
+      if (openaiDirty) {
+        const response = await fetch("/api/settings/openai", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apiKey: openaiInput.trim() }),
+        });
+        if (!response.ok) {
+          const message = await parseErrorResponse(response);
+          throw new Error(message);
+        }
+      }
+
+      if (nightscoutUrlDirty || nightscoutTokenDirty) {
+        const response = await fetch("/api/settings/nightscout", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: nightscoutUrlDirty ? nightscoutUrl.trim() : null,
+            token: nightscoutTokenDirty ? nightscoutToken.trim() : null,
+          }),
+        });
+        if (!response.ok) {
+          const message = await parseErrorResponse(response);
+          throw new Error(message);
+        }
+      }
+
+      toast({
+        title: "Ajustes guardados",
+        description: "Los servicios externos se han actualizado correctamente.",
+      });
+      await refreshExternalSettings();
+    } catch (error) {
+      logger.error("Failed to save external services", { error });
+      const description =
+        error instanceof Error ? error.message : "No se pudieron guardar los servicios externos.";
+      toast({ title: "Error al guardar", description, variant: "destructive" });
+    } finally {
+      setIsSavingServices(false);
+    }
+  };
+
+  const handleResetExternalChanges = () => {
+    const snapshot = externalSettingsRef.current;
+    if (!snapshot) {
+      return;
+    }
+    applyExternalSettings(snapshot.openai, snapshot.nightscout);
+  };
 
   // Check PIN for security
   const checkPin = async (inputPin: string) => {
@@ -568,6 +862,212 @@ export const MiniWebConfig = () => {
                 )}
               </div>
             )}
+
+            <div className="pt-8 border-t border-border/60 space-y-6">
+              <div>
+                <h2 className="text-xl font-bold">Servicios externos</h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Configura la integración con OpenAI y Nightscout.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label className="text-lg">OpenAI API Key</Label>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <Input
+                      type={openaiVisible ? 'text' : 'password'}
+                      value={openaiInput}
+                      onChange={(e) => {
+                        setOpenaiInput(e.target.value);
+                        setOpenaiDirty(true);
+                        setOpenaiTestState({ status: 'idle' });
+                      }}
+                      placeholder={
+                        openaiHasKey
+                          ? 'Clave configurada. Introduce una nueva para reemplazarla.'
+                          : 'Introduce tu OpenAI API Key'
+                      }
+                      className="text-lg h-14 allow-select"
+                      autoComplete="off"
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setOpenaiVisible((prev) => !prev)}
+                    >
+                      {openaiVisible ? (
+                        <>
+                          <EyeOff className="mr-2 h-5 w-5" />
+                          Ocultar
+                        </>
+                      ) : (
+                        <>
+                          <Eye className="mr-2 h-5 w-5" />
+                          Mostrar
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                  {openaiHasKey && !openaiDirty && (
+                    <p className="text-xs text-muted-foreground">
+                      Hay una clave guardada. Introduce una nueva para reemplazarla o deja el campo vacío para conservarla.
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleTestOpenAI}
+                    disabled={isTestingOpenAI}
+                  >
+                    {isTestingOpenAI ? (
+                      <>
+                        <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                        Probando OpenAI…
+                      </>
+                    ) : (
+                      <>
+                        <TestTube className="mr-2 h-4 w-4" />
+                        Test OpenAI
+                      </>
+                    )}
+                  </Button>
+                  {openaiTestState.status !== 'idle' && (
+                    <div
+                      className={`flex-1 rounded-md border px-3 py-2 text-sm ${
+                        openaiTestState.status === 'success'
+                          ? 'border-emerald-500/40 text-emerald-600'
+                          : 'border-destructive/50 text-destructive'
+                      }`}
+                    >
+                      {openaiTestState.message}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label className="text-lg">Nightscout URL</Label>
+                    <Input
+                      type="url"
+                      value={nightscoutUrl}
+                      onChange={(e) => {
+                        setNightscoutUrl(e.target.value);
+                        setNightscoutUrlDirty(true);
+                        setNightscoutTestState({ status: 'idle' });
+                      }}
+                      placeholder="https://tu-nightscout.herokuapp.com"
+                      className="text-lg h-14 allow-select"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-lg">Nightscout Token</Label>
+                    <Input
+                      type="password"
+                      value={nightscoutToken}
+                      onChange={(e) => {
+                        setNightscoutToken(e.target.value);
+                        setNightscoutTokenDirty(true);
+                        setNightscoutTestState({ status: 'idle' });
+                      }}
+                      placeholder={
+                        nightscoutHasToken
+                          ? 'Token configurado. Introduce uno nuevo para reemplazarlo.'
+                          : 'Token de acceso (opcional)'
+                      }
+                      className="text-lg h-14 allow-select"
+                      autoComplete="off"
+                    />
+                    {nightscoutHasToken && !nightscoutTokenDirty && (
+                      <p className="text-xs text-muted-foreground">
+                        Hay un token guardado. Deja el campo vacío para mantenerlo.
+                      </p>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleTestNightscout}
+                    disabled={isTestingNightscout}
+                  >
+                    {isTestingNightscout ? (
+                      <>
+                        <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                        Probando Nightscout…
+                      </>
+                    ) : (
+                      <>
+                        <TestTube className="mr-2 h-4 w-4" />
+                        Test Nightscout
+                      </>
+                    )}
+                  </Button>
+                  {nightscoutTestState.status !== 'idle' && (
+                    <div
+                      className={`flex-1 rounded-md border px-3 py-2 text-sm ${
+                        nightscoutTestState.status === 'success'
+                          ? 'border-emerald-500/40 text-emerald-600'
+                          : 'border-destructive/50 text-destructive'
+                      }`}
+                    >
+                      {nightscoutTestState.message}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm text-muted-foreground">
+                  Los datos se guardan solo en la báscula y no se envían a servidores externos salvo para las pruebas de conexión.
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-2">
+                    <Button
+                      type="button"
+                      variant="glow"
+                      size="lg"
+                      onClick={handleSaveExternalServices}
+                      disabled={isSavingServices || !hasServiceChanges}
+                      className="sm:w-auto"
+                    >
+                      {isSavingServices ? (
+                        <>
+                          <RefreshCw className="mr-2 h-5 w-5 animate-spin" />
+                          Guardando…
+                        </>
+                      ) : (
+                        <>
+                          <Save className="mr-2 h-5 w-5" />
+                          Guardar cambios
+                        </>
+                      )}
+                    </Button>
+                    {hasServiceChanges && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleResetExternalChanges}
+                        className="sm:px-3"
+                      >
+                        Cancelar cambios
+                      </Button>
+                    )}
+                  </div>
+                  {!hasServiceChanges && !isSavingServices ? (
+                    <p className="text-xs text-muted-foreground sm:ml-2">No hay cambios pendientes.</p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
 
             {/* Info Alert */}
             <div className="rounded-lg border border-primary/30 bg-primary/5 p-4 flex gap-3">
