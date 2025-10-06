@@ -46,13 +46,11 @@ export const APModeScreen = () => {
   const redirectRef = useRef(false);
 
   const resolveAppBaseUrl = useCallback(() => {
-    const candidate = apiWrapper.getBaseUrl();
-    const fallback = typeof window !== "undefined" ? window.location.origin : "";
-    const base = (candidate && candidate.trim()) || fallback || "";
-    if (!base) {
+    if (typeof window === "undefined" || !window.location?.origin) {
       return "/";
     }
-    return `${base.replace(/\/+$/, "")}/`;
+
+    return `${window.location.origin.replace(/\/+$/, "")}/`;
   }, []);
 
   useEffect(() => {
