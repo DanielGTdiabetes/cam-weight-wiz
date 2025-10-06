@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, Play, Pause, RotateCcw, X } from "lucide-react";
+import { ArrowLeft, Play, Pause, RotateCcw, X, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -7,6 +7,7 @@ import { api } from "@/services/api";
 import { apiWrapper } from "@/services/apiWrapper";
 import { storage } from "@/services/storage";
 import { useNavSafeExit } from "@/hooks/useNavSafeExit";
+import { useNavigate } from "react-router-dom";
 
 declare global {
   interface Window {
@@ -20,10 +21,10 @@ interface TimerFullViewProps {
 }
 
 export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps = {}) => {
-  const { navEnabled, isTouchDevice, handleClose, isModal } = useNavSafeExit({
-    context,
-    onClose,
-  });
+  const navigate = useNavigate();
+  const settings = storage.getSettings();
+  const navEnabled = settings.ui.flags.navSafeExit ?? true;
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
   const [seconds, setSeconds] = useState(0);
   const [isRunning, setIsRunning] = useState(false);
   const [inputMinutes, setInputMinutes] = useState(5);
@@ -33,6 +34,12 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
   const completionTriggeredRef = useRef(false);
   const alarmIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const alarmTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setIsTouchDevice("ontouchstart" in window);
+    }
+  }, []);
 
   const playBeep = useCallback((volume = 1) => {
     if (typeof window === "undefined") {
@@ -212,6 +219,40 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
     stopAlarmFeedback();
   };
 
+  const handleStop = useCallback(() => {
+    completionTriggeredRef.current = false;
+    stopAlarmFeedback();
+    setSeconds(0);
+    setIsRunning(false);
+    
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate("/", { replace: true });
+    }
+  }, [navigate, stopAlarmFeedback]);
+
+  const handleCancel = useCallback(() => {
+    completionTriggeredRef.current = false;
+    stopAlarmFeedback();
+    setSeconds(0);
+    setIsRunning(false);
+    setShowPresets(true);
+  }, [stopAlarmFeedback]);
+
+  const handleBack = useCallback(() => {
+    if (onClose) {
+      onClose();
+      return;
+    }
+    
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      navigate(-1);
+    } else {
+      navigate("/", { replace: true });
+    }
+  }, [navigate, onClose]);
+
   const formatTime = (totalSeconds: number) => {
     const mins = Math.floor(totalSeconds / 60);
     const secs = totalSeconds % 60;
@@ -255,27 +296,25 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
     { label: "60 min", value: 60 },
   ];
 
-  const navControls = navEnabled ? (
-    <div className="flex items-center gap-2 p-4">
-      <Button variant="outline" onClick={handleClose} className="gap-2">
-        <ArrowLeft className="h-4 w-4" />
-        Atrás
-      </Button>
-      {isModal && (
-        <Button variant="ghost" onClick={handleClose} className="gap-2">
-          <X className="h-4 w-4" />
-          Cerrar
-        </Button>
-      )}
-    </div>
-  ) : null;
-
   const setupView = (
-    <div className="flex flex-1 items-center justify-center p-4">
-      <Card className="w-full max-w-2xl max-h-[560px] overflow-y-auto p-5">
-        <h2 className="mb-4 text-center text-2xl font-bold leading-tight">
-          Configurar Temporizador
-        </h2>
+    <div className="flex flex-1 flex-col p-4">
+      {/* Header with back button */}
+      <div className="mb-4 flex items-center justify-between">
+        <Button
+          variant="outline"
+          size="lg"
+          onClick={handleBack}
+          className="gap-2 min-h-[44px] min-w-[44px]"
+        >
+          <ArrowLeft className="h-5 w-5" />
+          Atrás
+        </Button>
+        <h1 className="text-xl font-bold">Configurar Temporizador</h1>
+        <div className="w-[100px]" /> {/* Spacer for centering */}
+      </div>
+
+      <div className="flex flex-1 items-center justify-center">
+        <Card className="w-full max-w-2xl max-h-[560px] overflow-y-auto p-5">
 
         {/* Entrada manual */}
         <div className="mb-4 space-y-3">
@@ -363,14 +402,31 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
             ))}
           </div>
         </div>
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 
   const runningView = (
-    <div className="flex flex-1 items-center justify-center p-4">
-      <Card className="relative w-full max-w-xl max-h-[560px] overflow-hidden border-primary/30 p-6 glow-cyan">
-        <div className="gradient-holographic absolute inset-0 opacity-20" />
+    <div className="flex flex-1 flex-col p-4">
+      {/* Header with back button */}
+      <div className="mb-4 flex items-center justify-between">
+        <Button
+          variant="outline"
+          size="lg"
+          onClick={handleBack}
+          className="gap-2 min-h-[44px] min-w-[44px]"
+        >
+          <ArrowLeft className="h-5 w-5" />
+          Atrás
+        </Button>
+        <h1 className="text-xl font-bold">Temporizador</h1>
+        <div className="w-[100px]" /> {/* Spacer for centering */}
+      </div>
+
+      <div className="flex flex-1 items-center justify-center">
+        <Card className="relative w-full max-w-xl max-h-[560px] overflow-hidden border-primary/30 p-6 glow-cyan">
+          <div className="gradient-holographic absolute inset-0 opacity-20" />
 
         <div className="relative text-center">
           {/* Timer Display */}
@@ -414,12 +470,12 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
           </div>
 
           {/* Control Buttons */}
-          <div className="flex justify-center gap-3">
+          <div className="flex flex-wrap justify-center gap-3">
             <Button
               onClick={handlePause}
               size="lg"
               variant={isRunning ? "warning" : "glow"}
-              className="h-14 w-32 text-base"
+              className="h-14 min-w-[120px] text-base"
             >
               {isRunning ? (
                 <>
@@ -434,43 +490,53 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
               )}
             </Button>
             <Button
-              onClick={handleReset}
+              onClick={handleCancel}
               size="lg"
               variant="outline"
-              className="h-14 w-32 text-base"
+              className="h-14 min-w-[120px] text-base"
             >
               <RotateCcw className="mr-2 h-5 w-5" />
-              Reiniciar
+              Cancelar
+            </Button>
+            <Button
+              onClick={handleStop}
+              size="lg"
+              variant="destructive"
+              className="h-14 min-w-[120px] text-base"
+            >
+              <X className="mr-2 h-5 w-5" />
+              Detener
             </Button>
             {alarmActive && (
               <Button
                 onClick={handleStopAlarm}
                 size="lg"
                 variant="destructive"
-                className="h-14 w-32 text-base"
+                className="h-14 min-w-[120px] text-base"
               >
                 <X className="mr-2 h-5 w-5" />
-                Detener
+                Silenciar
               </Button>
             )}
           </div>
         </div>
-      </Card>
+        </Card>
+      </div>
     </div>
   );
 
   return (
     <div className="relative flex h-full flex-col">
-      {navControls}
       {showPresets ? setupView : runningView}
       {navEnabled && isTouchDevice && (
         <Button
           variant="glow"
           size="lg"
-          onClick={handleClose}
-          className="fixed bottom-6 right-6 z-50 rounded-full px-6 py-6 shadow-lg"
+          onClick={handleBack}
+          className="fixed bottom-6 right-6 z-50 rounded-full min-h-[56px] min-w-[56px] shadow-lg"
+          aria-label="Salir"
         >
-          Salir
+          <LogOut className="h-6 w-6" />
         </Button>
       )}
     </div>
