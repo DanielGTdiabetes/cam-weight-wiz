@@ -52,7 +52,7 @@ import { FEATURE_FLAG_DEFINITIONS, getFeatureFlags, setFeatureFlag, type Feature
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { cn } from "@/lib/utils";
-import { api, setApiBaseUrl, type OtaJobState } from "@/services/api";
+import { api, setApiBaseUrl, type OtaJobState, type WakeStatus } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
 import { isLocalClient } from "@/lib/network";
 
@@ -123,10 +123,13 @@ export const SettingsView = () => {
   const localClient = isLocalClient();
   const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags>(() => getFeatureFlags());
-  
+
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [voiceId, setVoiceId] = useState<string | undefined>(undefined);
   const voiceIdRef = useRef<string | undefined>(undefined);
+  const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
+  const [wakeStatus, setWakeStatus] = useState<WakeStatus | null>(null);
+  const [isWakeUpdating, setIsWakeUpdating] = useState(false);
   const miniEbErrorNotifiedRef = useRef(false);
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
@@ -331,12 +334,37 @@ export const SettingsView = () => {
     [featureFlags.debugLogs, featureFlags.miniEbStable, toast]
   );
 
+  const refreshWakeStatus = useCallback(
+    async (silent = false) => {
+      try {
+        const status = await api.getWakeStatus();
+        setWakeStatus(status);
+        setWakeWordEnabled(status.enabled);
+        const current = storage.getSettings();
+        if (current.wakeWordEnabled !== status.enabled) {
+          storage.saveSettings({ wakeWordEnabled: status.enabled });
+        }
+      } catch (error) {
+        logger.error('Error fetching wake status', error);
+        if (!silent) {
+          toast({
+            title: "No se pudo consultar 'Hey Basculin'",
+            description: "Verifica la conexión con el backend.",
+            variant: "destructive",
+          });
+        }
+      }
+    },
+    [toast]
+  );
+
   // Load settings on mount
   useEffect(() => {
     const settings = storage.getSettings();
     setVoiceEnabled(settings.isVoiceActive);
     setVoiceId(settings.voiceId);
     voiceIdRef.current = settings.voiceId;
+    setWakeWordEnabled(settings.wakeWordEnabled ?? false);
     setDiabetesMode(settings.diabetesMode);
     setCalibrationFactor(settings.calibrationFactor.toString());
     setDecimals(settings.decimals?.toString() || "1");
@@ -356,6 +384,7 @@ export const SettingsView = () => {
     setFeatureFlags(getFeatureFlags());
 
     void refreshNetworkStatus();
+    void refreshWakeStatus(true);
 
     // Refresh network status every 10 seconds
     const interval = setInterval(() => {
@@ -363,7 +392,7 @@ export const SettingsView = () => {
     }, 10000);
 
     return () => clearInterval(interval);
-  }, [refreshNetworkStatus]);
+  }, [refreshNetworkStatus, refreshWakeStatus]);
 
   useEffect(() => {
     if (networkModalOpen) {
@@ -387,6 +416,17 @@ export const SettingsView = () => {
     setIsNetworkModalConnecting(false);
     setNetworkModalSSID('');
   }, [networkModalOpen, networkSSID]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const handler = () => setShowCalibrationWizard(true);
+    window.addEventListener('open-calibration-wizard', handler);
+    return () => {
+      window.removeEventListener('open-calibration-wizard', handler);
+    };
+  }, []);
 
   const handleOpenNetworkModal = () => {
     setNetworkModalOpen(true);
@@ -859,6 +899,31 @@ export const SettingsView = () => {
       });
     } finally {
       setIsTestingAudio(false);
+    }
+  };
+
+  const handleWakeToggle = async (enabled: boolean) => {
+    const previous = wakeWordEnabled;
+    setWakeWordEnabled(enabled);
+    setIsWakeUpdating(true);
+    try {
+      if (enabled) {
+        await api.enableWake();
+      } else {
+        await api.disableWake();
+      }
+      storage.saveSettings({ wakeWordEnabled: enabled });
+      await refreshWakeStatus(true);
+    } catch (error) {
+      logger.error('Failed to toggle wake word', error);
+      setWakeWordEnabled(previous);
+      toast({
+        title: "No se pudo actualizar 'Hey Basculin'",
+        description: "Inténtalo de nuevo en unos segundos.",
+        variant: "destructive",
+      });
+    } finally {
+      setIsWakeUpdating(false);
     }
   };
 
@@ -1349,6 +1414,20 @@ export const SettingsView = () => {
     };
   }, [stopOtaEventStream, stopOtaPolling]);
 
+  const wakeStatusLabel = !wakeStatus
+    ? 'Consultando…'
+    : !wakeWordEnabled
+      ? 'Desactivado'
+      : wakeStatus.running
+        ? 'Escuchando'
+        : 'En espera';
+  const wakeLastDetection = wakeStatus?.last_wake_ts
+    ? new Date(wakeStatus.last_wake_ts).toLocaleTimeString()
+    : null;
+  const wakeLastError = wakeStatus?.errors && wakeStatus.errors.length > 0
+    ? wakeStatus.errors[wakeStatus.errors.length - 1]
+    : null;
+
   return (
     <div className="h-full overflow-y-auto p-4">
       <Tabs defaultValue="general" className="w-full">
@@ -1472,6 +1551,33 @@ export const SettingsView = () => {
                   {isTestingAudio ? "Probando..." : "Probar Audio"}
                 </Button>
               )}
+
+              <div className="flex flex-col gap-3 rounded-lg border border-border/60 bg-muted/20 p-4 md:flex-row md:items-center md:justify-between">
+                <div className="space-y-2">
+                  <div>
+                    <Label className="text-lg font-medium">Activar 'Hey Basculin'</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Escucha continua sin conexión para activar comandos de voz automáticamente.
+                    </p>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Estado: {wakeStatusLabel}
+                    {wakeLastDetection ? ` • Último: ${wakeLastDetection}` : ''}
+                    {wakeStatus?.backend ? ` • Fuente: ${wakeStatus.backend}` : ''}
+                  </p>
+                  {wakeLastError ? (
+                    <p className="text-xs text-destructive">Error reciente: {wakeLastError}</p>
+                  ) : null}
+                </div>
+                <Switch
+                  checked={wakeWordEnabled}
+                  onCheckedChange={(checked) => {
+                    void handleWakeToggle(checked);
+                  }}
+                  disabled={isWakeUpdating}
+                  className="scale-150 self-start md:self-center"
+                />
+              </div>
 
               {featureFlags.timerAlarms ? (
                 <div className="space-y-6 border-t border-border pt-6">

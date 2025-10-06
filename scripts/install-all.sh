@@ -663,6 +663,29 @@ else
     warn "Sin red: omitiendo herramientas de audio"
 fi
 
+ensure_vosk_es() {
+  set -euo pipefail
+  mkdir -p /opt/vosk && cd /opt/vosk
+  if [ ! -d es-small ]; then
+    echo "[install] Descargando modelo Vosk ES (small)"
+    if curl -fsSL -o es-small.zip https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip; then
+      if [ -s es-small.zip ]; then
+        unzip -q es-small.zip && rm -f es-small.zip
+        mv -f vosk-model-small-es-0.42 es-small 2>/dev/null || true
+      else
+        warn "Modelo Vosk ES descargado vacío; revisa la URL"
+        rm -f es-small.zip
+      fi
+    else
+      warn "No se pudo descargar el modelo Vosk ES; la URL podría haber cambiado"
+    fi
+  else
+    echo "[install] Vosk ES ya presente"
+  fi
+}
+
+ensure_vosk_es || true
+
 # Install Node.js
 log "[5/20] Instalando Node.js..."
 if ! command -v node &> /dev/null; then

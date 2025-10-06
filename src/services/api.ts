@@ -75,6 +75,36 @@ export interface OtaJobState {
   progress: number;
 }
 
+export interface WakeIntent {
+  kind:
+    | "timer"
+    | "weight_status"
+    | "tare"
+    | "recipe_start"
+    | "calibrate"
+    | "smalltalk";
+  seconds?: number;
+  name?: string;
+}
+
+export interface WakeStatus {
+  enabled: boolean;
+  running: boolean;
+  last_wake_ts?: string | null;
+  wake_count?: number;
+  intent_count?: number;
+  errors?: string[];
+  backend?: string | null;
+}
+
+export interface WakeEvent {
+  type: "wake" | "intent";
+  ts: number;
+  text?: string;
+  intent?: WakeIntent;
+  simulated?: boolean;
+}
+
 class ApiService {
   constructor() {
     // Update API base URL from settings
@@ -89,6 +119,10 @@ class ApiService {
 
   async scaleZero(): Promise<void> {
     await apiWrapper.post('/api/scale/zero');
+  }
+
+  async getScaleWeight(): Promise<{ value: number | null; ts: string | null }> {
+    return apiWrapper.get<{ value: number | null; ts: string | null }>('/api/scale/weight');
   }
 
   async setCalibrationFactor(factor: number): Promise<void> {
@@ -203,6 +237,22 @@ class ApiService {
 
       await apiWrapper.post(`/api/voice/tts/say?${params.toString()}`);
     }
+  }
+
+  async getWakeStatus(): Promise<WakeStatus> {
+    return apiWrapper.get<WakeStatus>('/api/voice/wake/status');
+  }
+
+  async enableWake(): Promise<void> {
+    await apiWrapper.post('/api/voice/wake/enable');
+  }
+
+  async disableWake(): Promise<void> {
+    await apiWrapper.post('/api/voice/wake/disable');
+  }
+
+  async simulateWake(text: string): Promise<WakeEvent> {
+    return apiWrapper.post<WakeEvent>('/api/voice/wake/simulate', { text });
   }
 
   // Recipe endpoints
