@@ -955,19 +955,67 @@ export const SettingsView = () => {
   };
 
   const handlePasteToField = async (setter: (value: string) => void) => {
-    try {
-      if (!navigator.clipboard || !navigator.clipboard.readText) {
-        throw new Error("clipboard_unavailable");
-      }
-      const text = await navigator.clipboard.readText();
-      setter(text);
-    } catch (err) {
+    const fallbackToast = () => {
       toast({
         title: "No hay permisos de portapapeles",
         description: "Concede acceso al portapapeles desde el navegador.",
         variant: "destructive",
       });
+    };
+
+    const tryClipboardApi = async (): Promise<string | null> => {
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+          return null;
+        }
+        return await navigator.clipboard.readText();
+      } catch (error) {
+        logger.debug("No se pudo leer desde navigator.clipboard", { error });
+        return null;
+      }
+    };
+
+    const tryExecCommand = (): string | null => {
+      if (typeof document === "undefined") {
+        return null;
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.setAttribute("aria-hidden", "true");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      textarea.style.pointerEvents = "none";
+      document.body.appendChild(textarea);
+
+      let pasted: string | null = null;
+      try {
+        textarea.focus();
+        const successful = document.execCommand("paste");
+        if (successful) {
+          pasted = textarea.value;
+        }
+      } catch (error) {
+        logger.debug("document.execCommand('paste') no disponible", { error });
+      } finally {
+        textarea.remove();
+      }
+
+      return pasted;
+    };
+
+    const clipboardText = await tryClipboardApi();
+    if (clipboardText !== null) {
+      setter(clipboardText);
+      return;
     }
+
+    const execCommandText = tryExecCommand();
+    if (execCommandText !== null) {
+      setter(execCommandText);
+      return;
+    }
+
+    fallbackToast();
   };
 
   const handleCopyMiniwebPin = async () => {
@@ -2161,22 +2209,6 @@ export const SettingsView = () => {
                 ) : null}
               </div>
 
-              <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/20 p-4">
-                <div>
-                  <Label className="text-lg font-medium">Teclado interno</Label>
-                  <p className="text-sm text-muted-foreground">
-                    {internalKeyboardEnabled
-                      ? "Usar teclado táctil integrado para introducir datos sensibles."
-                      : "Usar teclado del sistema y pegado nativo."}
-                  </p>
-                </div>
-                <Switch
-                  checked={internalKeyboardEnabled}
-                  onCheckedChange={setInternalKeyboardEnabled}
-                  className="scale-125"
-                />
-              </div>
-
               <div>
                 <Label className="text-lg font-medium mb-2 block">WiFi Conectado</Label>
                 <div className="rounded-lg bg-success/10 p-4">
@@ -2225,184 +2257,6 @@ export const SettingsView = () => {
               >
                 Cambiar Red WiFi
               </Button>
-
-              <div className="space-y-6 rounded-lg border border-border/70 bg-muted/10 p-6">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div>
-                    <h4 className="text-xl font-semibold">Integraciones</h4>
-                    <p className="text-sm text-muted-foreground">
-                      Gestiona las credenciales para servicios externos.
-                    </p>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="glow"
-                    size="lg"
-                    className="w-full justify-center sm:w-auto"
-                    onClick={() => void handleSaveIntegrations()}
-                    disabled={isSavingIntegrations || (!localClient && !pinVerified)}
-                  >
-                    {isSavingIntegrations ? (
-                      <>
-                        <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Guardando…
-                      </>
-                    ) : (
-                      <>
-                        <Save className="mr-2 h-5 w-5" /> Guardar integraciones
-                      </>
-                    )}
-                  </Button>
-                </div>
-
-                <div className="grid gap-6 lg:grid-cols-2">
-                  <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label className="text-lg font-medium">OpenAI API Key</Label>
-                      <div className="relative">
-                        <Input
-                          type="password"
-                          value={chatGptKey}
-                          readOnly={internalKeyboardEnabled}
-                          onClick={() => {
-                            if (!internalKeyboardEnabled) {
-                              return;
-                            }
-                            openKeyboard("OpenAI API Key", "apikey", "chatGptKey", false, undefined, undefined, true);
-                          }}
-                          placeholder={backendHasOpenAIKey ? "••••••••••" : "sk-..."}
-                          className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                          onClick={() => void handlePasteToField(setChatGptKey)}
-                        >
-                          <ClipboardPaste className="h-4 w-4" />
-                          <span className="sr-only">Pegar API Key</span>
-                        </Button>
-                      </div>
-                      <p className="text-sm text-muted-foreground">
-                        Estado: {backendHasOpenAIKey ? (
-                          <span className="font-medium text-success">Clave almacenada en el backend</span>
-                        ) : (
-                          <span className="font-medium text-warning">Sin configurar</span>
-                        )}
-                      </p>
-                    </div>
-
-                    <Button
-                      variant="outline"
-                      size="lg"
-                      className="w-full justify-start"
-                      onClick={handleTestOpenAI}
-                      disabled={
-                        isTestingOpenAI || (!chatGptKey.trim() && !backendHasOpenAIKey) || (!localClient && !pinVerified)
-                      }
-                    >
-                      {isTestingOpenAI ? (
-                        <>
-                          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión OpenAI
-                        </>
-                      )}
-                    </Button>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label className="text-lg font-medium">Nightscout URL</Label>
-                      <div className="relative">
-                        <Input
-                          type="url"
-                          value={nightscoutUrl}
-                          readOnly={internalKeyboardEnabled}
-                          placeholder="https://mi-nightscout.com"
-                          onClick={() => {
-                            if (!internalKeyboardEnabled) {
-                              return;
-                            }
-                            openKeyboard("Nightscout URL", "url", "nightscoutUrl", false, undefined, undefined, false, 200);
-                          }}
-                          onChange={(event) => setNightscoutUrl(event.target.value)}
-                          className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                          onClick={() => void handlePasteToField(setNightscoutUrl)}
-                        >
-                          <ClipboardPaste className="h-4 w-4" />
-                          <span className="sr-only">Pegar URL Nightscout</span>
-                        </Button>
-                      </div>
-
-                      <Label className="text-lg font-medium">Nightscout Token</Label>
-                      <div className="relative">
-                        <Input
-                          type="password"
-                          value={nightscoutToken}
-                          readOnly={internalKeyboardEnabled}
-                          placeholder={backendNightscoutHasToken ? "••••••••" : "token"}
-                          onClick={() => {
-                            if (!internalKeyboardEnabled) {
-                              return;
-                            }
-                            openKeyboard("Nightscout Token", "apikey", "nightscoutToken", false, undefined, undefined, true);
-                          }}
-                          onChange={(event) => setNightscoutToken(event.target.value)}
-                          className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                          onClick={() => void handlePasteToField(setNightscoutToken)}
-                        >
-                          <ClipboardPaste className="h-4 w-4" />
-                          <span className="sr-only">Pegar token Nightscout</span>
-                        </Button>
-                      </div>
-                      <p className="text-sm text-muted-foreground">
-                        Estado: {backendNightscoutUrl ? (
-                          <span className="font-medium text-success">
-                            {backendNightscoutUrl} {backendNightscoutHasToken ? "· Token almacenado" : ""}
-                          </span>
-                        ) : (
-                          <span className="font-medium text-warning">Sin configurar</span>
-                        )}
-                      </p>
-                    </div>
-
-                    <Button
-                      variant="outline"
-                      size="lg"
-                      className="w-full justify-start"
-                      onClick={handleTestNightscout}
-                      disabled={
-                        isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl) || (!localClient && !pinVerified)
-                      }
-                    >
-                      {isTestingNightscout ? (
-                        <>
-                          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
-                        </>
-                      ) : (
-                        <>
-                          <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión Nightscout
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </div>
-              </div>
 
               <div>
                 <Label className="text-lg font-medium mb-2 block">Acceso Mini-Web</Label>
@@ -2481,7 +2335,7 @@ export const SettingsView = () => {
         <TabsContent value="diabetes" className="space-y-4">
           <Card className="p-6">
             <h3 className="mb-4 text-2xl font-bold">Configuración Diabetes</h3>
-            
+
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
@@ -2499,20 +2353,6 @@ export const SettingsView = () => {
 
               {diabetesMode && (
                 <>
-                  <div className="flex items-center justify-between rounded-lg border border-border/70 bg-muted/20 p-4">
-                    <div>
-                      <Label className="text-lg font-medium">Teclado interno</Label>
-                      <p className="text-sm text-muted-foreground">
-                        Activa el teclado táctil para los campos de Nightscout.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={internalKeyboardEnabled}
-                      onCheckedChange={setInternalKeyboardEnabled}
-                      className="scale-125"
-                    />
-                  </div>
-
                   <div className="flex items-center justify-between">
                     <div>
                       <Label className="text-lg font-medium">Asistente de Bolos</Label>
@@ -2528,63 +2368,6 @@ export const SettingsView = () => {
                   </div>
 
                   <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label>URL Nightscout</Label>
-                      <div className="relative">
-                        <Input
-                          value={nightscoutUrl}
-                          readOnly={internalKeyboardEnabled}
-                          onClick={() => {
-                            if (!internalKeyboardEnabled) {
-                              return;
-                            }
-                            openKeyboard("URL Nightscout", "url", "nightscoutUrl", false, undefined, undefined, true, 200);
-                          }}
-                          placeholder="https://mi-nightscout.herokuapp.com"
-                          className={cn("pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                          onClick={() => void handlePasteToField(setNightscoutUrl)}
-                        >
-                          <ClipboardPaste className="h-4 w-4" />
-                          <span className="sr-only">Pegar URL Nightscout</span>
-                        </Button>
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <Label>API Token</Label>
-                      <div className="relative">
-                        <Input
-                          type="password"
-                          value={nightscoutToken}
-                          readOnly={internalKeyboardEnabled}
-                          onClick={() => {
-                            if (!internalKeyboardEnabled) {
-                              return;
-                            }
-                            openKeyboard("API Token", "password", "nightscoutToken", false, undefined, undefined, true);
-                          }}
-                          placeholder="Token de acceso"
-                          className={cn("pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                        />
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon"
-                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                          onClick={() => void handlePasteToField(setNightscoutToken)}
-                        >
-                          <ClipboardPaste className="h-4 w-4" />
-                          <span className="sr-only">Pegar token Nightscout</span>
-                        </Button>
-                      </div>
-                    </div>
-
                     {bolusAssistant && (
                       <>
                         <div className="space-y-2">
@@ -2648,22 +2431,207 @@ export const SettingsView = () => {
                         className="cursor-pointer"
                       />
                     </div>
-
-                    <Button
-                      variant="outline"
-                      size="lg"
-                      className="w-full justify-start"
-                      onClick={handleTestNightscout}
-                      disabled={
-                        isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl) || (!localClient && !pinVerified)
-                      }
-                    >
-                      <CheckCircle2 className="mr-2 h-5 w-5" />
-                      {isTestingNightscout ? "Probando..." : "Probar Conexión Nightscout"}
-                    </Button>
                   </div>
                 </>
               )}
+            </div>
+          </Card>
+
+          <Card className="p-6 space-y-6">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-2xl font-bold">Integraciones</h3>
+                <p className="text-sm text-muted-foreground">
+                  Configura credenciales para Nightscout y OpenAI.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="glow"
+                size="lg"
+                className="w-full justify-center sm:w-auto"
+                onClick={() => void handleSaveIntegrations()}
+                disabled={isSavingIntegrations || (!localClient && !pinVerified)}
+              >
+                {isSavingIntegrations ? (
+                  <>
+                    <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Guardando…
+                  </>
+                ) : (
+                  <>
+                    <Save className="mr-2 h-5 w-5" /> Guardar integraciones
+                  </>
+                )}
+              </Button>
+            </div>
+
+            <div className="flex flex-col gap-3 rounded-lg border border-border/70 bg-muted/20 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <Label className="text-lg font-medium">Teclado interno</Label>
+                <p className="text-sm text-muted-foreground">
+                  {internalKeyboardEnabled
+                    ? "Usar teclado táctil integrado para introducir datos sensibles."
+                    : "Usar teclado del sistema y pegado nativo."}
+                </p>
+              </div>
+              <Switch
+                checked={internalKeyboardEnabled}
+                onCheckedChange={setInternalKeyboardEnabled}
+                className="scale-125"
+              />
+            </div>
+
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label className="text-lg font-medium">OpenAI API Key</Label>
+                  <div className="relative">
+                    <Input
+                      type="password"
+                      value={chatGptKey}
+                      autoComplete="off"
+                      readOnly={internalKeyboardEnabled}
+                      onClick={() => {
+                        if (!internalKeyboardEnabled) {
+                          return;
+                        }
+                        openKeyboard("OpenAI API Key", "apikey", "chatGptKey", false, undefined, undefined, true);
+                      }}
+                      onChange={(event) => setChatGptKey(event.target.value)}
+                      placeholder={backendHasOpenAIKey ? "••••••••••" : "sk-..."}
+                      className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                      onClick={() => void handlePasteToField(setChatGptKey)}
+                    >
+                      <ClipboardPaste className="h-4 w-4" />
+                      <span className="sr-only">Pegar API Key</span>
+                    </Button>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Estado: {backendHasOpenAIKey ? (
+                      <span className="font-medium text-success">Clave almacenada en el backend</span>
+                    ) : (
+                      <span className="font-medium text-warning">Sin configurar</span>
+                    )}
+                  </p>
+                </div>
+
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="w-full justify-start"
+                  onClick={handleTestOpenAI}
+                  disabled={
+                    isTestingOpenAI || (!chatGptKey.trim() && !backendHasOpenAIKey) || (!localClient && !pinVerified)
+                  }
+                >
+                  {isTestingOpenAI ? (
+                    <>
+                      <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión OpenAI
+                    </>
+                  )}
+                </Button>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label className="text-lg font-medium">Nightscout URL</Label>
+                  <div className="relative">
+                    <Input
+                      type="url"
+                      value={nightscoutUrl}
+                      autoComplete="url"
+                      readOnly={internalKeyboardEnabled}
+                      onClick={() => {
+                        if (!internalKeyboardEnabled) {
+                          return;
+                        }
+                        openKeyboard("Nightscout URL", "url", "nightscoutUrl", false, undefined, undefined, false, 200);
+                      }}
+                      onChange={(event) => setNightscoutUrl(event.target.value)}
+                      placeholder="https://mi-nightscout.com"
+                      className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                      onClick={() => void handlePasteToField(setNightscoutUrl)}
+                    >
+                      <ClipboardPaste className="h-4 w-4" />
+                      <span className="sr-only">Pegar URL Nightscout</span>
+                    </Button>
+                  </div>
+
+                  <Label className="text-lg font-medium">Nightscout Token</Label>
+                  <div className="relative">
+                    <Input
+                      type="password"
+                      value={nightscoutToken}
+                      autoComplete="new-password"
+                      readOnly={internalKeyboardEnabled}
+                      onClick={() => {
+                        if (!internalKeyboardEnabled) {
+                          return;
+                        }
+                        openKeyboard("Nightscout Token", "apikey", "nightscoutToken", false, undefined, undefined, true);
+                      }}
+                      onChange={(event) => setNightscoutToken(event.target.value)}
+                      placeholder={backendNightscoutHasToken ? "••••••••" : "token"}
+                      className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                    />
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                      onClick={() => void handlePasteToField(setNightscoutToken)}
+                    >
+                      <ClipboardPaste className="h-4 w-4" />
+                      <span className="sr-only">Pegar token Nightscout</span>
+                    </Button>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Estado: {backendNightscoutUrl ? (
+                      <span className="font-medium text-success">
+                        {backendNightscoutUrl} {backendNightscoutHasToken ? "· Token almacenado" : ""}
+                      </span>
+                    ) : (
+                      <span className="font-medium text-warning">Sin configurar</span>
+                    )}
+                  </p>
+                </div>
+
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="w-full justify-start"
+                  onClick={handleTestNightscout}
+                  disabled={
+                    isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl) || (!localClient && !pinVerified)
+                  }
+                >
+                  {isTestingNightscout ? (
+                    <>
+                      <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión Nightscout
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
           </Card>
         </TabsContent>

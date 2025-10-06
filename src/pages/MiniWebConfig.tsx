@@ -567,19 +567,67 @@ export const MiniWebConfig = () => {
   };
 
   const handlePaste = async (setter: (value: string) => void) => {
-    try {
-      if (!navigator.clipboard || !navigator.clipboard.readText) {
-        throw new Error("clipboard_unavailable");
-      }
-      const text = await navigator.clipboard.readText();
-      setter(text);
-    } catch (error) {
+    const notifyFailure = () => {
       toast({
         title: "No hay permisos de portapapeles",
         description: "Concede acceso al portapapeles desde el navegador.",
         variant: "destructive",
       });
+    };
+
+    const tryClipboardApi = async (): Promise<string | null> => {
+      try {
+        if (!navigator.clipboard || !navigator.clipboard.readText) {
+          return null;
+        }
+        return await navigator.clipboard.readText();
+      } catch (error) {
+        logger.debug("navigator.clipboard.readText falló", { error });
+        return null;
+      }
+    };
+
+    const tryExecCommand = (): string | null => {
+      if (typeof document === "undefined") {
+        return null;
+      }
+
+      const textarea = document.createElement("textarea");
+      textarea.setAttribute("aria-hidden", "true");
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      textarea.style.pointerEvents = "none";
+      document.body.appendChild(textarea);
+
+      let pasted: string | null = null;
+      try {
+        textarea.focus();
+        const ok = document.execCommand("paste");
+        if (ok) {
+          pasted = textarea.value;
+        }
+      } catch (error) {
+        logger.debug("document.execCommand('paste') falló", { error });
+      } finally {
+        textarea.remove();
+      }
+
+      return pasted;
+    };
+
+    const clipboardText = await tryClipboardApi();
+    if (clipboardText !== null) {
+      setter(clipboardText);
+      return;
     }
+
+    const execText = tryExecCommand();
+    if (execText !== null) {
+      setter(execText);
+      return;
+    }
+
+    notifyFailure();
   };
 
   const handleSelectNetwork = (network: WifiNetwork) => {
@@ -1262,7 +1310,7 @@ export const MiniWebConfig = () => {
                         setNightscoutUrlDirty(true);
                       }}
                       placeholder="https://midominio.herokuapp.com"
-                      autoComplete="off"
+                      autoComplete="url"
                     />
                     <Button
                       type="button"
@@ -1291,7 +1339,7 @@ export const MiniWebConfig = () => {
                         setNightscoutTokenDirty(true);
                       }}
                       placeholder={nightscoutHasToken ? "••••••" : "token"}
-                      autoComplete="off"
+                      autoComplete="new-password"
                     />
                     <Button
                       type="button"
