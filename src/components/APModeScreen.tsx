@@ -270,11 +270,37 @@ export const APModeScreen = () => {
     let cancelled = false;
 
     const checkStatus = async () => {
+      const handleOnlineRedirect = () => {
+        if (redirectRef.current) {
+          return;
+        }
+        redirectRef.current = true;
+        try {
+          window.location.replace(resolveAppBaseUrl());
+        } catch (error) {
+          logger.warn("No se pudo redirigir tras detectar modo kiosk", { error });
+        }
+      };
+
+      try {
+        const networkStatus = await api.getNetworkStatus();
+        if (!cancelled) {
+          const wifiConnected = Boolean(networkStatus?.wifi_client?.connected && networkStatus?.wifi_client?.ip);
+          const ethernetConnected = Boolean(networkStatus?.ethernet?.carrier && networkStatus?.ethernet?.ip);
+          const onlineFlag = typeof networkStatus?.online === "boolean" ? networkStatus.online : false;
+          if ((wifiConnected || ethernetConnected || onlineFlag) && !redirectRef.current) {
+            handleOnlineRedirect();
+            return;
+          }
+        }
+      } catch (error) {
+        logger.debug("Fallo al consultar estado de red", { error });
+      }
+
       try {
         const status = await api.miniwebStatus();
         if (!cancelled && status?.mode === "kiosk" && !redirectRef.current) {
-          redirectRef.current = true;
-          window.location.replace(resolveAppBaseUrl());
+          handleOnlineRedirect();
         }
       } catch (error) {
         logger.debug("Fallo al consultar miniweb status durante polling", { error });
@@ -283,7 +309,7 @@ export const APModeScreen = () => {
 
     const interval = window.setInterval(() => {
       void checkStatus();
-    }, 1_500);
+    }, 4_000);
 
     void checkStatus();
 

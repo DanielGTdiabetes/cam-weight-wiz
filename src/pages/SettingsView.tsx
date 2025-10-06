@@ -175,8 +175,12 @@ export const SettingsView = () => {
 
   const [tempValue, setTempValue] = useState("");
   const [isTestingAudio, setIsTestingAudio] = useState(false);
-  const [isTestingChatGPT, setIsTestingChatGPT] = useState(false);
+  const [isTestingOpenAI, setIsTestingOpenAI] = useState(false);
   const [isTestingNightscout, setIsTestingNightscout] = useState(false);
+  const [isSavingIntegrations, setIsSavingIntegrations] = useState(false);
+  const [backendHasOpenAIKey, setBackendHasOpenAIKey] = useState(false);
+  const [backendNightscoutUrl, setBackendNightscoutUrl] = useState<string | null>(null);
+  const [backendNightscoutHasToken, setBackendNightscoutHasToken] = useState(false);
   const [otaStatus, setOtaStatus] = useState<OtaStatus | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [otaJobState, setOtaJobState] = useState<OtaJobState | null>(null);
@@ -407,6 +411,43 @@ export const SettingsView = () => {
 
     return () => clearInterval(interval);
   }, [refreshNetworkStatus, refreshWakeStatus]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadBackendSettings = async () => {
+      try {
+        const payload = await api.fetchBackendSettings();
+        if (cancelled) {
+          return;
+        }
+
+        const hasKey = Boolean(payload.openai?.hasKey);
+        setBackendHasOpenAIKey(hasKey);
+
+        if (payload.nightscout) {
+          const rawUrl = typeof payload.nightscout.url === "string" ? payload.nightscout.url.trim() : "";
+          setBackendNightscoutUrl(rawUrl || null);
+          setBackendNightscoutHasToken(Boolean(payload.nightscout.hasToken));
+          if (rawUrl) {
+            setNightscoutUrl(rawUrl);
+            storage.saveSettings({ nightscoutUrl: rawUrl });
+          }
+        } else {
+          setBackendNightscoutUrl(null);
+          setBackendNightscoutHasToken(false);
+        }
+      } catch (error) {
+        logger.debug("No se pudo cargar ajustes agregados del backend", { error });
+      }
+    };
+
+    void loadBackendSettings();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (networkModalOpen) {
@@ -1089,42 +1130,139 @@ export const SettingsView = () => {
     }
   };
 
-  const handleTestChatGPT = async () => {
-    setIsTestingChatGPT(true);
+  const handleTestOpenAI = async () => {
+    const candidateKey = chatGptKey.trim();
+    setIsTestingOpenAI(true);
     try {
-      // Test with a simple recipe request
-      await api.getRecipe("test");
-      toast({
-        title: "Test ChatGPT",
-        description: "Conexión con ChatGPT exitosa",
-      });
+      const response = await api.testOpenAI(candidateKey || undefined);
+      if (response.ok) {
+        toast({
+          title: "OpenAI listo",
+          description: "Conexión con OpenAI verificada",
+        });
+      } else {
+        const parts: string[] = [];
+        if (response.reason) {
+          parts.push(`Razón: ${response.reason}`);
+        }
+        if (response.details) {
+          try {
+            parts.push(
+              typeof response.details === "string"
+                ? response.details
+                : JSON.stringify(response.details)
+            );
+          } catch (error) {
+            logger.debug("No se pudo serializar detalles de OpenAI", { error, details: response.details });
+          }
+        }
+        toast({
+          title: "OpenAI no disponible",
+          description: parts.join(" · ") || "El backend no pudo validar la API key.",
+          variant: "destructive",
+        });
+      }
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "No se pudo conectar con ChatGPT. Verifica tu API key",
-        variant: "destructive",
-      });
+      let description = "No se pudo conectar con OpenAI. Verifica tu API key.";
+      if (error instanceof ApiError && error.message) {
+        description = error.message;
+      }
+      toast({ title: "Error", description, variant: "destructive" });
     } finally {
-      setIsTestingChatGPT(false);
+      setIsTestingOpenAI(false);
     }
   };
 
   const handleTestNightscout = async () => {
+    const urlCandidate = nightscoutUrl.trim();
+    const tokenCandidate = nightscoutToken.trim();
     setIsTestingNightscout(true);
     try {
-      await api.getGlucose();
-      toast({
-        title: "Test Nightscout",
-        description: "Conexión con Nightscout exitosa",
-      });
+      const response = await api.testNightscout(urlCandidate || undefined, tokenCandidate || undefined);
+      if (response.ok) {
+        toast({
+          title: "Nightscout listo",
+          description: "Conexión con Nightscout verificada",
+        });
+      } else {
+        const pieces: string[] = [];
+        if (response.reason) {
+          pieces.push(`Razón: ${response.reason}`);
+        }
+        if (response.details) {
+          try {
+            pieces.push(
+              typeof response.details === "string"
+                ? response.details
+                : JSON.stringify(response.details)
+            );
+          } catch (error) {
+            logger.debug("No se pudieron serializar detalles de Nightscout", { error, details: response.details });
+          }
+        }
+        toast({
+          title: "Nightscout no respondió",
+          description: pieces.join(" · ") || "Verifica la URL y el token.",
+          variant: "destructive",
+        });
+      }
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "No se pudo conectar con Nightscout. Verifica la URL y token",
-        variant: "destructive",
-      });
+      let description = "No se pudo conectar con Nightscout. Verifica la URL y token.";
+      if (error instanceof ApiError && error.message) {
+        description = error.message;
+      }
+      toast({ title: "Error", description, variant: "destructive" });
     } finally {
       setIsTestingNightscout(false);
+    }
+  };
+
+  const handleSaveIntegrations = async () => {
+    const trimmedKey = chatGptKey.trim();
+    const trimmedUrl = nightscoutUrl.trim();
+    const trimmedToken = nightscoutToken.trim();
+
+    setIsSavingIntegrations(true);
+    try {
+      const payload = {
+        openai: { apiKey: trimmedKey || null },
+        nightscout: { url: trimmedUrl || null, token: trimmedToken || null },
+      };
+      const response = await api.updateBackendSettings(payload);
+
+      const persistedKey = Boolean(response.openai?.hasKey || trimmedKey);
+      setBackendHasOpenAIKey(persistedKey);
+
+      const backendUrl =
+        typeof response.nightscout?.url === "string" && response.nightscout.url.trim()
+          ? response.nightscout.url.trim()
+          : trimmedUrl;
+      setBackendNightscoutUrl(backendUrl || null);
+      const persistedToken = Boolean(response.nightscout?.hasToken || trimmedToken);
+      setBackendNightscoutHasToken(persistedToken);
+
+      setChatGptKey(trimmedKey);
+      setNightscoutUrl(trimmedUrl);
+      setNightscoutToken(trimmedToken);
+
+      storage.saveSettings({
+        chatGptKey: trimmedKey,
+        nightscoutUrl: trimmedUrl,
+        nightscoutToken: trimmedToken,
+      });
+
+      toast({
+        title: "Integraciones guardadas",
+        description: "Los cambios se sincronizaron con el backend.",
+      });
+    } catch (error) {
+      let description = "No se pudieron guardar las integraciones.";
+      if (error instanceof ApiError && error.message) {
+        description = error.message;
+      }
+      toast({ title: "Error", description, variant: "destructive" });
+    } finally {
+      setIsSavingIntegrations(false);
     }
   };
 
@@ -1823,45 +1961,183 @@ export const SettingsView = () => {
                 Cambiar Red WiFi
               </Button>
 
-              <div className="space-y-2">
-                <Label className="text-lg font-medium">API Key de ChatGPT</Label>
-                <div className="relative">
-                  <Input
-                    type="password"
-                    value={chatGptKey}
-                    readOnly={internalKeyboardEnabled}
-                    onClick={() => {
-                      if (!internalKeyboardEnabled) {
-                        return;
-                      }
-                      openKeyboard("API Key de ChatGPT", "apikey", "chatGptKey", false, undefined, undefined, true);
-                    }}
-                    placeholder="sk-..."
-                    className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                  />
+              <div className="space-y-6 rounded-lg border border-border/70 bg-muted/10 p-6">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h4 className="text-xl font-semibold">Integraciones</h4>
+                    <p className="text-sm text-muted-foreground">
+                      Gestiona las credenciales para servicios externos.
+                    </p>
+                  </div>
                   <Button
                     type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                    onClick={() => void handlePasteToField(setChatGptKey)}
+                    variant="glow"
+                    size="lg"
+                    className="w-full justify-center sm:w-auto"
+                    onClick={() => void handleSaveIntegrations()}
+                    disabled={isSavingIntegrations}
                   >
-                    <ClipboardPaste className="h-4 w-4" />
-                    <span className="sr-only">Pegar API Key</span>
+                    {isSavingIntegrations ? (
+                      <>
+                        <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Guardando…
+                      </>
+                    ) : (
+                      <>
+                        <Save className="mr-2 h-5 w-5" /> Guardar integraciones
+                      </>
+                    )}
                   </Button>
                 </div>
-              </div>
 
-              <Button 
-                variant="outline" 
-                size="lg" 
-                className="w-full justify-start"
-                onClick={handleTestChatGPT}
-                disabled={isTestingChatGPT || !chatGptKey}
-              >
-                <CheckCircle2 className="mr-2 h-5 w-5" />
-                {isTestingChatGPT ? "Probando..." : "Probar Conexión ChatGPT"}
-              </Button>
+                <div className="grid gap-6 lg:grid-cols-2">
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label className="text-lg font-medium">OpenAI API Key</Label>
+                      <div className="relative">
+                        <Input
+                          type="password"
+                          value={chatGptKey}
+                          readOnly={internalKeyboardEnabled}
+                          onClick={() => {
+                            if (!internalKeyboardEnabled) {
+                              return;
+                            }
+                            openKeyboard("OpenAI API Key", "apikey", "chatGptKey", false, undefined, undefined, true);
+                          }}
+                          placeholder={backendHasOpenAIKey ? "••••••••••" : "sk-..."}
+                          className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                          onClick={() => void handlePasteToField(setChatGptKey)}
+                        >
+                          <ClipboardPaste className="h-4 w-4" />
+                          <span className="sr-only">Pegar API Key</span>
+                        </Button>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        Estado: {backendHasOpenAIKey ? (
+                          <span className="font-medium text-success">Clave almacenada en el backend</span>
+                        ) : (
+                          <span className="font-medium text-warning">Sin configurar</span>
+                        )}
+                      </p>
+                    </div>
+
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="w-full justify-start"
+                      onClick={handleTestOpenAI}
+                      disabled={
+                        isTestingOpenAI || (!chatGptKey.trim() && !backendHasOpenAIKey)
+                      }
+                    >
+                      {isTestingOpenAI ? (
+                        <>
+                          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión OpenAI
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label className="text-lg font-medium">Nightscout URL</Label>
+                      <div className="relative">
+                        <Input
+                          type="url"
+                          value={nightscoutUrl}
+                          readOnly={internalKeyboardEnabled}
+                          placeholder="https://mi-nightscout.com"
+                          onClick={() => {
+                            if (!internalKeyboardEnabled) {
+                              return;
+                            }
+                            openKeyboard("Nightscout URL", "url", "nightscoutUrl", false, undefined, undefined, false, 200);
+                          }}
+                          onChange={(event) => setNightscoutUrl(event.target.value)}
+                          className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                          onClick={() => void handlePasteToField(setNightscoutUrl)}
+                        >
+                          <ClipboardPaste className="h-4 w-4" />
+                          <span className="sr-only">Pegar URL Nightscout</span>
+                        </Button>
+                      </div>
+
+                      <Label className="text-lg font-medium">Nightscout Token</Label>
+                      <div className="relative">
+                        <Input
+                          type="password"
+                          value={nightscoutToken}
+                          readOnly={internalKeyboardEnabled}
+                          placeholder={backendNightscoutHasToken ? "••••••••" : "token"}
+                          onClick={() => {
+                            if (!internalKeyboardEnabled) {
+                              return;
+                            }
+                            openKeyboard("Nightscout Token", "apikey", "nightscoutToken", false, undefined, undefined, true);
+                          }}
+                          onChange={(event) => setNightscoutToken(event.target.value)}
+                          className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                          onClick={() => void handlePasteToField(setNightscoutToken)}
+                        >
+                          <ClipboardPaste className="h-4 w-4" />
+                          <span className="sr-only">Pegar token Nightscout</span>
+                        </Button>
+                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        Estado: {backendNightscoutUrl ? (
+                          <span className="font-medium text-success">
+                            {backendNightscoutUrl} {backendNightscoutHasToken ? "· Token almacenado" : ""}
+                          </span>
+                        ) : (
+                          <span className="font-medium text-warning">Sin configurar</span>
+                        )}
+                      </p>
+                    </div>
+
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="w-full justify-start"
+                      onClick={handleTestNightscout}
+                      disabled={
+                        isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl)
+                      }
+                    >
+                      {isTestingNightscout ? (
+                        <>
+                          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión Nightscout
+                        </>
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              </div>
 
               <div>
                 <Label className="text-lg font-medium mb-2 block">Acceso Mini-Web</Label>
@@ -1997,7 +2273,7 @@ export const SettingsView = () => {
                             if (!internalKeyboardEnabled) {
                               return;
                             }
-                            openKeyboard("URL Nightscout", "url", "nightscoutUrl", false, undefined, undefined, true);
+                            openKeyboard("URL Nightscout", "url", "nightscoutUrl", false, undefined, undefined, true, 200);
                           }}
                           placeholder="https://mi-nightscout.herokuapp.com"
                           className={cn("pr-12", internalKeyboardEnabled && "cursor-pointer")}
@@ -2108,12 +2384,14 @@ export const SettingsView = () => {
                       />
                     </div>
 
-                    <Button 
-                      variant="outline" 
-                      size="lg" 
+                    <Button
+                      variant="outline"
+                      size="lg"
                       className="w-full justify-start"
                       onClick={handleTestNightscout}
-                      disabled={isTestingNightscout || !nightscoutUrl}
+                      disabled={
+                        isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl)
+                      }
                     >
                       <CheckCircle2 className="mr-2 h-5 w-5" />
                       {isTestingNightscout ? "Probando..." : "Probar Conexión Nightscout"}

@@ -477,8 +477,8 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         git curl ca-certificates build-essential cmake pkg-config
         python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial
         python3-pil python3-pil.imagetk python3-xdg
-        x11-xserver-utils xserver-xorg-legacy
-        fonts-dejavu-core
+        x11-xserver-utils xserver-xorg-legacy xinit openbox
+        fonts-dejavu-core fonts-noto-core
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils sox ffmpeg
         libzbar0 gpiod python3-rpi.gpio
@@ -505,8 +505,6 @@ if [[ "${NET_OK}" -eq 1 ]]; then
     log "✓ dnsmasq-base instalado (dnsmasq global removido)"
 
     ensure_pkg xorg
-    ensure_pkg xinit
-    ensure_pkg openbox
     ensure_pkg unclutter
     ensure_pkg python3-serial
 else
@@ -563,6 +561,26 @@ if [[ -z "${CHROME_BIN}" ]]; then
   fail "Falta Chromium tras la instalación"
 fi
 log "✓ Binario Chromium detectado: ${CHROME_BIN}"
+
+POLICY_DIR="/etc/chromium/policies/managed"
+POLICY_PATH="${POLICY_DIR}/bascula_policy.json"
+install -d -m 0755 "${POLICY_DIR}"
+cat <<'EOF' > "${POLICY_PATH}.tmp"
+{
+  "AudioCaptureAllowed": true,
+  "VideoCaptureAllowed": true,
+  "AutoplayAllowed": true,
+  "DefaultAudioCaptureSetting": 1,
+  "DefaultVideoCaptureSetting": 1,
+  "URLAllowlist": [
+    "http://127.0.0.1:8080",
+    "http://localhost:8080"
+  ]
+}
+EOF
+install -m 0644 "${POLICY_PATH}.tmp" "${POLICY_PATH}"
+rm -f "${POLICY_PATH}.tmp"
+log "✓ Política gestionada de Chromium actualizada en ${POLICY_PATH}"
 
 log "Configurando GPIO para HX711 y persistencia de báscula..."
 if [[ "${NET_OK}" -eq 1 ]]; then
@@ -643,7 +661,7 @@ systemctl_safe enable NetworkManager-wait-online.service
 # Install camera dependencies
 log "[4/20] Instalando dependencias de cámara..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-    if apt-get install -y rpicam-apps v4l-utils python3-picamera2; then
+    if apt-get install -y rpicam-apps libcamera-apps v4l-utils python3-picamera2; then
         log "✓ Dependencias de cámara instaladas"
     else
         warn "No se pudieron instalar dependencias de cámara"
@@ -665,23 +683,60 @@ fi
 
 ensure_vosk_es() {
   set -euo pipefail
-  mkdir -p /opt/vosk && cd /opt/vosk
-  if [ ! -d es-small ]; then
-    echo "[install] Descargando modelo Vosk ES (small)"
-    if curl -fsSL -o es-small.zip https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip; then
-      if [ -s es-small.zip ]; then
-        unzip -q es-small.zip && rm -f es-small.zip
-        mv -f vosk-model-small-es-0.42 es-small 2>/dev/null || true
-      else
-        warn "Modelo Vosk ES descargado vacío; revisa la URL"
-        rm -f es-small.zip
-      fi
+  local dest_dir="/opt/vosk"
+  local model_dir="${dest_dir}/es-small"
+  local tmp_zip="/tmp/vosk-es-small.$$"
+  local url="https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip"
+  local expected_hash="09b239888f633ef2f0b4e09736e3d9936acfd810bc65d53fad45261762c6511f"
+
+  mkdir -p "${dest_dir}"
+
+  if [[ -d "${model_dir}" ]]; then
+    log "[install] Modelo Vosk ES ya presente"
+    return
+  fi
+
+  if [[ "${NET_OK}" != "1" ]]; then
+    warn "Sin red: omitiendo descarga de modelo Vosk"
+    return
+  fi
+
+  log "[install] Descargando modelo Vosk ES (small)"
+  rm -f "${tmp_zip}" "${tmp_zip}.zip"
+  tmp_zip="${tmp_zip}.zip"
+  if ! curl -fsSL -o "${tmp_zip}" "${url}"; then
+    warn "No se pudo descargar el modelo Vosk ES; la URL podría haber cambiado"
+    rm -f "${tmp_zip}"
+    return
+  fi
+
+  if [[ ! -s "${tmp_zip}" ]]; then
+    warn "Modelo Vosk ES descargado vacío; revisa la URL"
+    rm -f "${tmp_zip}"
+    return
+  fi
+
+  local file_hash
+  file_hash="$(sha256sum "${tmp_zip}" | awk '{print $1}')"
+  if [[ "${file_hash}" != "${expected_hash}" ]]; then
+    err "[install] ERROR checksum voz Vosk: esperado ${expected_hash}, obtenido ${file_hash}"
+    rm -f "${tmp_zip}"
+    return
+  fi
+
+  mkdir -p "${dest_dir}"/tmp_extract
+  if unzip -q "${tmp_zip}" -d "${dest_dir}"/tmp_extract; then
+    rm -f "${tmp_zip}"
+    if [[ -d "${dest_dir}"/tmp_extract/vosk-model-small-es-0.42 ]]; then
+      mv "${dest_dir}"/tmp_extract/vosk-model-small-es-0.42 "${model_dir}"
+      log "✓ Modelo Vosk ES instalado"
     else
-      warn "No se pudo descargar el modelo Vosk ES; la URL podría haber cambiado"
+      warn "No se encontró el directorio esperado tras descomprimir Vosk"
     fi
   else
-    echo "[install] Vosk ES ya presente"
+    warn "No se pudo descomprimir el modelo Vosk"
   fi
+  rm -rf "${dest_dir}"/tmp_extract || true
 }
 
 ensure_vosk_es || true
@@ -1239,7 +1294,13 @@ else
   warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
 fi
 
-if ! sudo -H -u "${TARGET_USER}" "${VENV_PY}" -c "import fastapi,uvicorn,rapidfuzz"; then
+if ! sudo -H -u "${TARGET_USER}" "${VENV_PY}" - <<'PY'
+import rapidfuzz
+import fastapi
+import uvicorn
+print("py_deps_ok")
+PY
+then
   err "[ERROR] Dependencias Python faltantes"
   exit 1
 fi
@@ -1269,38 +1330,64 @@ if ! command -v piper >/dev/null 2>&1; then
   fi
 fi
 
-# Download Spanish voice models
+# Download Spanish voice models with checksum validation
 VOICE_DIR="/opt/bascula/voices"
 install -d -m 0755 "${VOICE_DIR}"
 
-voices=(
-  "es_ES-carlfm-x_low.onnx"
-  "es_ES-carlfm-x_low.onnx.json"
-  "es_ES-davefx-medium.onnx"
-  "es_ES-davefx-medium.onnx.json"
-  "es_ES-sharvard-medium.onnx"
-  "es_ES-sharvard-medium.onnx.json"
+declare -A VOICE_HASHES=(
+  ["es_ES-carlfm-x_low.onnx"]="d69677323a907cd4963f42b29c20a98b5d6bfa7f3e64df339915e4650c00d125"
+  ["es_ES-carlfm-x_low.onnx.json"]="d9bdfa9ff01eb2bc9e62e7d2593939d1e4c4d8eb7cf75f972731539d12399966"
+  ["es_ES-davefx-medium.onnx"]="6658b03b1a6c316ee4c265a9896abc1393353c2d9e1bca7d66c2c442e222a917"
+  ["es_ES-davefx-medium.onnx.json"]="0e0dda87c732f6f38771ff274a6380d9252f327dca77aa2963d5fbdf9ec54842"
+  ["es_ES-sharvard-medium.onnx"]="40febfb1679c69a4505ff311dc136e121e3419a13a290ef264fdf43ddedd0fb1"
+  ["es_ES-sharvard-medium.onnx.json"]="7438c9b699c72b0c3388dae1b68d3f364dc66a2150fe554a1c11f03372957b2c"
 )
 
 VOICE_BASE_URL="https://github.com/DanielGTdiabetes/bascula-cam/releases/download/voices-v1"
 
-for voice in "${voices[@]}"; do
+for voice in "${!VOICE_HASHES[@]}"; do
   dest="${VOICE_DIR}/${voice}"
+  expected_hash="${VOICE_HASHES[${voice}]}"
   if [[ -s "${dest}" ]]; then
-    log "[info] Voz ${voice} ya instalada"
-    continue
+    current_hash="$(sha256sum "${dest}" 2>/dev/null | awk '{print $1}')"
+    if [[ "${current_hash}" == "${expected_hash}" ]]; then
+      log "[info] Voz ${voice} ya instalada con checksum válido"
+      continue
+    fi
+    warn "Checksum de ${voice} no coincide; re-descargando"
+    rm -f "${dest}"
   fi
+
   if [[ "${NET_OK}" != "1" ]]; then
     warn "Sin red: omitiendo descarga de ${voice}"
     continue
   fi
+
+  tmpfile="/tmp/${voice}.tmp.$$"
+  rm -f "${tmpfile}"
   log "Descargando voz: ${voice}"
-  if wget -q --show-progress -O "${dest}.tmp" "${VOICE_BASE_URL}/${voice}"; then
-    mv "${dest}.tmp" "${dest}"
-  else
-    rm -f "${dest}.tmp"
+  if ! curl -fsSL -o "${tmpfile}" "${VOICE_BASE_URL}/${voice}"; then
+    rm -f "${tmpfile}"
     warn "No se pudo descargar ${voice} (saltando)"
+    continue
   fi
+
+  if [[ ! -s "${tmpfile}" ]]; then
+    rm -f "${tmpfile}"
+    warn "Archivo ${voice} descargado vacío"
+    continue
+  fi
+
+  file_hash="$(sha256sum "${tmpfile}" | awk '{print $1}')"
+  if [[ "${file_hash}" != "${expected_hash}" ]]; then
+    rm -f "${tmpfile}"
+    err "[install] ERROR checksum voice ${voice}: esperado ${expected_hash}, obtenido ${file_hash}"
+    continue
+  fi
+
+  install -m 0644 "${tmpfile}" "${dest}"
+  rm -f "${tmpfile}"
+  log "✓ Voz ${voice} instalada con checksum verificado"
 done
 
 install -d -m 0755 /opt/piper

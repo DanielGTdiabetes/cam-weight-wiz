@@ -1,6 +1,6 @@
 // API Service for FastAPI Backend Integration
 import { apiWrapper, ApiError } from './apiWrapper';
-import { storage, type AppSettings } from './storage';
+import { storage } from './storage';
 import { logger } from './logger';
 
 export const setApiBaseUrl = (baseUrl: string) => {
@@ -73,6 +73,57 @@ export interface OtaJobState {
   target: string;
   message: string;
   progress: number;
+}
+
+export interface BackendWifiStatus {
+  connected?: boolean;
+  ssid?: string | null;
+  ip?: string | null;
+  ip_address?: string | null;
+  ap_active?: boolean;
+  ethernet_connected?: boolean;
+  should_activate_ap?: boolean;
+  connectivity?: string | null;
+  internet?: boolean;
+  online?: boolean;
+  [key: string]: unknown;
+}
+
+export interface BackendNetworkStatus {
+  ethernet?: { carrier?: boolean; ip?: string | null };
+  wifi_client?: { connected?: boolean; ip?: string | null };
+  ap?: { active?: boolean; ssid?: string | null };
+  bascula_url?: string;
+  online?: boolean;
+  [key: string]: unknown;
+}
+
+export interface BackendSettingsPayload {
+  ui?: { flags?: Record<string, boolean> };
+  tts?: Record<string, unknown>;
+  scale?: Record<string, unknown>;
+  serial?: { device?: string; baud?: number };
+  network?: { status?: BackendWifiStatus | null; ap?: { ssid: string; ip: string } };
+  openai?: { hasKey?: boolean };
+  nightscout?: { url?: string; hasToken?: boolean };
+  integrations?: Record<string, unknown>;
+}
+
+export interface BackendSettingsUpdate {
+  openai?: { apiKey?: string | null };
+  nightscout?: { url?: string | null; token?: string | null };
+  ui?: Record<string, unknown>;
+  tts?: Record<string, unknown>;
+  scale?: Record<string, unknown>;
+  serial?: Record<string, unknown>;
+  integrations?: Record<string, unknown>;
+  network?: Record<string, unknown>;
+}
+
+export interface IntegrationTestResponse {
+  ok: boolean;
+  reason?: string;
+  details?: unknown;
 }
 
 export interface WakeIntent {
@@ -288,25 +339,46 @@ class ApiService {
   }
 
   // Settings endpoints
-  async getSettings(): Promise<AppSettings> {
-    return apiWrapper.get<AppSettings>('/api/settings');
+  async fetchBackendSettings(): Promise<BackendSettingsPayload> {
+    return apiWrapper.get<BackendSettingsPayload>('/api/settings');
   }
 
-  async updateSettings(settings: Partial<AppSettings>): Promise<void> {
-    await apiWrapper.put('/api/settings', settings);
+  async updateBackendSettings(payload: BackendSettingsUpdate): Promise<BackendSettingsPayload> {
+    return apiWrapper.post<BackendSettingsPayload>('/api/settings', payload);
+  }
+
+  async testOpenAI(apiKey?: string): Promise<IntegrationTestResponse> {
+    const body = apiKey ? { apiKey } : {};
+    return apiWrapper.post<IntegrationTestResponse>('/api/settings/test/openai', body);
+  }
+
+  async testNightscout(url?: string, token?: string): Promise<IntegrationTestResponse> {
+    const payload: Record<string, string> = {};
+    if (url) {
+      payload.url = url;
+    }
+    if (token) {
+      payload.token = token;
+    }
+    return apiWrapper.post<IntegrationTestResponse>('/api/settings/test/nightscout', payload);
   }
 
   // OTA Updates
-  async getOtaStatus(): Promise<{ current: string; latest: string; hasUpdate: boolean }> {
+  async getOtaStatus(): Promise<{
+    current: string;
+    latest: string;
+    hasUpdate: boolean;
+    availableVersion?: string;
+    reason?: string;
+    notes?: string;
+  }> {
     const response = await apiWrapper.get<{
+      current_version?: string;
+      available_version?: string;
       available?: boolean;
-      version?: string;
-      error?: string;
-    }>('/api/updates/check');
-
-    if (response.error) {
-      throw new ApiError(response.error, 0, 'OTA_CHECK_ERROR');
-    }
+      reason?: string;
+      notes?: string;
+    }>('/api/ota/check');
 
     let otaState: OtaJobState | null = null;
     try {
@@ -315,7 +387,7 @@ class ApiService {
       logger.warn('No se pudo obtener el estado OTA actual', { error });
     }
 
-    const normalizeVersion = (value?: string) => {
+    const normalizeVersion = (value?: string | null) => {
       if (!value) {
         return '';
       }
@@ -328,17 +400,19 @@ class ApiService {
       return trimmed;
     };
 
-    const currentVersion = normalizeVersion(otaState?.current);
+    const currentVersion = normalizeVersion(response.current_version) || normalizeVersion(otaState?.current);
+    const availableVersion = normalizeVersion(response.available_version);
     const targetVersion = normalizeVersion(otaState?.target);
-    const latestVersionFromResponse = normalizeVersion(response.version);
-
-    const latestVersion = latestVersionFromResponse || targetVersion || currentVersion;
-    const hasUpdate = Boolean(response.available && latestVersionFromResponse && latestVersionFromResponse !== currentVersion);
+    const latestVersion = availableVersion || targetVersion || currentVersion;
+    const hasUpdate = Boolean(response.available && availableVersion && availableVersion !== currentVersion);
 
     return {
       current: currentVersion,
       latest: latestVersion,
+      availableVersion: availableVersion || undefined,
       hasUpdate,
+      reason: response.reason,
+      notes: response.notes,
     };
   }
 
@@ -375,8 +449,8 @@ class ApiService {
   }
 
   // Network endpoints
-  async getNetworkStatus(): Promise<{ ip: string; ssid?: string }> {
-    return apiWrapper.get<{ ip: string; ssid?: string }>('/api/network/status');
+  async getNetworkStatus(): Promise<BackendNetworkStatus> {
+    return apiWrapper.get<BackendNetworkStatus>('/api/network/status');
   }
 
   async miniwebStatus(): Promise<MiniwebStatus> {

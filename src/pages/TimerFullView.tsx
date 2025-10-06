@@ -31,6 +31,7 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
   const [showPresets, setShowPresets] = useState(true);
   const [alarmActive, setAlarmActive] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const beepBaseRef = useRef<HTMLAudioElement | null>(null);
   const completionTriggeredRef = useRef(false);
   const alarmIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const alarmTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -41,7 +42,17 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
     }
   }, []);
 
-  const playBeep = useCallback((volume = 1) => {
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const preload = new Audio("/sounds/beep.mp3");
+    preload.preload = "auto";
+    beepBaseRef.current = preload;
+  }, []);
+
+  const playBeepFallback = useCallback((volume = 1) => {
     if (typeof window === "undefined") {
       return;
     }
@@ -87,6 +98,37 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
     oscillator.stop(context.currentTime + 1.5);
   }, []);
 
+  const playBeep = useCallback(
+    (volume = 1) => {
+      if (typeof window === "undefined") {
+        return;
+      }
+
+      const normalizedVolume = Math.min(Math.max(volume, 0), 1);
+      if (normalizedVolume <= 0) {
+        return;
+      }
+
+      const base = beepBaseRef.current ?? (() => {
+        const element = new Audio("/sounds/beep.mp3");
+        element.preload = "auto";
+        beepBaseRef.current = element;
+        return element;
+      })();
+
+      const instance = base.cloneNode(true) as HTMLAudioElement;
+      instance.volume = normalizedVolume;
+      const playResult = instance.play();
+      if (playResult && typeof playResult.catch === "function") {
+        playResult.catch((error) => {
+          console.warn("Fallo al reproducir beep.mp3, usando fallback", error);
+          playBeepFallback(normalizedVolume);
+        });
+      }
+    },
+    [playBeepFallback]
+  );
+
   const stopAlarmFeedback = useCallback(() => {
     if (alarmIntervalRef.current) {
       clearInterval(alarmIntervalRef.current);
@@ -122,6 +164,7 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
     const settings = storage.getSettings();
     const volume = Math.min(Math.max(settings.uiVolume ?? 1, 0), 1);
     const timerAlarmsEnabled = Boolean(settings.ui.flags.timerAlarms);
+    const voiceEnabled = Boolean(settings.isVoiceActive);
 
     stopAlarmFeedback();
 
@@ -143,8 +186,8 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
         setAlarmActive(true);
       }
 
-      if (settings.timerVoiceAnnouncementsEnabled) {
-        const params = new URLSearchParams({ text: "Tiempo cumplido" });
+      if (voiceEnabled && settings.timerVoiceAnnouncementsEnabled) {
+        const params = new URLSearchParams({ text: "Tiempo finalizado" });
         if (settings.voiceId) {
           params.set("voice", settings.voiceId);
         }
@@ -153,7 +196,9 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
           .post(`/api/voice/tts/say?${params.toString()}`)
           .catch((error) => {
             console.error("Failed to send timer completion TTS", error);
-            void api.speak("Tiempo cumplido", settings.voiceId).catch(() => undefined);
+            void api
+              .speak("Tiempo finalizado", settings.voiceId)
+              .catch(() => undefined);
           });
       }
 
@@ -162,7 +207,9 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
       }
     } else {
       playBeep(volume);
-      void api.speak("Temporizador finalizado").catch(() => undefined);
+      if (voiceEnabled) {
+        void api.speak("Tiempo finalizado", settings.voiceId).catch(() => undefined);
+      }
     }
   }, [playBeep, stopAlarmFeedback]);
 

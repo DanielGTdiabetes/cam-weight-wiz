@@ -20,7 +20,7 @@ import traceback
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple
+from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple, TYPE_CHECKING
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,8 +33,34 @@ from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from backend.scale_service import HX711Service
-from backend.serial_scale_service import SerialScaleService
+HX711_IMPORT_ERROR: Optional[Exception] = None
+try:
+    from backend.scale_service import HX711Service as _HX711Service  # type: ignore
+except Exception as exc:  # pragma: no cover - fallback en runtime
+    HX711_IMPORT_ERROR = exc
+    _HX711Service = None  # type: ignore
+
+SERIAL_IMPORT_ERROR: Optional[Exception] = None
+try:
+    from backend.serial_scale_service import SerialScaleService as _SerialScaleService  # type: ignore
+except Exception as exc:  # pragma: no cover - fallback en runtime
+    SERIAL_IMPORT_ERROR = exc
+    _SerialScaleService = None  # type: ignore
+
+if TYPE_CHECKING:
+    from backend.scale_service import HX711Service as HX711ServiceType
+    from backend.serial_scale_service import SerialScaleService as SerialScaleServiceType
+else:  # pragma: no cover - pistas de tipo solo en desarrollo
+    HX711ServiceType = Any
+    SerialScaleServiceType = Any
+
+HX711Service = _HX711Service  # type: ignore
+SerialScaleService = _SerialScaleService  # type: ignore
+
+_HX711_AVAILABLE = HX711Service is not None
+_SERIAL_AVAILABLE = SerialScaleService is not None
+_LOGGED_HX711_WARNING = False
+_LOGGED_SERIAL_WARNING = False
 from backend.voice import router as voice_router
 from backend.camera import router as camera_router
 from backend.wake import router as wake_router, init_wake_if_enabled
@@ -84,7 +110,7 @@ AP_DEFAULT_CONFIG_PATH = "/config"
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Estado global ----------
-ScaleServiceType = Union[HX711Service, SerialScaleService]
+ScaleServiceType = Union[HX711ServiceType, SerialScaleServiceType]
 scale_service: Optional[ScaleServiceType] = None
 _LAST_AP_ACTION_TS = 0.0
 _LAST_WIFI_CONNECT_REQUEST: Optional[str] = None
@@ -122,6 +148,68 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
 def _save_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _nm_escape_value(value: str) -> str:
+    sanitized = (
+        value.replace("\\", "\\\\")
+        .replace("\x00", "")
+        .replace("\r", "")
+        .replace("\n", "\\n")
+        .replace('"', '\\"')
+    )
+    return f'"{sanitized}"'
+
+
+def _write_nm_profile(path: Path, ssid: str, password: str, secured: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing_lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        existing_lines = []
+    except Exception:
+        existing_lines = []
+
+    escaped_ssid = _nm_escape_value(ssid)
+    escaped_psk = _nm_escape_value(password)
+
+    new_lines: list[str] = []
+    replaced_ssid = False
+    replaced_psk = False
+
+    for raw_line in existing_lines:
+        line = raw_line.strip("\n")
+        key, _, current_value = line.partition("=")
+        key = key.strip()
+
+        if key.lower() == "ssid":
+            new_lines.append(f"ssid={escaped_ssid}")
+            replaced_ssid = True
+            continue
+
+        if key.lower() == "psk":
+            if secured:
+                new_lines.append(f"psk={escaped_psk}")
+                replaced_psk = True
+            # Para redes abiertas omitimos la línea
+            continue
+
+        new_lines.append(line if current_value else key)
+
+    if not replaced_ssid:
+        new_lines.append(f"ssid={escaped_ssid}")
+
+    if secured:
+        if not replaced_psk:
+            new_lines.append(f"psk={escaped_psk}")
+    else:
+        new_lines = [line for line in new_lines if not line.lower().startswith("psk=")]
+
+    content = "\n".join(new_lines) + "\n"
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(content, encoding="utf-8")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, path)
 
 
 def _extract_openai_api_key(config: Optional[Dict[str, Any]]) -> str:
@@ -166,6 +254,58 @@ def _extract_nightscout_credentials(config: Optional[Dict[str, Any]]) -> Tuple[s
             token = diabetes["ns_token"].strip()
 
     return url, token
+
+
+def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+    openai_key = _extract_openai_api_key(config)
+    nightscout_url, nightscout_token = _extract_nightscout_credentials(config)
+
+    ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+    raw_flags = ui_cfg.get("flags") if isinstance(ui_cfg, dict) else {}
+    flags: Dict[str, Any] = {}
+    if isinstance(raw_flags, dict):
+        for key, value in raw_flags.items():
+            flags[str(key)] = bool(value)
+
+    tts_cfg = config.get("tts") if isinstance(config.get("tts"), dict) else {}
+    scale_cfg = config.get("scale") if isinstance(config.get("scale"), dict) else {}
+
+    serial_device = config.get("serial_device", DEFAULT_SERIAL_DEVICE)
+    serial_baud = config.get("serial_baud", DEFAULT_SERIAL_BAUD)
+    try:
+        serial_baud_int = int(serial_baud)
+    except (TypeError, ValueError):
+        serial_baud_int = DEFAULT_SERIAL_BAUD
+
+    try:
+        network_status = _get_wifi_status()
+    except Exception as exc:
+        LOG_NETWORK.debug("No se pudo obtener estado de red: %s", exc)
+        network_status = None
+
+    integrations_cfg = config.get("integrations")
+    if isinstance(integrations_cfg, dict):
+        integrations = {
+            key: value
+            for key, value in integrations_cfg.items()
+            if key not in {"openai_api_key", "chatgpt_api_key", "nightscout_token"}
+        }
+    else:
+        integrations = {}
+
+    return {
+        "ui": {"flags": flags},
+        "tts": tts_cfg,
+        "scale": scale_cfg,
+        "serial": {"device": serial_device, "baud": serial_baud_int},
+        "network": {
+            "status": network_status,
+            "ap": {"ssid": AP_DEFAULT_SSID, "ip": AP_DEFAULT_IP},
+        },
+        "openai": {"hasKey": bool(openai_key)},
+        "nightscout": {"url": nightscout_url, "hasToken": bool(nightscout_token)},
+        "integrations": integrations,
+    }
 
 
 def _response_error_payload(response: httpx.Response) -> Any:
@@ -435,6 +575,52 @@ def _discover_latest_remote_commit() -> str | None:
         return None
     commit = output.split()[0]
     return commit if commit else None
+
+
+def ota_check_for_updates() -> Dict[str, Any]:
+    current_version = _get_current_release_label()
+    try:
+        current_commit = _get_repo_head_commit(OTA_CURRENT_LINK.resolve())
+    except Exception:
+        current_commit = None
+    if not current_commit:
+        current_commit = _get_repo_head_commit(OTA_CURRENT_LINK)
+
+    result: Dict[str, Any] = {
+        "current_version": current_version,
+        "available_version": current_version,
+        "available": False,
+    }
+
+    try:
+        connectivity = _nm_connectivity()
+    except Exception:
+        connectivity = None
+
+    if connectivity not in {"full"}:
+        result["reason"] = "offline"
+        if connectivity:
+            result["connectivity"] = connectivity
+        return result
+
+    latest_commit = _discover_latest_remote_commit()
+    if not latest_commit:
+        result["reason"] = "unreachable"
+        return result
+
+    latest_short = latest_commit[:7]
+    result["available_version"] = latest_short
+
+    if current_commit:
+        if latest_commit.startswith(current_commit):
+            return result
+        if current_commit.startswith(latest_commit):
+            return result
+
+    if latest_short != current_version or (current_commit and current_commit != latest_commit):
+        result["available"] = True
+
+    return result
 
 
 def _run_logged_command(
@@ -733,41 +919,58 @@ def _init_scale_service() -> ScaleServiceType:
         backend = "uart"
 
     if backend == "gpio":
-        scale_cfg_raw = config.get("scale")
-        scale_cfg = scale_cfg_raw if isinstance(scale_cfg_raw, dict) else {}
-        dt_pin = _coerce_int(scale_cfg.get("dt", DEFAULT_DT_PIN), DEFAULT_DT_PIN, "scale.dt")
-        sck_pin = _coerce_int(scale_cfg.get("sck", DEFAULT_SCK_PIN), DEFAULT_SCK_PIN, "scale.sck")
-        sample_rate = _coerce_float(
-            scale_cfg.get("sample_rate_hz", DEFAULT_SAMPLE_RATE), DEFAULT_SAMPLE_RATE, "scale.sample_rate_hz"
-        )
-        filter_window = _coerce_int(
-            scale_cfg.get("filter_window", DEFAULT_FILTER_WINDOW), DEFAULT_FILTER_WINDOW, "scale.filter_window"
-        )
-        calibration_factor = _coerce_float(
-            scale_cfg.get("calibration_factor", DEFAULT_CALIBRATION_FACTOR),
-            DEFAULT_CALIBRATION_FACTOR,
-            "scale.calibration_factor",
-        )
+        if not _HX711_AVAILABLE or HX711Service is None:
+            global _LOGGED_HX711_WARNING
+            if not _LOGGED_HX711_WARNING:
+                LOG_SCALE.warning(
+                    "HX711Service no disponible; usando backend UART (%s)",
+                    HX711_IMPORT_ERROR,
+                )
+                _LOGGED_HX711_WARNING = True
+            backend = "uart"
+        else:
+            scale_cfg_raw = config.get("scale")
+            scale_cfg = scale_cfg_raw if isinstance(scale_cfg_raw, dict) else {}
+            dt_pin = _coerce_int(scale_cfg.get("dt", DEFAULT_DT_PIN), DEFAULT_DT_PIN, "scale.dt")
+            sck_pin = _coerce_int(scale_cfg.get("sck", DEFAULT_SCK_PIN), DEFAULT_SCK_PIN, "scale.sck")
+            sample_rate = _coerce_float(
+                scale_cfg.get("sample_rate_hz", DEFAULT_SAMPLE_RATE), DEFAULT_SAMPLE_RATE, "scale.sample_rate_hz"
+            )
+            filter_window = _coerce_int(
+                scale_cfg.get("filter_window", DEFAULT_FILTER_WINDOW), DEFAULT_FILTER_WINDOW, "scale.filter_window"
+            )
+            calibration_factor = _coerce_float(
+                scale_cfg.get("calibration_factor", DEFAULT_CALIBRATION_FACTOR),
+                DEFAULT_CALIBRATION_FACTOR,
+                "scale.calibration_factor",
+            )
 
-        LOG_SCALE.info(
-            "Inicializando báscula con backend GPIO (dt=%s, sck=%s, sample_rate=%.2f)",
-            dt_pin,
-            sck_pin,
-            sample_rate,
-        )
-        service = HX711Service(
-            dt_pin=dt_pin,
-            sck_pin=sck_pin,
-            sample_rate_hz=sample_rate,
-            filter_window=filter_window,
-            calibration_factor=calibration_factor,
-        )
-        service.start()
-        return service
+            LOG_SCALE.info(
+                "Inicializando báscula con backend GPIO (dt=%s, sck=%s, sample_rate=%.2f)",
+                dt_pin,
+                sck_pin,
+                sample_rate,
+            )
+            service = HX711Service(
+                dt_pin=dt_pin,
+                sck_pin=sck_pin,
+                sample_rate_hz=sample_rate,
+                filter_window=filter_window,
+                calibration_factor=calibration_factor,
+            )
+            service.start()
+            return service
 
     device = str(config.get("serial_device", DEFAULT_SERIAL_DEVICE) or DEFAULT_SERIAL_DEVICE)
     baud_value = config.get("serial_baud", DEFAULT_SERIAL_BAUD)
     baud = _coerce_int(baud_value, DEFAULT_SERIAL_BAUD, "serial_baud")
+
+    if not _SERIAL_AVAILABLE or SerialScaleService is None:
+        global _LOGGED_SERIAL_WARNING
+        if not _LOGGED_SERIAL_WARNING:
+            LOG_SCALE.error("SerialScaleService no disponible: %s", SERIAL_IMPORT_ERROR)
+            _LOGGED_SERIAL_WARNING = True
+        raise RuntimeError("serial_backend_unavailable")
 
     LOG_SCALE.info(
         "Inicializando báscula con backend UART (device=%s, baud=%s)",
@@ -1438,6 +1641,13 @@ async def _create_or_update_wifi_profile(
             profile_path = NM_CONNECTIONS_DIR / f"{ssid}.nmconnection"
 
         await _export_connection_profile(ssid, profile_path)
+        await asyncio.to_thread(
+            _write_nm_profile,
+            profile_path,
+            ssid,
+            (password or "") if secured else "",
+            secured,
+        )
         await _cleanup_nmcli_duplicates(ssid, profile_path)
         return profile_path
     except FileNotFoundError as exc:
@@ -2585,6 +2795,7 @@ def _get_wifi_status() -> Dict[str, Any]:
         "connectivity": connectivity,
         "saved_wifi_profiles": saved_wifi_profiles,
         "internet": internet_available,
+        "online": bool(internet_available or wifi_connected or ethernet_has_ip),
     }
 
     if ap_service_active is not None:
@@ -2766,7 +2977,11 @@ async def api_scale_status():
         return {"ok": False, "backend": backend, "reason": "service_not_initialized"}
     status = dict(service.get_status())
     if "backend" not in status:
-        status["backend"] = "gpio" if isinstance(service, HX711Service) else "uart"
+        status["backend"] = (
+            "gpio"
+            if _HX711_AVAILABLE and HX711Service is not None and isinstance(service, HX711Service)
+            else "uart"
+        )
     return status
 
 
@@ -2893,6 +3108,11 @@ async def api_scale_calibrate_apply(payload: CalibrationApplyPayload):
     return result
 
 
+@app.get("/api/ota/check")
+async def api_ota_check():
+    return ota_check_for_updates()
+
+
 @app.post("/api/ota/apply")
 async def api_ota_apply(payload: OTAApplyPayload | None = None):
     target = (payload.target or "").strip() if payload else ""
@@ -2995,13 +3215,15 @@ class PinVerification(BaseModel):
 class WifiCredentials(BaseModel):
     ssid: str
     password: Optional[str] = None
-    secured: bool = True
+    secured: Optional[bool] = None
+    open: Optional[bool] = None
     sec: Optional[str] = None
 
 
 class NetworkConnectRequest(BaseModel):
     ssid: str
-    psk: str
+    psk: Optional[str] = None
+    open: Optional[bool] = None
 
 
 class OpenAISettingsPayload(BaseModel):
@@ -3011,6 +3233,26 @@ class OpenAISettingsPayload(BaseModel):
 class NightscoutSettingsPayload(BaseModel):
     url: Optional[str] = None
     token: Optional[str] = None
+
+
+class SettingsTestOpenAI(BaseModel):
+    apiKey: Optional[str] = None
+
+
+class SettingsTestNightscout(BaseModel):
+    url: Optional[str] = None
+    token: Optional[str] = None
+
+
+class SettingsUpdatePayload(BaseModel):
+    openai: Optional[OpenAISettingsPayload] = None
+    nightscout: Optional[NightscoutSettingsPayload] = None
+    ui: Optional[Dict[str, Any]] = None
+    tts: Optional[Dict[str, Any]] = None
+    scale: Optional[Dict[str, Any]] = None
+    serial: Optional[Dict[str, Any]] = None
+    integrations: Optional[Dict[str, Any]] = None
+    network: Optional[Dict[str, Any]] = None
 
 
 # ---------- PIN persistente ----------
@@ -3058,146 +3300,204 @@ async def verify_pin(data: PinVerification, request: Request):
     raise HTTPException(status_code=403, detail="Invalid PIN")
 
 
-@app.get("/api/settings/openai")
-async def get_openai_settings():
+@app.get("/api/settings")
+async def get_settings():
     config = _load_config()
-    key = _extract_openai_api_key(config)
-    return {"hasKey": bool(key)}
+    return _build_settings_payload(config)
 
 
-@app.post("/api/settings/openai")
-async def update_openai_settings(payload: OpenAISettingsPayload):
+@app.post("/api/settings")
+async def update_settings(payload: SettingsUpdatePayload):
     config = _load_config()
-    api_key = (payload.apiKey or "").strip()
+    changed = False
 
-    integrations = config.get("integrations")
-    if not isinstance(integrations, dict):
-        integrations = {}
-    integrations["openai_api_key"] = api_key
-    integrations["chatgpt_api_key"] = api_key
-    config["integrations"] = integrations
-    config["openai_api_key"] = api_key
+    if payload.openai is not None:
+        api_key = (payload.openai.apiKey or "").strip()
+        config["openai_api_key"] = api_key
+        integrations = config.get("integrations")
+        if not isinstance(integrations, dict):
+            integrations = {}
+        integrations["openai_api_key"] = api_key
+        integrations["chatgpt_api_key"] = api_key
+        config["integrations"] = integrations
+        changed = True
 
-    _save_json(CONFIG_PATH, config)
-    return {"hasKey": bool(api_key)}
+    if payload.nightscout is not None:
+        current_url, current_token = _extract_nightscout_credentials(config)
+        if payload.nightscout.url is None:
+            url = current_url
+        else:
+            url = str(payload.nightscout.url).strip()
+        if payload.nightscout.token is None:
+            token = current_token
+        else:
+            token = str(payload.nightscout.token).strip()
+
+        config["nightscout_url"] = url
+        config["nightscout_token"] = token
+
+        diabetes = config.get("diabetes")
+        if not isinstance(diabetes, dict):
+            diabetes = {}
+        diabetes["ns_url"] = url
+        diabetes["ns_token"] = token
+        diabetes["diabetes_enabled"] = bool(url)
+        config["diabetes"] = diabetes
+
+        integrations = config.get("integrations")
+        if not isinstance(integrations, dict):
+            integrations = {}
+        integrations["nightscout_url"] = url
+        integrations["nightscout_token"] = token
+        config["integrations"] = integrations
+        changed = True
+
+    if payload.ui:
+        ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+        flags_updates = payload.ui.get("flags") if isinstance(payload.ui, dict) else None
+        if isinstance(flags_updates, dict):
+            existing_flags = ui_cfg.get("flags") if isinstance(ui_cfg.get("flags"), dict) else {}
+            for key, value in flags_updates.items():
+                existing_flags[str(key)] = bool(value)
+            ui_cfg["flags"] = existing_flags
+            changed = True
+        if isinstance(payload.ui, dict):
+            for key, value in payload.ui.items():
+                if key == "flags":
+                    continue
+                ui_cfg[key] = value
+                changed = True
+        config["ui"] = ui_cfg
+
+    if payload.tts and isinstance(payload.tts, dict):
+        existing_tts = config.get("tts") if isinstance(config.get("tts"), dict) else {}
+        existing_tts.update(payload.tts)
+        config["tts"] = existing_tts
+        changed = True
+
+    if payload.scale and isinstance(payload.scale, dict):
+        existing_scale = config.get("scale") if isinstance(config.get("scale"), dict) else {}
+        existing_scale.update(payload.scale)
+        config["scale"] = existing_scale
+        changed = True
+
+    if payload.serial and isinstance(payload.serial, dict):
+        device = payload.serial.get("device")
+        if isinstance(device, str) and device.strip():
+            config["serial_device"] = device.strip()
+            changed = True
+        baud = payload.serial.get("baud")
+        if baud is not None:
+            try:
+                config["serial_baud"] = int(baud)
+                changed = True
+            except (TypeError, ValueError):
+                pass
+
+    if payload.integrations and isinstance(payload.integrations, dict):
+        current_integrations = config.get("integrations")
+        if not isinstance(current_integrations, dict):
+            current_integrations = {}
+        current_integrations.update(payload.integrations)
+        config["integrations"] = current_integrations
+        changed = True
+
+    if changed:
+        _save_json(CONFIG_PATH, config)
+
+    return _build_settings_payload(config)
 
 
-@app.get("/api/settings/nightscout")
-async def get_nightscout_settings():
+@app.post("/api/settings/test/openai")
+async def settings_test_openai(payload: SettingsTestOpenAI):
     config = _load_config()
-    url, token = _extract_nightscout_credentials(config)
-    return {"url": url, "hasToken": bool(token)}
-
-
-@app.post("/api/settings/nightscout")
-async def update_nightscout_settings(payload: NightscoutSettingsPayload):
-    config = _load_config()
-    current_url, current_token = _extract_nightscout_credentials(config)
-
-    if isinstance(payload.url, str):
-        url = payload.url.strip()
-    elif payload.url is None:
-        url = current_url
-    else:
-        url = str(payload.url).strip()
-
-    if payload.token is None:
-        token = current_token
-    elif isinstance(payload.token, str):
-        token = payload.token.strip()
-    else:
-        token = str(payload.token).strip()
-
-    config["nightscout_url"] = url
-    config["nightscout_token"] = token
-
-    diabetes = config.get("diabetes")
-    if not isinstance(diabetes, dict):
-        diabetes = {}
-    diabetes["ns_url"] = url
-    diabetes["ns_token"] = token
-    if url:
-        diabetes["diabetes_enabled"] = True
-    else:
-        diabetes["diabetes_enabled"] = False
-    config["diabetes"] = diabetes
-
-    integrations = config.get("integrations")
-    if not isinstance(integrations, dict):
-        integrations = {}
-    integrations["nightscout_url"] = url
-    integrations["nightscout_token"] = token
-    config["integrations"] = integrations
-
-    _save_json(CONFIG_PATH, config)
-    return {"url": url, "hasToken": bool(token)}
-
-
-@app.get("/api/test/openai")
-async def test_openai_settings():
-    config = _load_config()
-    api_key = _extract_openai_api_key(config)
+    candidate_key = (payload.apiKey or "").strip()
+    api_key = candidate_key or _extract_openai_api_key(config)
     if not api_key:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "OpenAI API key no configurada"})
+        return {"ok": False, "reason": "missing_api_key"}
 
     headers = {"Authorization": f"Bearer {api_key}"}
-    voices_url = os.getenv("OPENAI_VOICES_URL", "https://api.openai.com/v1/audio/voices")
+    models_url = os.getenv("OPENAI_MODELS_URL", "https://api.openai.com/v1/models")
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(voices_url, headers=headers)
+            response = await client.get(models_url, headers=headers, params={"limit": 1})
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         payload = _response_error_payload(exc.response)
-        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "error": payload})
+        return JSONResponse(
+            status_code=exc.response.status_code,
+            content={"ok": False, "reason": "http_error", "details": payload},
+        )
     except httpx.RequestError as exc:
-        return JSONResponse(status_code=502, content={"ok": False, "error": f"Error de conexión: {exc}"})
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "reason": "network_error", "details": str(exc)},
+        )
     except Exception as exc:  # pragma: no cover - defensivo
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "reason": "unexpected_error", "details": str(exc)},
+        )
 
     data = response.json()
-    raw_voices = data.get("voices") or data.get("data")
-    voices: List[str] = []
-    if isinstance(raw_voices, list):
-        for item in raw_voices:
-            if isinstance(item, dict):
-                name = item.get("name") or item.get("id")
-                if isinstance(name, str) and name:
-                    voices.append(name)
-            elif isinstance(item, str) and item:
-                voices.append(item)
+    first_model = None
+    models = data.get("data")
+    if isinstance(models, list) and models:
+        candidate = models[0]
+        if isinstance(candidate, dict):
+            first_model = candidate.get("id")
 
-    return {"ok": True, "voices": voices}
+    return {"ok": True, "model": first_model}
 
 
-@app.get("/api/test/nightscout")
-async def test_nightscout_settings():
+@app.post("/api/settings/test/nightscout")
+async def settings_test_nightscout(payload: SettingsTestNightscout):
     config = _load_config()
     url, token = _extract_nightscout_credentials(config)
-    if not url:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "Nightscout no configurado"})
+    candidate_url = (payload.url or "").strip()
+    candidate_token = (payload.token or "").strip()
 
-    normalized_url = url.rstrip("/")
-    headers = {"API-SECRET": token} if token else {}
+    target_url = candidate_url or url
+    target_token = candidate_token or token
+
+    if not target_url:
+        return {"ok": False, "reason": "missing_url"}
+
+    normalized_url = target_url.rstrip("/")
+    headers = {"API-SECRET": target_token} if target_token else {}
 
     try:
         async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(f"{normalized_url}/api/v1/status.json", headers=headers)
+            response = await client.get(
+                f"{normalized_url}/api/v1/entries.json",
+                params={"count": 1},
+                headers=headers,
+            )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         payload = _response_error_payload(exc.response)
-        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "error": payload})
+        return JSONResponse(
+            status_code=exc.response.status_code,
+            content={"ok": False, "reason": "http_error", "details": payload},
+        )
     except httpx.RequestError as exc:
-        return JSONResponse(status_code=502, content={"ok": False, "error": f"Error de conexión: {exc}"})
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "reason": "network_error", "details": str(exc)},
+        )
     except Exception as exc:  # pragma: no cover - defensivo
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "reason": "unexpected_error", "details": str(exc)},
+        )
 
     try:
-        status_payload = response.json()
+        entries_payload = response.json()
     except Exception:
-        status_payload = response.text
+        entries_payload = response.text
 
-    return {"ok": True, "status": status_payload}
+    return {"ok": True, "entries": entries_payload}
 
 
 @app.get("/api/miniweb/scan-networks")
@@ -3252,17 +3552,33 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
         raise HTTPException(status_code=422, detail="ssid_too_long")
 
     password_raw = credentials.password or ""
-    password = password_raw.strip()
+    sanitized_password = (
+        password_raw.replace("\x00", "")
+        .replace("\r", "")
+        .replace("\n", "")
+    )
 
-    if credentials.secured:
-        if not password:
+    explicit_open = credentials.open
+    secured_flag = credentials.secured
+
+    if explicit_open is True:
+        resolved_secured = False
+    elif explicit_open is False:
+        resolved_secured = True
+    elif secured_flag is not None:
+        resolved_secured = bool(secured_flag)
+    else:
+        resolved_secured = bool(sanitized_password)
+
+    if resolved_secured:
+        if not sanitized_password:
             raise HTTPException(status_code=422, detail="password_required")
-        if len(password) > 63:
+        if len(sanitized_password) > 63:
             raise HTTPException(status_code=422, detail="password_too_long")
+    else:
+        sanitized_password = ""
 
-    sanitized_password = password.replace("\x00", "").replace("\r", "").replace("\n", "") if password else ""
-
-    LOG_NETWORK.info("wifi_connect attempt for SSID '%s' (secured=%s)", ssid, credentials.secured)
+    LOG_NETWORK.info("wifi_connect attempt for SSID '%s' (secured=%s)", ssid, resolved_secured)
 
     global _LAST_WIFI_CONNECT_REQUEST
     _LAST_WIFI_CONNECT_REQUEST = ssid
@@ -3301,8 +3617,8 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
         try:
             await _create_or_update_wifi_profile(
                 ssid,
-                sanitized_password if credentials.secured else None,
-                credentials.secured,
+                sanitized_password if resolved_secured else None,
+                resolved_secured,
             )
         except PermissionError as exc:
             code = str(exc)
@@ -3477,7 +3793,11 @@ async def connect_wifi(credentials: WifiCredentials):
 
 @app.post("/api/network/connect")
 async def network_connect(payload: NetworkConnectRequest):
-    creds = WifiCredentials(ssid=payload.ssid, password=payload.psk, secured=True)
+    creds = WifiCredentials(
+        ssid=payload.ssid,
+        password=payload.psk,
+        open=payload.open,
+    )
     return await _handle_wifi_connect(creds)
 
 

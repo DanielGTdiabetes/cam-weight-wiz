@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { formatWeight } from "@/lib/format";
+import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useToast } from "@/hooks/use-toast";
 import { api, type GeneratedRecipe, type RecipeStep } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
@@ -73,6 +75,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     context,
     onClose,
   });
+  const decimals = useScaleDecimals();
   const [recipe, setRecipe] = useState<GeneratedRecipe | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [recipeStarted, setRecipeStarted] = useState(false);
@@ -366,7 +369,9 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
                     <li key={`${ingredient.name}-${index}`} className="flex items-center justify-between">
                       <span>{ingredient.name}</span>
                       <span className="text-muted-foreground">
-                        {ingredient.quantity !== null ? `${ingredient.quantity}${ingredient.unit}` : ingredient.unit}
+                        {ingredient.quantity !== null
+                          ? `${formatWeight(ingredient.quantity, decimals)}${ingredient.unit}`
+                          : ingredient.unit}
                         {ingredient.needsScale && ' · Usa la báscula'}
                       </span>
                     </li>
@@ -396,7 +401,9 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
               {currentStep.needsScale && currentStep.expectedWeight && (
                 <div className="mt-4 rounded-lg bg-primary/10 p-4 text-center text-primary">
                   <p className="text-sm">Peso objetivo</p>
-                  <p className="text-4xl font-bold">{currentStep.expectedWeight} g</p>
+                  <p className="text-4xl font-bold">
+                    {formatWeight(currentStep.expectedWeight, decimals)} g
+                  </p>
                 </div>
               )}
             </Card>
