@@ -222,8 +222,8 @@ class ApiService {
   }
 
   // OTA Updates
-  async checkUpdates(): Promise<{ available: boolean; version?: string }> {
-    return apiWrapper.get<{ available: boolean; version?: string }>('/api/updates/check');
+  async getOtaStatus(): Promise<{ current: string; latest: string; hasUpdate: boolean }> {
+    return apiWrapper.get<{ current: string; latest: string; hasUpdate: boolean }>('/api/ota/check');
   }
 
   async installUpdate(): Promise<void> {
