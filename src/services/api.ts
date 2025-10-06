@@ -233,7 +233,48 @@ class ApiService {
 
   // OTA Updates
   async getOtaStatus(): Promise<{ current: string; latest: string; hasUpdate: boolean }> {
-    return apiWrapper.get<{ current: string; latest: string; hasUpdate: boolean }>('/api/updates/check');
+    const response = await apiWrapper.get<{
+      available?: boolean;
+      version?: string;
+      error?: string;
+    }>('/api/updates/check');
+
+    if (response.error) {
+      throw new ApiError(response.error, 0, 'OTA_CHECK_ERROR');
+    }
+
+    let otaState: OtaJobState | null = null;
+    try {
+      otaState = await this.getOtaJobStatus();
+    } catch (error) {
+      logger.warn('No se pudo obtener el estado OTA actual', { error });
+    }
+
+    const normalizeVersion = (value?: string) => {
+      if (!value) {
+        return '';
+      }
+
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.toLowerCase() === 'unknown') {
+        return '';
+      }
+
+      return trimmed;
+    };
+
+    const currentVersion = normalizeVersion(otaState?.current);
+    const targetVersion = normalizeVersion(otaState?.target);
+    const latestVersionFromResponse = normalizeVersion(response.version);
+
+    const latestVersion = latestVersionFromResponse || targetVersion || currentVersion;
+    const hasUpdate = Boolean(response.available && latestVersionFromResponse && latestVersionFromResponse !== currentVersion);
+
+    return {
+      current: currentVersion,
+      latest: latestVersion,
+      hasUpdate,
+    };
   }
 
   async getOtaJobStatus(): Promise<OtaJobState> {
