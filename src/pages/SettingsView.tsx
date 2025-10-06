@@ -1,5 +1,20 @@
-import { useState, useEffect } from "react";
-import { Settings, Scale, Wifi, Heart, Download, Save, Upload, Trash2, Volume2, CheckCircle2, ClipboardPaste } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  Settings,
+  Scale,
+  Wifi,
+  Heart,
+  Download,
+  Save,
+  Upload,
+  Trash2,
+  Volume2,
+  CheckCircle2,
+  ClipboardPaste,
+  MonitorSpeaker,
+  Globe,
+  BellRing,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -16,6 +31,26 @@ import { cn } from "@/lib/utils";
 import { api, setApiBaseUrl } from "@/services/api";
 import { isLocalClient } from "@/lib/network";
 
+type VoiceBackend = "piper" | "espeak" | "custom";
+
+interface VoiceOption {
+  id: string;
+  label: string;
+  backend: VoiceBackend;
+  description?: string;
+}
+
+interface PiperModelResponse {
+  id?: string;
+  name?: string;
+  path?: string;
+}
+
+interface VoicesResponse {
+  piper_models?: PiperModelResponse[];
+  espeak_available?: boolean;
+}
+
 export const SettingsView = () => {
   const { toast } = useToast();
   const { weight } = useScaleWebSocket();
@@ -27,6 +62,8 @@ export const SettingsView = () => {
   useEffect(() => {
     const settings = storage.getSettings();
     setVoiceEnabled(settings.isVoiceActive);
+    setVoiceId(settings.voiceId);
+    voiceIdRef.current = settings.voiceId;
     setDiabetesMode(settings.diabetesMode);
     setCalibrationFactor(settings.calibrationFactor.toString());
     setDecimals(settings.decimals?.toString() || "1");
@@ -67,6 +104,13 @@ export const SettingsView = () => {
   }, []);
   
   const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [voiceId, setVoiceId] = useState<string | undefined>(undefined);
+  const voiceIdRef = useRef<string | undefined>(undefined);
+  const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
+  const [isLoadingVoices, setIsLoadingVoices] = useState(false);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isTestingDeviceVoice, setIsTestingDeviceVoice] = useState(false);
+  const [isTestingBrowserVoice, setIsTestingBrowserVoice] = useState(false);
   const [diabetesMode, setDiabetesMode] = useState(false);
   const [bolusAssistant, setBolusAssistant] = useState(false);
   
@@ -106,6 +150,18 @@ export const SettingsView = () => {
   const [networkIP2, setNetworkIP2] = useState<string>("—");
   const [internalKeyboardEnabled, setInternalKeyboardEnabled] = useState(localClient);
 
+  const buildApiUrl = useCallback(
+    (path: string) => {
+      try {
+        return new URL(path, apiUrl).toString();
+      } catch (error) {
+        console.error("Invalid API URL", error);
+        return path;
+      }
+    },
+    [apiUrl]
+  );
+
   const handleFeatureFlagToggle = (key: FeatureFlagKey, value: boolean, title: string) => {
     const updated = setFeatureFlag(key, value);
     setFeatureFlags(updated);
@@ -115,14 +171,118 @@ export const SettingsView = () => {
     });
   };
 
+  const loadVoices = useCallback(async () => {
+    if (!featureFlags.voiceSelector) {
+      return;
+    }
+
+    setIsLoadingVoices(true);
+    setVoiceError(null);
+
+    try {
+      const response = await fetch(buildApiUrl('/api/voice/tts/voices'));
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data = (await response.json()) as VoicesResponse;
+      const piperModels = Array.isArray(data.piper_models) ? data.piper_models : [];
+
+      let options: VoiceOption[] = [];
+
+      if (piperModels.length > 0) {
+        options = piperModels
+          .map((model) => {
+            if (!model) {
+              return null;
+            }
+
+            const id =
+              typeof model.id === 'string'
+                ? model.id
+                : typeof model.path === 'string'
+                  ? model.path
+                  : undefined;
+            if (!id) {
+              return null;
+            }
+
+            const readableName = typeof model.name === 'string' && model.name.trim().length > 0 ? model.name : id;
+            const description = typeof model.path === 'string' ? model.path : undefined;
+
+            const option: VoiceOption = {
+              id,
+              label: readableName,
+              backend: 'piper',
+              description: description && description !== readableName ? description : undefined,
+            };
+
+            return option;
+          })
+          .filter((option): option is VoiceOption => option !== null);
+      } else if (data.espeak_available) {
+        options = [
+          {
+            id: 'espeak',
+            label: 'eSpeak NG',
+            backend: 'espeak',
+            description: 'Motor eSpeak NG',
+          },
+        ];
+      }
+
+      const currentVoiceId = voiceIdRef.current;
+      if (currentVoiceId && !options.some((option) => option.id === currentVoiceId)) {
+        options = [
+          {
+            id: currentVoiceId,
+            label: currentVoiceId,
+            backend: 'custom',
+            description: 'Configuración personalizada',
+          },
+          ...options,
+        ];
+      }
+
+      setVoiceOptions(options);
+
+      if (!currentVoiceId && options.length > 0) {
+        const defaultVoice = options[0];
+        setVoiceId(defaultVoice.id);
+        voiceIdRef.current = defaultVoice.id;
+        storage.saveSettings({ voiceId: defaultVoice.id });
+      }
+
+      if (options.length === 0) {
+        setVoiceError('No hay voces disponibles en el servidor');
+      }
+    } catch (error) {
+      console.error('Failed to load voices', error);
+      setVoiceError('No se pudieron cargar las voces disponibles');
+      setVoiceOptions([]);
+    } finally {
+      setIsLoadingVoices(false);
+    }
+  }, [buildApiUrl, featureFlags.voiceSelector]);
+
   // Save settings when they change
   useEffect(() => {
     storage.saveSettings({ isVoiceActive: voiceEnabled });
   }, [voiceEnabled]);
 
   useEffect(() => {
+    voiceIdRef.current = voiceId;
+  }, [voiceId]);
+
+  useEffect(() => {
     storage.saveSettings({ diabetesMode });
   }, [diabetesMode]);
+
+  useEffect(() => {
+    if (featureFlags.voiceSelector) {
+      void loadVoices();
+    }
+  }, [featureFlags.voiceSelector, loadVoices]);
 
   const openKeyboard = (
     title: string,
@@ -324,6 +484,154 @@ export const SettingsView = () => {
     }
   };
 
+  const handleDeviceVoiceTest = async () => {
+    if (!voiceEnabled) {
+      return;
+    }
+
+    setIsTestingDeviceVoice(true);
+    try {
+      const params = new URLSearchParams({ text: "Esta es una prueba" });
+      const selectedVoice = voiceIdRef.current;
+      if (selectedVoice) {
+        params.set("voice", selectedVoice);
+      }
+
+      const response = await fetch(buildApiUrl(`/api/voice/tts/say?${params.toString()}`), {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      toast({
+        title: "Prueba de voz",
+        description: "Se envió la prueba al dispositivo",
+      });
+    } catch (error) {
+      console.error("Device voice test failed", error);
+      toast({
+        title: "Error",
+        description: "No se pudo reproducir la voz en el dispositivo",
+        variant: "destructive",
+      });
+    } finally {
+      setIsTestingDeviceVoice(false);
+    }
+  };
+
+  const handleBrowserVoiceTest = async () => {
+    if (!voiceEnabled) {
+      return;
+    }
+
+    setIsTestingBrowserVoice(true);
+    try {
+      const params = new URLSearchParams({ text: "Esta es una prueba" });
+      const selectedVoice = voiceIdRef.current;
+      if (selectedVoice) {
+        params.set("voice", selectedVoice);
+      }
+
+      const response = await fetch(buildApiUrl(`/api/voice/tts/synthesize?${params.toString()}`), {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const audio = new Audio(objectUrl);
+
+      const cleanup = () => {
+        URL.revokeObjectURL(objectUrl);
+        audio.onended = null;
+        audio.onerror = null;
+      };
+
+      audio.onended = cleanup;
+      audio.onerror = cleanup;
+
+      try {
+        await audio.play();
+      } catch (playError) {
+        cleanup();
+        throw playError;
+      }
+
+      toast({
+        title: "Prueba en navegador",
+        description: "Reproduciendo voz sintetizada",
+      });
+    } catch (error) {
+      console.error("Browser voice test failed", error);
+      toast({
+        title: "Error",
+        description: "No se pudo reproducir la voz en el navegador",
+        variant: "destructive",
+      });
+    } finally {
+      setIsTestingBrowserVoice(false);
+    }
+  };
+
+  const handlePlayBeep = () => {
+    if (!voiceEnabled) {
+      return;
+    }
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const extendedWindow = window as typeof window & {
+      playSound?: (sound: string) => void;
+      webkitAudioContext?: typeof AudioContext;
+    };
+
+    try {
+      if (typeof extendedWindow.playSound === "function") {
+        extendedWindow.playSound("beep");
+        return;
+      }
+
+      const AudioContextClass = window.AudioContext ?? extendedWindow.webkitAudioContext;
+      if (!AudioContextClass) {
+        console.warn("AudioContext no disponible");
+        return;
+      }
+
+      const context = new AudioContextClass();
+      if (context.state === "suspended") {
+        void context.resume().catch(() => undefined);
+      }
+
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+
+      oscillator.type = "sine";
+      oscillator.frequency.setValueAtTime(880, context.currentTime);
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+
+      oscillator.start();
+      gain.gain.exponentialRampToValueAtTime(0.2, context.currentTime + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.4);
+      oscillator.stop(context.currentTime + 0.5);
+
+      oscillator.onended = () => {
+        void context.close().catch(() => undefined);
+      };
+    } catch (error) {
+      console.error("No se pudo reproducir el beep", error);
+    }
+  };
+
   const handleTestChatGPT = async () => {
     setIsTestingChatGPT(true);
     try {
@@ -460,24 +768,83 @@ export const SettingsView = () => {
                 />
               </div>
 
-              <div className="space-y-2">
-                <Label className="text-lg font-medium">Seleccionar Voz</Label>
-                <select className="w-full rounded-lg border border-input bg-background px-4 py-3 text-lg">
-                  <option>Voz Femenina (es-ES)</option>
-                  <option>Voz Masculina (es-ES)</option>
-                </select>
-              </div>
+              {featureFlags.voiceSelector ? (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <Label className="text-lg font-medium">Seleccionar Voz</Label>
+                    <select
+                      className="w-full rounded-lg border border-input bg-background px-4 py-3 text-lg"
+                      value={voiceId ?? ""}
+                      onChange={(event) => {
+                        const value = event.target.value || undefined;
+                        setVoiceId(value);
+                        voiceIdRef.current = value;
+                        storage.saveSettings({ voiceId: value });
+                      }}
+                      disabled={isLoadingVoices || !voiceEnabled || voiceOptions.length === 0}
+                    >
+                      <option value="" disabled>
+                        {isLoadingVoices ? "Cargando voces..." : "Selecciona una voz"}
+                      </option>
+                      {voiceOptions.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                          {option.description ? ` • ${option.description}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                    {voiceError ? (
+                      <p className="text-sm text-destructive">{voiceError}</p>
+                    ) : isLoadingVoices ? (
+                      <p className="text-sm text-muted-foreground">Buscando voces disponibles…</p>
+                    ) : null}
+                  </div>
 
-              <Button 
-                variant="outline" 
-                size="lg" 
-                className="w-full justify-start"
-                onClick={handleTestAudio}
-                disabled={isTestingAudio || !voiceEnabled}
-              >
-                <Volume2 className="mr-2 h-5 w-5" />
-                {isTestingAudio ? "Probando..." : "Probar Audio"}
-              </Button>
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="w-full justify-start"
+                      onClick={handleDeviceVoiceTest}
+                      disabled={isTestingDeviceVoice || !voiceEnabled || isLoadingVoices}
+                    >
+                      <MonitorSpeaker className="mr-2 h-5 w-5" />
+                      {isTestingDeviceVoice ? "Enviando..." : "Probar en dispositivo"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="w-full justify-start"
+                      onClick={handleBrowserVoiceTest}
+                      disabled={isTestingBrowserVoice || !voiceEnabled || isLoadingVoices}
+                    >
+                      <Globe className="mr-2 h-5 w-5" />
+                      {isTestingBrowserVoice ? "Sintetizando..." : "Probar en navegador"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      className="w-full justify-start"
+                      onClick={handlePlayBeep}
+                      disabled={!voiceEnabled}
+                    >
+                      <BellRing className="mr-2 h-5 w-5" />
+                      Beep
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="w-full justify-start"
+                  onClick={handleTestAudio}
+                  disabled={isTestingAudio || !voiceEnabled}
+                >
+                  <Volume2 className="mr-2 h-5 w-5" />
+                  {isTestingAudio ? "Probando..." : "Probar Audio"}
+                </Button>
+              )}
             </div>
           </Card>
 

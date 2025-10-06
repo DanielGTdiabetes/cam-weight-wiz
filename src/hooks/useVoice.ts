@@ -1,5 +1,6 @@
 import { useState, useCallback } from "react";
 import { api } from "@/services/api";
+import { storage } from "@/services/storage";
 
 interface UseVoiceReturn {
   speak: (text: string) => Promise<void>;
@@ -18,7 +19,8 @@ export const useVoice = (enabled: boolean): UseVoiceReturn => {
       try {
         setIsSpeaking(true);
         setError(null);
-        await api.speak(text);
+        const voiceId = storage.getSettings().voiceId;
+        await api.speak(text, voiceId ?? undefined);
       } catch (err) {
         console.error("Failed to speak:", err);
         setError("Error al reproducir voz");
