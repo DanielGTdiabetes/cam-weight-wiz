@@ -65,6 +65,16 @@ export interface GlucoseData {
   timestamp: string;
 }
 
+export interface OtaJobState {
+  status: "idle" | "running" | "success" | "error";
+  started_at: number;
+  finished_at: number;
+  current: string;
+  target: string;
+  message: string;
+  progress: number;
+}
+
 class ApiService {
   constructor() {
     // Update API base URL from settings
@@ -226,8 +236,36 @@ class ApiService {
     return apiWrapper.get<{ current: string; latest: string; hasUpdate: boolean }>('/api/ota/check');
   }
 
-  async installUpdate(): Promise<void> {
-    await apiWrapper.post('/api/updates/install');
+  async getOtaJobStatus(): Promise<OtaJobState> {
+    return apiWrapper.get<OtaJobState>('/api/ota/status');
+  }
+
+  async applyOtaUpdate(target?: string): Promise<{ ok: boolean; job: string }> {
+    const body = target ? { target } : {};
+    return apiWrapper.post<{ ok: boolean; job: string }>('/api/ota/apply', body);
+  }
+
+  async getOtaLogs(lines = 400): Promise<string> {
+    const fallbackOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+    const baseCandidate = apiWrapper.getBaseUrl() || storage.getSettings().apiUrl || fallbackOrigin;
+    const baseUrl = baseCandidate.replace(/\/+$/, '');
+    const url = `${baseUrl}/api/ota/logs?lines=${Math.max(1, lines)}`;
+
+    try {
+      const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+      if (!response.ok) {
+        throw new ApiError(`HTTP ${response.status}`, response.status);
+      }
+      const text = await response.text();
+      logger.debug('OTA logs descargados', { lines });
+      return text;
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      logger.warn('No se pudieron descargar los logs OTA', { error });
+      throw new ApiError('No se pudieron obtener los logs OTA', 0, 'NETWORK_ERROR');
+    }
   }
 
   // Network endpoints

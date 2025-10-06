@@ -3,6 +3,7 @@ import { AlertCircle, RotateCcw, Download, Power } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api } from "@/services/api";
+import { ApiError } from "@/services/apiWrapper";
 import { useToast } from "@/hooks/use-toast";
 
 export const RecoveryMode = () => {
@@ -12,20 +13,27 @@ export const RecoveryMode = () => {
   const handleUpdate = async () => {
     setIsUpdating(true);
     try {
-      await api.installUpdate();
+      await api.applyOtaUpdate();
       toast({
         title: "Actualización iniciada",
-        description: "El sistema se reiniciará en 30 segundos",
+        description: "La reinstalación se está ejecutando en segundo plano",
       });
       setTimeout(() => {
         window.location.reload();
-      }, 30000);
+      }, 15000);
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "No se pudo iniciar la actualización",
-        variant: "destructive",
-      });
+      if (error instanceof ApiError && error.status === 409) {
+        toast({
+          title: "Actualización en curso",
+          description: "Ya hay un proceso de reinstalación activo",
+        });
+      } else {
+        toast({
+          title: "Error",
+          description: "No se pudo iniciar la actualización",
+          variant: "destructive",
+        });
+      }
       setIsUpdating(false);
     }
   };

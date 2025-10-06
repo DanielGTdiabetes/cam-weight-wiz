@@ -33,14 +33,27 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Progress } from "@/components/ui/progress";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
 import { storage } from "@/services/storage";
+import { logger } from "@/services/logger";
 import { FEATURE_FLAG_DEFINITIONS, getFeatureFlags, setFeatureFlag, type FeatureFlagKey, type FeatureFlags } from "@/services/featureFlags";
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { cn } from "@/lib/utils";
-import { api, setApiBaseUrl } from "@/services/api";
+import { api, setApiBaseUrl, type OtaJobState } from "@/services/api";
+import { ApiError } from "@/services/apiWrapper";
 import { isLocalClient } from "@/lib/network";
 
 type VoiceBackend = "piper" | "espeak" | "custom";
@@ -86,6 +99,22 @@ type OtaStatus = {
   current: string;
   latest: string;
   hasUpdate: boolean;
+};
+
+const MAX_OTA_LOG_LINES = 400;
+
+const trimLogLines = (content: string, maxLines = MAX_OTA_LOG_LINES): string => {
+  if (!content) {
+    return "";
+  }
+
+  const normalised = content.replace(/\r\n/g, "\n");
+  const lines = normalised.split("\n");
+  if (lines.length <= maxLines) {
+    return normalised.trimEnd();
+  }
+
+  return lines.slice(-maxLines).join("\n").trimEnd();
 };
 
 export const SettingsView = () => {
@@ -143,7 +172,17 @@ export const SettingsView = () => {
   const [isTestingNightscout, setIsTestingNightscout] = useState(false);
   const [otaStatus, setOtaStatus] = useState<OtaStatus | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
-  const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
+  const [otaJobState, setOtaJobState] = useState<OtaJobState | null>(null);
+  const [otaLogs, setOtaLogs] = useState("");
+  const [otaPanelOpen, setOtaPanelOpen] = useState(false);
+  const [otaApplyDialogOpen, setOtaApplyDialogOpen] = useState(false);
+  const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
+  const [otaTargetOverride, setOtaTargetOverride] = useState("");
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const otaPollIntervalRef = useRef<number | null>(null);
+  const otaSlowPollTimeoutRef = useRef<number | null>(null);
+  const otaLastStatusRef = useRef<OtaJobState["status"] | null>(null);
+  const otaLogsRef = useRef<HTMLDivElement | null>(null);
   const [networkSSID, setNetworkSSID] = useState<string>("—");
   const [networkIP2, setNetworkIP2] = useState<string>("—");
   const [internalKeyboardEnabled, setInternalKeyboardEnabled] = useState(localClient);
@@ -640,6 +679,7 @@ export const SettingsView = () => {
       hyperAlarm,
       networkModalSSID,
       networkModalPassword,
+      otaTargetOverride,
     };
     return values[field] || "";
   };
@@ -660,14 +700,23 @@ export const SettingsView = () => {
       wsUrl: setWsUrl,
       networkModalSSID: setNetworkModalSSID,
       networkModalPassword: setNetworkModalPassword,
+      otaTargetOverride: setOtaTargetOverride,
     };
-    
+
     const setter = setters[keyboardConfig.field];
     if (setter) {
       setter(tempValue);
-      
+
       // Save to storage based on field
       const field = keyboardConfig.field;
+      if (field === "otaTargetOverride") {
+        toast({
+          title: "Objetivo actualizado",
+          description: "Se usará en la próxima actualización OTA",
+        });
+        return;
+      }
+
       if (field === 'calibrationFactor') {
         storage.saveSettings({ calibrationFactor: parseFloat(tempValue) || 1 });
       } else if (field === 'decimals') {
@@ -1028,29 +1077,277 @@ export const SettingsView = () => {
     }
   };
 
-  const handleInstallUpdate = async () => {
-    if (!featureFlags.otaApply || !otaStatus?.hasUpdate) return;
-    
-    if (!confirm("El dispositivo se reiniciará después de la actualización. ¿Continuar?")) {
+  const refreshOtaStatus = useCallback(async () => {
+    if (!featureFlags.otaApply) {
       return;
     }
 
-    setIsInstallingUpdate(true);
     try {
-      await api.installUpdate();
+      const status = await api.getOtaJobStatus();
+      logger.debug("OTA status actualizado", { status });
+      setOtaJobState(status);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        logger.warn("No se pudo obtener estado OTA", {
+          status: error.status,
+          message: error.message,
+        });
+      } else {
+        console.warn("No se pudo obtener estado OTA", error);
+      }
+    }
+  }, [featureFlags.otaApply]);
+
+  const refreshOtaLogs = useCallback(
+    async (lines = MAX_OTA_LOG_LINES) => {
+      if (!featureFlags.otaApply) {
+        return;
+      }
+
+      try {
+        const text = await api.getOtaLogs(lines);
+        logger.debug("OTA logs actualizados", { lines });
+        setOtaLogs(trimLogLines(text, lines));
+      } catch (error) {
+        if (error instanceof ApiError) {
+          logger.warn("No se pudieron obtener logs OTA", {
+            status: error.status,
+            message: error.message,
+          });
+        } else {
+          console.warn("No se pudieron obtener logs OTA", error);
+        }
+      }
+    },
+    [featureFlags.otaApply]
+  );
+
+  const stopOtaEventStream = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+  }, []);
+
+  const stopOtaPolling = useCallback(() => {
+    if (otaPollIntervalRef.current) {
+      window.clearInterval(otaPollIntervalRef.current);
+      otaPollIntervalRef.current = null;
+    }
+    if (otaSlowPollTimeoutRef.current) {
+      window.clearTimeout(otaSlowPollTimeoutRef.current);
+      otaSlowPollTimeoutRef.current = null;
+    }
+  }, []);
+
+  const startOtaPolling = useCallback(
+    (intervalMs: number, lifespanMs?: number) => {
+      stopOtaEventStream();
+      stopOtaPolling();
+
+      void refreshOtaStatus();
+      void refreshOtaLogs();
+
+      otaPollIntervalRef.current = window.setInterval(() => {
+        void refreshOtaStatus();
+        void refreshOtaLogs();
+      }, intervalMs);
+
+      if (lifespanMs) {
+        otaSlowPollTimeoutRef.current = window.setTimeout(() => {
+          stopOtaPolling();
+        }, lifespanMs);
+      }
+    },
+    [refreshOtaLogs, refreshOtaStatus, stopOtaEventStream, stopOtaPolling]
+  );
+
+  const startOtaEventStream = useCallback(() => {
+    stopOtaPolling();
+
+    try {
+      const url = buildApiUrl("/api/ota/events");
+      const source = new EventSource(url);
+      eventSourceRef.current = source;
+
+      source.onopen = () => {
+        logger.debug("SSE OTA conectado");
+        void refreshOtaLogs();
+      };
+
+      source.addEventListener("state", (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data) as OtaJobState;
+          logger.debug("Estado OTA (SSE)", { status: payload.status, progress: payload.progress });
+          setOtaJobState(payload);
+        } catch (error) {
+          logger.warn("No se pudo parsear estado OTA SSE", { error });
+        }
+      });
+
+      source.addEventListener("log", (event) => {
+        try {
+          const payload = JSON.parse((event as MessageEvent).data) as { line?: string };
+          if (payload.line) {
+            setOtaLogs((prev) => {
+              const next = prev ? `${prev}\n${payload.line}` : payload.line;
+              return trimLogLines(next);
+            });
+          }
+        } catch (error) {
+          logger.warn("No se pudo parsear log OTA SSE", { error });
+        }
+      });
+
+      source.onerror = () => {
+        logger.warn("SSE OTA con error, cambiando a polling");
+        stopOtaEventStream();
+        startOtaPolling(1000, 60000);
+      };
+
+      return true;
+    } catch (error) {
+      logger.warn("No se pudo iniciar SSE OTA", { error });
+      stopOtaEventStream();
+      startOtaPolling(1000, 60000);
+      return false;
+    }
+  }, [buildApiUrl, refreshOtaLogs, startOtaPolling, stopOtaEventStream, stopOtaPolling]);
+
+  const handleApplyUpdate = useCallback(async () => {
+    if (!featureFlags.otaApply) {
+      return;
+    }
+
+    const target = otaTargetOverride.trim();
+    setIsApplyingUpdate(true);
+    setOtaPanelOpen(true);
+
+    try {
+      logger.debug("Solicitando OTA apply", { target: target || "latest" });
+      await api.applyOtaUpdate(target || undefined);
       toast({
         title: "Actualización iniciada",
-        description: "El dispositivo se reiniciará en unos momentos",
+        description: "El proceso continúa en segundo plano",
       });
+      await refreshOtaStatus();
+      await refreshOtaLogs();
+      if (!eventSourceRef.current) {
+        startOtaEventStream();
+      }
     } catch (error) {
-      toast({
-        title: "Error",
-        description: "No se pudo instalar la actualización",
-        variant: "destructive",
-      });
-      setIsInstallingUpdate(false);
+      if (error instanceof ApiError && error.status === 409) {
+        toast({
+          title: "Actualización en curso",
+          description: "Ya hay una actualización en curso",
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Error",
+          description: "No se pudo iniciar la actualización",
+          variant: "destructive",
+        });
+      }
+      logger.error("Fallo al solicitar OTA", { error });
+    } finally {
+      setIsApplyingUpdate(false);
     }
-  };
+  }, [api, eventSourceRef, featureFlags.otaApply, otaTargetOverride, refreshOtaLogs, refreshOtaStatus, startOtaEventStream, toast]);
+
+  useEffect(() => {
+    if (!featureFlags.otaApply) {
+      return;
+    }
+
+    if (otaJobState?.status === "running") {
+      setOtaPanelOpen(true);
+    } else if (otaJobState) {
+      setIsApplyingUpdate(false);
+    }
+
+    if (!otaJobState) {
+      return;
+    }
+
+    if (otaLastStatusRef.current !== otaJobState.status) {
+      if (otaJobState.status === "success") {
+        toast({
+          title: "Actualización aplicada",
+          description: "Puedes volver al inicio cuando quieras",
+        });
+      } else if (otaJobState.status === "error") {
+        toast({
+          title: "Actualización fallida",
+          description: otaJobState.message || "Revisa los registros para más detalles",
+          variant: "destructive",
+        });
+      }
+    }
+
+    otaLastStatusRef.current = otaJobState.status;
+  }, [featureFlags.otaApply, otaJobState, toast]);
+
+  useEffect(() => {
+    if (!featureFlags.otaApply) {
+      stopOtaEventStream();
+      stopOtaPolling();
+      return;
+    }
+
+    const shouldStream = otaPanelOpen || otaJobState?.status === "running";
+    if (shouldStream) {
+      if (!eventSourceRef.current) {
+        const started = startOtaEventStream();
+        if (!started) {
+          startOtaPolling(1000, 60000);
+        }
+      }
+    } else {
+      stopOtaEventStream();
+      stopOtaPolling();
+    }
+  }, [eventSourceRef, featureFlags.otaApply, otaJobState?.status, otaPanelOpen, startOtaEventStream, startOtaPolling, stopOtaEventStream, stopOtaPolling]);
+
+  useEffect(() => {
+    if (!featureFlags.otaApply) {
+      setOtaJobState(null);
+      setOtaLogs("");
+      setOtaPanelOpen(false);
+      setOtaApplyDialogOpen(false);
+      otaLastStatusRef.current = null;
+      return;
+    }
+
+    void refreshOtaStatus();
+  }, [featureFlags.otaApply, refreshOtaStatus]);
+
+  useEffect(() => {
+    if (!featureFlags.otaApply) {
+      return;
+    }
+
+    if (otaPanelOpen || otaJobState?.status === "running") {
+      void refreshOtaLogs();
+    }
+  }, [featureFlags.otaApply, otaJobState?.status, otaPanelOpen, refreshOtaLogs]);
+
+  useEffect(() => {
+    if (!otaPanelOpen) {
+      return;
+    }
+    const container = otaLogsRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [otaLogs, otaPanelOpen]);
+
+  useEffect(() => {
+    return () => {
+      stopOtaEventStream();
+      stopOtaPolling();
+    };
+  }, [stopOtaEventStream, stopOtaPolling]);
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -1723,35 +2020,85 @@ export const SettingsView = () => {
                       <p className="font-medium text-primary">
                         📦 Nueva versión disponible: {formatVersion(otaStatus.latest)}
                       </p>
-                      {featureFlags.otaApply ? (
-                        <Button
-                          variant="glow"
-                          size="lg"
-                          className="w-full"
-                          onClick={handleInstallUpdate}
-                          disabled={isInstallingUpdate}
-                        >
-                          {isInstallingUpdate ? (
-                            <>
-                              <Download className="mr-2 h-5 w-5 animate-spin" />
-                              Instalando...
-                            </>
-                          ) : (
-                            <>
-                              <Download className="mr-2 h-5 w-5" />
-                              Instalar Actualización
-                            </>
-                          )}
-                        </Button>
-                      ) : (
-                        <p className="text-sm text-muted-foreground">
-                          La instalación automática estará disponible próximamente.
-                        </p>
-                      )}
+                      <p className="text-sm text-muted-foreground">
+                        Usa la sección inferior para aplicar la actualización cuando estés listo.
+                      </p>
                     </div>
                   ) : (
                     <p className="font-medium text-success">✓ El sistema está actualizado</p>
                   )}
+                </div>
+              )}
+
+              {featureFlags.otaApply && (
+                <div className="space-y-4 rounded-lg border border-primary/40 bg-primary/5 p-4">
+                  <div className="grid gap-3 md:grid-cols-[2fr,1fr] md:items-end">
+                    <div className="space-y-2">
+                      <Label className="text-sm font-medium">Objetivo de actualización (opcional)</Label>
+                      <Input
+                        value={otaTargetOverride}
+                        placeholder="tag o commit"
+                        readOnly={internalKeyboardEnabled}
+                        onClick={() => {
+                          if (!internalKeyboardEnabled) {
+                            return;
+                          }
+                          openKeyboard(
+                            "Objetivo OTA",
+                            "text",
+                            "otaTargetOverride",
+                            false,
+                            undefined,
+                            undefined,
+                            false,
+                            80
+                          );
+                        }}
+                        onChange={(event) => {
+                          if (internalKeyboardEnabled) {
+                            return;
+                          }
+                          setOtaTargetOverride(event.target.value);
+                        }}
+                        className={cn("text-lg", internalKeyboardEnabled && "cursor-pointer")}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Déjalo vacío para aplicar la última versión disponible.
+                      </p>
+                    </div>
+                    <Button
+                      variant="glow"
+                      size="lg"
+                      className="w-full"
+                      onClick={() => setOtaApplyDialogOpen(true)}
+                      disabled={isApplyingUpdate || otaJobState?.status === "running"}
+                    >
+                      {isApplyingUpdate || otaJobState?.status === "running" ? (
+                        <>
+                          <Loader2 className="mr-2 h-5 w-5 animate-spin" />
+                          Aplicando...
+                        </>
+                      ) : (
+                        <>
+                          <Download className="mr-2 h-5 w-5" />
+                          Aplicar actualización
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  {otaJobState?.status === "running" && (
+                    <div className="flex items-center gap-2 text-warning">
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span>
+                        Actualización en progreso ({otaJobState.progress}%){otaJobState.message ? ` — ${otaJobState.message}` : ""}
+                      </span>
+                    </div>
+                  )}
+
+                  <p className="text-xs text-muted-foreground">
+                    La interfaz puede parpadear durante el proceso. Si pierdes la conexión, vuelve a abrir Ajustes &gt; OTA para reanudar el seguimiento.
+                  </p>
                 </div>
               )}
 
@@ -1764,6 +2111,139 @@ export const SettingsView = () => {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <AlertDialog open={otaApplyDialogOpen} onOpenChange={setOtaApplyDialogOpen}>
+        <AlertDialogContent className="max-w-xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Aplicar actualización OTA</AlertDialogTitle>
+            <AlertDialogDescription>
+              El sistema seguirá funcionando mientras se instala la actualización, pero la interfaz puede parpadear o recargar la página.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2 text-sm text-muted-foreground">
+            <p>
+              La instalación reiniciará servicios críticos y puede tardar varios minutos. Asegúrate de no desconectar la báscula.
+            </p>
+            <p>
+              Puedes seguir el progreso y revisar los registros en la ventana de actualización.
+            </p>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setOtaApplyDialogOpen(false);
+                void handleApplyUpdate();
+              }}
+            >
+              Confirmar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <Dialog
+        open={otaPanelOpen}
+        onOpenChange={(open) => {
+          if (otaJobState?.status === "running" && !open) {
+            return;
+          }
+          setOtaPanelOpen(open);
+        }}
+      >
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="text-3xl">Progreso de actualización OTA</DialogTitle>
+            <DialogDescription>
+              Seguimiento en tiempo real del proceso de actualización.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <div>
+                <span className="font-semibold">Estado:</span>{" "}
+                <span
+                  className={cn(
+                    otaJobState?.status === "success" && "text-success",
+                    otaJobState?.status === "error" && "text-destructive",
+                    otaJobState?.status === "running" && "text-warning"
+                  )}
+                >
+                  {otaJobState?.status ?? "idle"}
+                </span>
+              </div>
+              <div>
+                <span className="font-semibold">Actual:</span>{" "}
+                <span className="font-mono">{otaJobState?.current || "—"}</span>
+              </div>
+              <div>
+                <span className="font-semibold">Objetivo:</span>{" "}
+                <span className="font-mono">{otaJobState?.target || "—"}</span>
+              </div>
+            </div>
+
+            <Progress value={otaJobState?.progress ?? 0} className="h-3" aria-label="Progreso de actualización" />
+
+            {otaJobState?.message && (
+              <div
+                className={cn(
+                  "rounded border p-3 text-sm",
+                  otaJobState.status === "error"
+                    ? "border-destructive/40 bg-destructive/10 text-destructive"
+                    : "border-muted bg-muted/30 text-muted-foreground"
+                )}
+              >
+                {otaJobState.message}
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Registros recientes</Label>
+              <div
+                ref={otaLogsRef}
+                className="max-h-64 overflow-y-auto rounded border border-border/60 bg-black/80 p-3 font-mono text-[11px] leading-5 text-emerald-200"
+              >
+                {otaLogs ? (
+                  otaLogs.split("\n").map((line, index) => (
+                    <div key={index} className="whitespace-pre-wrap">
+                      {line || "\u00a0"}
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-muted-foreground">Sin registros disponibles todavía.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-dashed border-muted-foreground/40 bg-muted/20 p-3 text-xs text-muted-foreground">
+              <p className="font-semibold text-foreground">Rollback manual</p>
+              <p>En caso de necesitar volver a la versión anterior, ejecuta:</p>
+              <pre className="mt-2 whitespace-pre-wrap font-mono text-[11px] leading-5 text-foreground">
+{`sudo ln -sfn /opt/bascula/releases/<anterior> /opt/bascula/current
+sudo systemctl daemon-reload
+sudo systemctl restart bascula-miniweb bascula-app`}
+              </pre>
+            </div>
+          </div>
+
+          <DialogFooter className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setOtaPanelOpen(false)}
+              disabled={otaJobState?.status === "running"}
+            >
+              Cerrar
+            </Button>
+            {otaJobState?.status === "error" && (
+              <Button type="button" variant="glow" onClick={() => setOtaApplyDialogOpen(true)}>
+                Reintentar
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={networkModalOpen}
