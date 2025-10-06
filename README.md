@@ -40,6 +40,20 @@ Tras el reinicio:
 - El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 - Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
 
+### Configuración de audio (HifiBerry + micro USB)
+
+El instalador configura ALSA para priorizar la salida HifiBerry (card 1, `hw:1,0`) y el micrófono USB como captura por defecto. Se escribe `/etc/asound.conf` con los defaults globales y se instalan las utilidades necesarias (`alsa-utils`, `pulseaudio`, `sox`, `ffmpeg`) para poder probar TTS/STT de inmediato. 【F:scripts/install-all.sh†L212-L276】【F:scripts/install-all.sh†L640-L690】
+
+Tras reiniciar, valida el audio ejecutando desde la Raspberry Pi:
+
+```bash
+aplay -D hw:1,0 /usr/share/sounds/alsa/Front_Center.wav
+arecord -D hw:0,0 -f cd -c1 -r 44100 test.wav
+aplay -D hw:1,0 test.wav
+```
+
+Si cualquiera de los comandos falla, revisa `/etc/asound.conf` y que `aplay -l` detecte la tarjeta HifiBerry como `card 1` y el micrófono USB como `card 0`. 【F:scripts/install-all.sh†L212-L276】
+
 ### Dependencias Python críticas
 
 El backend y la miniweb requieren una serie de librerías que ahora se instalan desde `requirements.txt`. 【F:requirements.txt†L1-L20】

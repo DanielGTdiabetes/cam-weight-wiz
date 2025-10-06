@@ -1,7 +1,7 @@
 [Unit]
 Description=Bascula Digital Pro - UI (Chromium kiosk)
-After=systemd-user-sessions.service network-online.target bascula-miniweb.service
-Wants=network-online.target bascula-miniweb.service
+After=systemd-user-sessions.service network-online.target sound.target bascula-miniweb.service
+Wants=network-online.target sound.target bascula-miniweb.service
 Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
@@ -24,6 +24,9 @@ StandardOutput=journal
 StandardError=journal
 PermissionsStartOnly=yes
 ExecStartPre=-/usr/bin/chvt 1
+ExecStartPre=/usr/bin/mkdir -p /var/log/bascula
+ExecStartPre=/usr/bin/test -f /var/log/bascula/ui.log || /usr/bin/install -o pi -g pi -m 0644 /dev/null /var/log/bascula/ui.log
+ExecStartPre=/usr/bin/chown pi:pi /var/log/bascula/ui.log
 ExecStart=/opt/bascula/current/scripts/start-kiosk-wrapper.sh
 Restart=always
 RestartSec=5
