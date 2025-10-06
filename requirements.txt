@@ -1,0 +1,21 @@
+# Dependencias críticas para los servicios Python de Báscula
+aiofiles
+fastapi
+httpx
+numpy
+opencv-python
+picamera2
+piper-tts
+pillow
+pydantic
+pytesseract
+python-multipart
+pyserial
+pyzbar
+rapidfuzz>=3.0,<4.0
+rapidocr-onnxruntime
+requests
+sounddevice
+uvicorn[standard]
+vosk
+websockets
