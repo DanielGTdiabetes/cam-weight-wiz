@@ -105,6 +105,21 @@ export interface WakeEvent {
   simulated?: boolean;
 }
 
+export type MiniwebStatus = {
+  ok: boolean;
+  mode: "ap" | "kiosk";
+  wifi: {
+    connected: boolean;
+    ssid?: string | null;
+    ip?: string | null;
+  };
+  ap_active?: boolean;
+  connectivity?: string;
+  ssid?: string | null;
+  ip?: string | null;
+  ip_address?: string | null;
+} & Record<string, unknown>;
+
 class ApiService {
   constructor() {
     // Update API base URL from settings
@@ -362,6 +377,10 @@ class ApiService {
   // Network endpoints
   async getNetworkStatus(): Promise<{ ip: string; ssid?: string }> {
     return apiWrapper.get<{ ip: string; ssid?: string }>('/api/network/status');
+  }
+
+  async miniwebStatus(): Promise<MiniwebStatus> {
+    return apiWrapper.get<MiniwebStatus>('/api/miniweb/status');
   }
 }
 
