@@ -13,11 +13,24 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
+type ApInfo = {
+  ssid: string;
+  ip: string;
+  httpPort: number;
+  configPath?: string;
+};
+
+const DEFAULT_AP_INFO: ApInfo = {
+  ssid: "Bascula-AP",
+  ip: "192.168.4.1",
+  httpPort: 8080,
+  configPath: "/config",
+};
+
 export const APModeScreen = () => {
-  const apSSID = "Bascula-Setup";
   const apPassword = "Bascula1234";
-  const appURL = "http://192.168.4.1:8080";
-  const configURL = "http://192.168.4.1:8080/config";
+  const [apInfo, setApInfo] = useState<ApInfo | null>(null);
+  const [apInfoLoading, setApInfoLoading] = useState(true);
   const [miniWebPin, setMiniWebPin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
   const [verifyState, setVerifyState] = useState<{
@@ -26,6 +39,72 @@ export const APModeScreen = () => {
     code?: string;
     ip?: string;
   }>({ status: "idle" });
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchApInfo = async () => {
+      setApInfoLoading(true);
+      try {
+        const response = await fetch("/api/ap/info", { cache: "no-store" });
+        if (!response.ok) {
+          throw new Error(`Failed to load AP info: ${response.status}`);
+        }
+        const payload = (await response.json()) as Record<string, unknown>;
+        if (cancelled) return;
+
+        const ssid =
+          typeof payload.ssid === "string" && payload.ssid.trim()
+            ? payload.ssid.trim()
+            : DEFAULT_AP_INFO.ssid;
+
+        let httpPortCandidate: number | undefined;
+        if (typeof payload.httpPort === "number") {
+          httpPortCandidate = payload.httpPort;
+        } else if (typeof payload.httpPort === "string") {
+          const parsed = Number.parseInt(payload.httpPort, 10);
+          if (Number.isFinite(parsed)) {
+            httpPortCandidate = parsed;
+          }
+        }
+
+        const httpPort =
+          typeof httpPortCandidate === "number" && Number.isFinite(httpPortCandidate) && httpPortCandidate > 0
+            ? httpPortCandidate
+            : DEFAULT_AP_INFO.httpPort;
+
+        const ip =
+          typeof payload.ip === "string" && payload.ip.trim()
+            ? payload.ip.trim()
+            : DEFAULT_AP_INFO.ip;
+
+        const configPathCandidate =
+          typeof payload.configPath === "string" && payload.configPath.trim()
+            ? payload.configPath.trim()
+            : DEFAULT_AP_INFO.configPath;
+
+        setApInfo({
+          ssid,
+          ip,
+          httpPort,
+          configPath: configPathCandidate,
+        });
+      } catch (error) {
+        if (cancelled) return;
+        setApInfo({ ...DEFAULT_AP_INFO });
+      } finally {
+        if (!cancelled) {
+          setApInfoLoading(false);
+        }
+      }
+    };
+
+    fetchApInfo();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -82,6 +161,21 @@ export const APModeScreen = () => {
 
     window.location.href = "/";
   };
+
+  const effectiveApInfo = apInfo ?? DEFAULT_AP_INFO;
+  const configPathRaw =
+    typeof effectiveApInfo.configPath === "string" && effectiveApInfo.configPath.trim()
+      ? effectiveApInfo.configPath.trim()
+      : DEFAULT_AP_INFO.configPath ?? "/config";
+  const normalizedConfigPath = configPathRaw.startsWith("/")
+    ? configPathRaw
+    : `/${configPathRaw}`;
+  const baseUrl = `http://${effectiveApInfo.ip}:${effectiveApInfo.httpPort}`;
+  const configUrl = `${baseUrl}${normalizedConfigPath}`;
+  const displaySsid = apInfoLoading ? "Cargando…" : effectiveApInfo.ssid;
+  const defaultBaseUrl = `http://${DEFAULT_AP_INFO.ip}:${DEFAULT_AP_INFO.httpPort}`;
+  const displayBaseUrl = apInfoLoading ? defaultBaseUrl : baseUrl;
+  const displayConfigUrl = apInfoLoading ? `${defaultBaseUrl}${normalizedConfigPath}` : configUrl;
 
   const handleVerifyWifi = async () => {
     setVerifyState({ status: "checking" });
@@ -155,9 +249,17 @@ export const APModeScreen = () => {
             </div>
           </div>
           <h1 className="mb-4 text-4xl font-bold">Modo Punto de Acceso</h1>
-          <p className="text-xl text-muted-foreground">
-            Conéctate a <strong>{apSSID}</strong> y abre {configURL}
-          </p>
+          <div className="space-y-1 text-muted-foreground">
+            <p className="text-xl">
+              Conéctate a la Wi-Fi «<strong>{displaySsid}</strong>».
+            </p>
+            <p className="text-lg">
+              Abre: <strong>{displayConfigUrl}</strong>
+            </p>
+            <p className="text-sm">
+              Nota: {displayBaseUrl} abre la app; para configurar usa /config.
+            </p>
+          </div>
         </div>
 
         <div className="mb-8 space-y-6">
@@ -167,7 +269,7 @@ export const APModeScreen = () => {
             <div className="space-y-3">
               <div>
                 <p className="text-sm text-muted-foreground">Nombre de Red (SSID):</p>
-                <p className="text-2xl font-bold text-primary">{apSSID}</p>
+                <p className="text-2xl font-bold text-primary">{displaySsid}</p>
               </div>
               <div>
                 <p className="text-sm text-muted-foreground">Contraseña:</p>
@@ -202,9 +304,7 @@ export const APModeScreen = () => {
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   1
                 </span>
-                <p>
-                  Conecta tu móvil, tablet u ordenador a la Wi-Fi <strong>{apSSID}</strong>
-                </p>
+                <p>Conéctate a la Wi-Fi «<strong>{displaySsid}</strong>».</p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
@@ -217,7 +317,7 @@ export const APModeScreen = () => {
                   3
                 </span>
                 <p>
-                  Abre un navegador y escribe: <strong>{configURL}</strong>
+                  Abre: <strong>{displayConfigUrl}</strong>
                 </p>
               </li>
               <li className="flex gap-3">
@@ -239,7 +339,7 @@ export const APModeScreen = () => {
               Escanea para abrir la mini-web de configuración
             </p>
             <p className="mt-2 text-xs font-mono text-muted-foreground">
-              {configURL}
+              {displayConfigUrl}
             </p>
           </div>
         </div>
@@ -251,7 +351,7 @@ export const APModeScreen = () => {
               <div className="space-y-1 text-sm">
                 <p className="font-semibold text-warning-foreground">Recuerda:</p>
                 <p className="text-warning-foreground/80">
-                  {appURL} abre la app principal (esta pantalla). Para configurar la red usa siempre {configURL}.
+                  {displayBaseUrl} abre la app principal (esta pantalla). Para configurar la red usa siempre {displayConfigUrl}.
                 </p>
               </div>
             </div>
