@@ -1791,7 +1791,7 @@ export const SettingsView = () => {
                     <div className="space-y-1">
                       <p className="font-semibold text-warning-foreground">Modo recuperación activo</p>
                       <p className="text-sm text-warning-foreground/80">
-                        La báscula está emitiendo la Wi-Fi "Bascula-Setup". Usa la mini-web para conectarla a tu red habitual.
+                        La báscula está emitiendo la Wi-Fi "Bascula-AP". Usa la mini-web para conectarla a tu red habitual.
                       </p>
                     </div>
                   </div>

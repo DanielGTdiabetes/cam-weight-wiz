@@ -17,6 +17,7 @@ import threading
 import shlex
 import tempfile
 import traceback
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple
@@ -75,6 +76,10 @@ AP_CONNECTION_ID = "BasculaAP"
 AP_DEFAULT_SSID = "Bascula-AP"
 AP_DEFAULT_PASSWORD = "Bascula1234"
 WIFI_INTERFACE = "wlan0"
+AP_NM_PROFILE_PATH = BASE_DIR / "system" / "os" / "nm" / "BasculaAP.nmconnection"
+AP_ENSURE_SCRIPT_PATH = BASE_DIR / "system" / "os" / "bascula-ap-ensure.sh"
+AP_DEFAULT_IP = "192.168.4.1"
+AP_DEFAULT_CONFIG_PATH = "/config"
 
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1670,6 +1675,72 @@ def _nm_has_saved_wifi_profiles() -> bool:
         if typ == "802-11-wireless" and autoconnect.lower() == "yes":
             return True
     return False
+
+
+def _read_nm_ap_ssid() -> Optional[str]:
+    path = AP_NM_PROFILE_PATH
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        LOG_NETWORK.debug("Failed to read AP nmconnection: %s", exc)
+        return None
+
+    section: Optional[str] = None
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            continue
+        if section == "wifi":
+            key, sep, value = line.partition("=")
+            if key.strip().lower() == "ssid" and sep:
+                ssid = value.strip()
+                if ssid:
+                    return ssid
+    return None
+
+
+def _read_script_ap_ssid() -> Optional[str]:
+    path = AP_ENSURE_SCRIPT_PATH
+    try:
+        content = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        LOG_NETWORK.debug("Failed to read AP ensure script: %s", exc)
+        return None
+
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if not line.startswith("AP_SSID"):
+            continue
+
+        default_match = re.search(r"\$\{AP_SSID:-([^}]+)\}", line)
+        if default_match:
+            candidate = default_match.group(1).strip()
+            if candidate:
+                return candidate
+
+        simple_match = re.search(r"AP_SSID\s*=\s*['\"]([^'\"]+)['\"]", line)
+        if simple_match:
+            candidate = simple_match.group(1).strip()
+            if candidate and not candidate.startswith("${"):
+                return candidate
+    return None
+
+
+def _resolve_ap_ssid() -> str:
+    for reader in (_read_nm_ap_ssid, _read_script_ap_ssid):
+        value = reader()
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return AP_DEFAULT_SSID
 
 
 def _ap_active() -> bool:
@@ -3393,6 +3464,23 @@ async def disable_ap():
 
     return {"ok": True}
 
+@app.get("/api/ap/info")
+async def ap_info():
+    ssid = _resolve_ap_ssid()
+    ip = _get_iface_ip(WIFI_INTERFACE) or AP_DEFAULT_IP
+    http_port = 8080
+    config_path = AP_DEFAULT_CONFIG_PATH
+
+    payload: Dict[str, Any] = {
+        "ssid": ssid,
+        "ip": ip,
+        "httpPort": http_port,
+    }
+    if config_path:
+        payload["configPath"] = config_path
+    return payload
+
+
 @app.get("/api/network/status")
 async def network_status():
     eth_up = _iface_has_carrier("eth0")
@@ -3401,7 +3489,7 @@ async def network_status():
     status = {
         "ethernet": {"carrier": eth_up, "ip": ip_eth},
         "wifi_client": {"connected": _wifi_client_connected(), "ip": ip_wlan},
-        "ap": {"active": _ap_active(), "ssid": AP_DEFAULT_SSID},
+        "ap": {"active": _ap_active(), "ssid": _resolve_ap_ssid()},
     }
     best_ip = ip_eth or ip_wlan or "192.168.12.1"
     status["bascula_url"] = f"http://{best_ip}:8080"
