@@ -110,6 +110,7 @@ export interface BackendSettingsPayload {
 }
 
 export interface BackendSettingsUpdate {
+  pin?: string;
   openai?: { apiKey?: string | null };
   nightscout?: { url?: string | null; token?: string | null };
   ui?: Record<string, unknown>;
@@ -347,18 +348,27 @@ class ApiService {
     return apiWrapper.post<BackendSettingsPayload>('/api/settings', payload);
   }
 
-  async testOpenAI(apiKey?: string): Promise<IntegrationTestResponse> {
-    const body = apiKey ? { apiKey } : {};
+  async testOpenAI(apiKey?: string, pin?: string): Promise<IntegrationTestResponse> {
+    const body: Record<string, string> = {};
+    if (apiKey) {
+      body.apiKey = apiKey;
+    }
+    if (pin) {
+      body.pin = pin;
+    }
     return apiWrapper.post<IntegrationTestResponse>('/api/settings/test/openai', body);
   }
 
-  async testNightscout(url?: string, token?: string): Promise<IntegrationTestResponse> {
+  async testNightscout(url?: string, token?: string, pin?: string): Promise<IntegrationTestResponse> {
     const payload: Record<string, string> = {};
     if (url) {
       payload.url = url;
     }
     if (token) {
       payload.token = token;
+    }
+    if (pin) {
+      payload.pin = pin;
     }
     return apiWrapper.post<IntegrationTestResponse>('/api/settings/test/nightscout', payload);
   }

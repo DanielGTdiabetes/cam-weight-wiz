@@ -107,6 +107,39 @@ AP_ENSURE_SCRIPT_PATH = BASE_DIR / "system" / "os" / "bascula-ap-ensure.sh"
 AP_DEFAULT_IP = "192.168.4.1"
 AP_DEFAULT_CONFIG_PATH = "/config"
 
+
+def _parse_trusted_hosts(raw: str | None) -> Set[str]:
+    if not raw:
+        return set()
+    hosts: Set[str] = set()
+    for chunk in raw.split(","):
+        value = chunk.strip()
+        if not value:
+            continue
+        hosts.add(value)
+    return hosts
+
+
+def _parse_trusted_networks(raw: str | None) -> Set[ipaddress._BaseNetwork]:
+    networks: Set[ipaddress._BaseNetwork] = set()
+    if not raw:
+        return networks
+    for chunk in raw.split(","):
+        candidate = chunk.strip()
+        if not candidate:
+            continue
+        try:
+            network = ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            LOG_NETWORK.warning("Ignorando red confiable inválida: %s", candidate)
+            continue
+        networks.add(network)
+    return networks
+
+
+_TRUSTED_HOSTS = _parse_trusted_hosts(os.getenv("BASCULA_MINIWEB_TRUSTED_HOSTS"))
+_TRUSTED_NETWORKS = _parse_trusted_networks(os.getenv("BASCULA_MINIWEB_TRUSTED_SUBNETS"))
+
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---------- Estado global ----------
@@ -2370,8 +2403,56 @@ def _is_ap_active() -> bool:
     return _is_ap_mode_legacy()
 
 
+def _extract_client_host(request: Request) -> Optional[str]:
+    forwarded_for = request.headers.get("x-forwarded-for") if request.headers else None
+    if forwarded_for:
+        primary = forwarded_for.split(",")[0].strip()
+        if primary:
+            return primary
+    real_ip = request.headers.get("x-real-ip") if request.headers else None
+    if real_ip:
+        candidate = real_ip.strip()
+        if candidate:
+            return candidate
+    if request.client and request.client.host:
+        return request.client.host
+    return None
+
+
+def _host_in_trusted_set(host: str) -> bool:
+    normalized = host.strip()
+    if not normalized:
+        return False
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    if normalized in _TRUSTED_HOSTS:
+        return True
+    try:
+        ip_obj = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    if ip_obj.is_loopback:
+        return True
+    for network in _TRUSTED_NETWORKS:
+        if ip_obj in network:
+            return True
+    return False
+
+
+def _is_trusted_client(client_host: Optional[str]) -> bool:
+    if not client_host:
+        return False
+    if _host_in_trusted_set(client_host):
+        return True
+    mapped = client_host
+    if client_host.startswith("::ffff:"):
+        mapped = client_host.split(":")[-1]
+        return _host_in_trusted_set(mapped)
+    return False
+
+
 def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
-    if client_host in {"127.0.0.1", "::1"}:
+    if _is_trusted_client(client_host):
         return True
     if os.getenv("BASCULA_ALLOW_PIN_READ", "0") == "1":
         return True
@@ -3218,12 +3299,14 @@ class WifiCredentials(BaseModel):
     secured: Optional[bool] = None
     open: Optional[bool] = None
     sec: Optional[str] = None
+    pin: Optional[str] = None
 
 
 class NetworkConnectRequest(BaseModel):
     ssid: str
     psk: Optional[str] = None
     open: Optional[bool] = None
+    pin: Optional[str] = None
 
 
 class OpenAISettingsPayload(BaseModel):
@@ -3237,14 +3320,17 @@ class NightscoutSettingsPayload(BaseModel):
 
 class SettingsTestOpenAI(BaseModel):
     apiKey: Optional[str] = None
+    pin: Optional[str] = None
 
 
 class SettingsTestNightscout(BaseModel):
     url: Optional[str] = None
     token: Optional[str] = None
+    pin: Optional[str] = None
 
 
 class SettingsUpdatePayload(BaseModel):
+    pin: Optional[str] = None
     openai: Optional[OpenAISettingsPayload] = None
     nightscout: Optional[NightscoutSettingsPayload] = None
     ui: Optional[Dict[str, Any]] = None
@@ -3277,14 +3363,43 @@ def _register_fail(ip: str):
     FAILED_ATTEMPTS.setdefault(ip, []).append(datetime.utcnow())
 
 
+def _clear_failures(ip: str):
+    if ip in FAILED_ATTEMPTS:
+        FAILED_ATTEMPTS.pop(ip, None)
+
+
+def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str]) -> None:
+    client_host = _extract_client_host(request)
+    if _is_trusted_client(client_host):
+        return
+
+    pin = (provided_pin or "").strip()
+    if not pin:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "pin_required", "message": "PIN requerido para cambios remotos"},
+        )
+
+    ip_key = client_host or "unknown"
+    _check_rate_limit(ip_key)
+    if pin != CURRENT_PIN:
+        _register_fail(ip_key)
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "invalid_pin", "message": "PIN incorrecto"},
+        )
+
+    _clear_failures(ip_key)
+
+
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"ok": True}
 
 
 @app.get("/api/miniweb/pin")
 async def get_pin(request: Request):
-    client_host = request.client.host if request.client else ""
+    client_host = _extract_client_host(request)
     if _allow_pin_disclosure(client_host):
         return {"pin": CURRENT_PIN}
     raise HTTPException(status_code=403, detail="Not allowed")
@@ -3292,9 +3407,12 @@ async def get_pin(request: Request):
 
 @app.post("/api/miniweb/verify-pin")
 async def verify_pin(data: PinVerification, request: Request):
-    ip = request.client.host if request.client else "unknown"
+    client_host = _extract_client_host(request)
+    ip = client_host or "unknown"
     _check_rate_limit(ip)
-    if data.pin == CURRENT_PIN:
+    pin = (data.pin or "").strip()
+    if pin == CURRENT_PIN:
+        _clear_failures(ip)
         return {"success": True}
     _register_fail(ip)
     raise HTTPException(status_code=403, detail="Invalid PIN")
@@ -3307,7 +3425,15 @@ async def get_settings():
 
 
 @app.post("/api/settings")
-async def update_settings(payload: SettingsUpdatePayload):
+async def update_settings(payload: SettingsUpdatePayload, request: Request):
+    client_host = _extract_client_host(request)
+    requires_pin = any(
+        getattr(payload, field) is not None
+        for field in ("openai", "nightscout", "ui", "tts", "scale", "serial", "integrations", "network")
+    )
+    if requires_pin or (payload.pin is not None and not _is_trusted_client(client_host)):
+        _ensure_pin_valid_for_request(request, payload.pin)
+
     config = _load_config()
     changed = False
 
@@ -3409,7 +3535,8 @@ async def update_settings(payload: SettingsUpdatePayload):
 
 
 @app.post("/api/settings/test/openai")
-async def settings_test_openai(payload: SettingsTestOpenAI):
+async def settings_test_openai(payload: SettingsTestOpenAI, request: Request):
+    _ensure_pin_valid_for_request(request, payload.pin)
     config = _load_config()
     candidate_key = (payload.apiKey or "").strip()
     api_key = candidate_key or _extract_openai_api_key(config)
@@ -3452,7 +3579,8 @@ async def settings_test_openai(payload: SettingsTestOpenAI):
 
 
 @app.post("/api/settings/test/nightscout")
-async def settings_test_nightscout(payload: SettingsTestNightscout):
+async def settings_test_nightscout(payload: SettingsTestNightscout, request: Request):
+    _ensure_pin_valid_for_request(request, payload.pin)
     config = _load_config()
     url, token = _extract_nightscout_credentials(config)
     candidate_url = (payload.url or "").strip()
@@ -3787,17 +3915,20 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
 
 @app.post("/api/miniweb/connect")
 @app.post("/api/miniweb/connect-wifi")
-async def connect_wifi(credentials: WifiCredentials):
+async def connect_wifi(credentials: WifiCredentials, request: Request):
+    _ensure_pin_valid_for_request(request, credentials.pin)
     return await _handle_wifi_connect(credentials)
 
 
 @app.post("/api/network/connect")
-async def network_connect(payload: NetworkConnectRequest):
+async def network_connect(payload: NetworkConnectRequest, request: Request):
     creds = WifiCredentials(
         ssid=payload.ssid,
         password=payload.psk,
         open=payload.open,
+        pin=payload.pin,
     )
+    _ensure_pin_valid_for_request(request, payload.pin)
     return await _handle_wifi_connect(creds)
 
 
