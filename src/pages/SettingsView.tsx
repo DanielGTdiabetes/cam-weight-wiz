@@ -14,6 +14,8 @@ import {
   MonitorSpeaker,
   Globe,
   BellRing,
+  AlertCircle,
+  Info,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -22,6 +24,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
 import { storage } from "@/services/storage";
@@ -52,60 +62,17 @@ interface VoicesResponse {
   espeak_available?: boolean;
 }
 
+type NetworkModalStatus = {
+  type: "idle" | "info" | "error" | "success";
+  message: string;
+};
+
 export const SettingsView = () => {
   const { toast } = useToast();
   const { weight } = useScaleWebSocket();
   const localClient = isLocalClient();
   const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags>(() => getFeatureFlags());
-  
-  // Load settings on mount
-  useEffect(() => {
-    const settings = storage.getSettings();
-    setVoiceEnabled(settings.isVoiceActive);
-    setVoiceId(settings.voiceId);
-    voiceIdRef.current = settings.voiceId;
-    setDiabetesMode(settings.diabetesMode);
-    setCalibrationFactor(settings.calibrationFactor.toString());
-    setDecimals(settings.decimals?.toString() || "1");
-    setApiUrl(settings.apiUrl);
-    setWsUrl(settings.wsUrl);
-    setChatGptKey(settings.chatGptKey);
-    setNightscoutUrl(settings.nightscoutUrl);
-    setNightscoutToken(settings.nightscoutToken);
-    setCorrectionFactor(settings.correctionFactor.toString());
-    setCarbRatio(settings.carbRatio.toString());
-    setTargetGlucose(settings.targetGlucose.toString());
-    setHypoAlarm(settings.hypoAlarm.toString());
-    setHyperAlarm(settings.hyperAlarm.toString());
-    setTimerAlarmSoundEnabled(settings.timerAlarmSoundEnabled);
-    setTimerVoiceAnnouncementsEnabled(settings.timerVoiceAnnouncementsEnabled);
-    setUiVolume(settings.uiVolume ?? 1);
-    setFeatureFlags(getFeatureFlags());
-
-    // Fetch network status (IP and SSID)
-    const fetchNetworkStatus = async () => {
-      try {
-        const response = await fetch('/api/miniweb/status');
-        if (response.ok) {
-          const status = await response.json();
-          setNetworkIP(status.ip || status.ip_address || "—");
-          setNetworkSSID(status.ssid || "—");
-          setNetworkIP2(status.ip || status.ip_address || "—");
-        }
-      } catch (err) {
-        console.error("Failed to get network status", err);
-        setNetworkSSID("—");
-        setNetworkIP2("—");
-      }
-    };
-
-    fetchNetworkStatus();
-
-    // Refresh network status every 10 seconds
-    const interval = setInterval(fetchNetworkStatus, 10000);
-    return () => clearInterval(interval);
-  }, []);
   
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [voiceId, setVoiceId] = useState<string | undefined>(undefined);
@@ -130,6 +97,7 @@ export const SettingsView = () => {
     min?: number;
     max?: number;
     allowEmpty?: boolean;
+    maxLength?: number;
   }>({ title: "", type: "text", field: "" });
 
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
@@ -156,6 +124,12 @@ export const SettingsView = () => {
   const [networkSSID, setNetworkSSID] = useState<string>("—");
   const [networkIP2, setNetworkIP2] = useState<string>("—");
   const [internalKeyboardEnabled, setInternalKeyboardEnabled] = useState(localClient);
+  const [networkModalOpen, setNetworkModalOpen] = useState(false);
+  const [legacyNetworkDialogOpen, setLegacyNetworkDialogOpen] = useState(false);
+  const [networkModalSSID, setNetworkModalSSID] = useState("");
+  const [networkModalPassword, setNetworkModalPassword] = useState("");
+  const [networkModalStatus, setNetworkModalStatus] = useState<NetworkModalStatus | null>(null);
+  const [isNetworkModalConnecting, setIsNetworkModalConnecting] = useState(false);
 
   const buildApiUrl = useCallback(
     (path: string) => {
@@ -168,6 +142,207 @@ export const SettingsView = () => {
     },
     [apiUrl]
   );
+
+  const refreshNetworkStatus = useCallback(async () => {
+    try {
+      const response = await fetch('/api/miniweb/status', { cache: 'no-store' });
+      if (response.ok) {
+        const status = await response.json();
+        setNetworkIP(status.ip || status.ip_address || "—");
+        setNetworkSSID(status.ssid || "—");
+        setNetworkIP2(status.ip || status.ip_address || "—");
+        return;
+      }
+    } catch (err) {
+      console.error("Failed to get network status", err);
+    }
+
+    setNetworkIP("—");
+    setNetworkSSID("—");
+    setNetworkIP2("—");
+  }, []);
+
+  // Load settings on mount
+  useEffect(() => {
+    const settings = storage.getSettings();
+    setVoiceEnabled(settings.isVoiceActive);
+    setVoiceId(settings.voiceId);
+    voiceIdRef.current = settings.voiceId;
+    setDiabetesMode(settings.diabetesMode);
+    setCalibrationFactor(settings.calibrationFactor.toString());
+    setDecimals(settings.decimals?.toString() || "1");
+    setApiUrl(settings.apiUrl);
+    setWsUrl(settings.wsUrl);
+    setChatGptKey(settings.chatGptKey);
+    setNightscoutUrl(settings.nightscoutUrl);
+    setNightscoutToken(settings.nightscoutToken);
+    setCorrectionFactor(settings.correctionFactor.toString());
+    setCarbRatio(settings.carbRatio.toString());
+    setTargetGlucose(settings.targetGlucose.toString());
+    setHypoAlarm(settings.hypoAlarm.toString());
+    setHyperAlarm(settings.hyperAlarm.toString());
+    setTimerAlarmSoundEnabled(settings.timerAlarmSoundEnabled);
+    setTimerVoiceAnnouncementsEnabled(settings.timerVoiceAnnouncementsEnabled);
+    setUiVolume(settings.uiVolume ?? 1);
+    setFeatureFlags(getFeatureFlags());
+
+    void refreshNetworkStatus();
+
+    // Refresh network status every 10 seconds
+    const interval = setInterval(() => {
+      void refreshNetworkStatus();
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [refreshNetworkStatus]);
+
+  useEffect(() => {
+    if (networkModalOpen) {
+      setNetworkModalStatus(null);
+      setIsNetworkModalConnecting(false);
+      setNetworkModalPassword('');
+      setNetworkModalSSID((current) => {
+        if (current) {
+          return current;
+        }
+        if (networkSSID && networkSSID !== '—') {
+          return networkSSID;
+        }
+        return '';
+      });
+      return;
+    }
+
+    setNetworkModalPassword('');
+    setNetworkModalStatus(null);
+    setIsNetworkModalConnecting(false);
+    setNetworkModalSSID('');
+  }, [networkModalOpen, networkSSID]);
+
+  const handleOpenNetworkModal = () => {
+    setNetworkModalOpen(true);
+  };
+
+  const handleNetworkModalConnect = async () => {
+    const ssid = networkModalSSID.trim();
+
+    if (!ssid) {
+      setNetworkModalStatus({ type: 'error', message: 'Ingresa el nombre de la red Wi-Fi.' });
+      return;
+    }
+
+    const password = networkModalPassword;
+    const payload = {
+      ssid,
+      password,
+      secured: password.trim().length > 0,
+      sec: null as string | null,
+    };
+
+    setIsNetworkModalConnecting(true);
+    setNetworkModalStatus({ type: 'info', message: 'Enviando datos a la báscula…' });
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 15000);
+
+      const response = await fetch('/api/miniweb/connect-wifi', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      }).finally(() => {
+        window.clearTimeout(timeoutId);
+      });
+
+      if (!response.ok) {
+        const errorBody = (await response.json().catch(() => null)) as
+          | { detail?: unknown; message?: unknown }
+          | null;
+
+        const detail =
+          typeof errorBody?.detail === 'string'
+            ? errorBody.detail
+            : typeof errorBody?.detail === 'object' && errorBody.detail !== null
+              ? (() => {
+                  const maybeMessage = (errorBody.detail as { message?: unknown }).message;
+                  return typeof maybeMessage === 'string' ? maybeMessage : undefined;
+                })()
+              : undefined;
+
+        const message =
+          (typeof errorBody?.message === 'string' ? errorBody.message : undefined) ||
+          detail ||
+          'No se pudo iniciar la conexión.';
+
+        setNetworkModalStatus({ type: 'error', message });
+        return;
+      }
+
+      setNetworkModalStatus({
+        type: 'info',
+        message: 'Conectando… verificando el estado de la red.',
+      });
+
+      const started = Date.now();
+      const timeoutMs = 30000;
+      const delay = (ms: number) =>
+        new Promise<void>((resolve) => {
+          window.setTimeout(resolve, ms);
+        });
+
+      while (Date.now() - started < timeoutMs) {
+        try {
+          const statusResponse = await fetch('/api/miniweb/status', { cache: 'no-store' });
+          if (!statusResponse.ok) {
+            await delay(2000);
+            continue;
+          }
+
+          const status = await statusResponse.json();
+          if (
+            status?.ap_active === false &&
+            typeof status?.connectivity === 'string' &&
+            status.connectivity.toLowerCase() === 'full'
+          ) {
+            await refreshNetworkStatus();
+            setNetworkModalStatus({
+              type: 'success',
+              message: `Conectado a ${status.ssid || ssid}.`,
+            });
+            return;
+          }
+        } catch (error) {
+          console.error('Failed to fetch status during Wi-Fi connect', error);
+        }
+
+        await delay(2000);
+      }
+
+      setNetworkModalStatus({
+        type: 'info',
+        message:
+          'Conectando… Si pierdes esta página es normal: cambia tu Wi-Fi al punto de acceso/red seleccionada y vuelve a abrir la app.',
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        setNetworkModalStatus({
+          type: 'info',
+          message:
+            'Conectando… Si pierdes esta página es normal: cambia tu Wi-Fi al punto de acceso/red seleccionada y vuelve a abrir la app.',
+        });
+      } else {
+        console.error('Failed to connect Wi-Fi', error);
+        setNetworkModalStatus({ type: 'error', message: 'Error al conectar. Inténtalo de nuevo.' });
+      }
+    } finally {
+      setIsNetworkModalConnecting(false);
+    }
+  };
+
+  const handleLegacyNetworkDialogOpen = () => {
+    setLegacyNetworkDialogOpen(true);
+  };
 
   const handleFeatureFlagToggle = (key: FeatureFlagKey, value: boolean, title: string) => {
     const updated = setFeatureFlag(key, value);
@@ -310,9 +485,10 @@ export const SettingsView = () => {
     showDecimal = false,
     min?: number,
     max?: number,
-    allowEmpty = false
+    allowEmpty = false,
+    maxLength?: number
   ) => {
-    setKeyboardConfig({ title, type, field, showDecimal, min, max, allowEmpty });
+    setKeyboardConfig({ title, type, field, showDecimal, min, max, allowEmpty, maxLength });
     const currentValue = getCurrentValue(field);
     setTempValue(currentValue);
     setKeyboardOpen(true);
@@ -332,6 +508,8 @@ export const SettingsView = () => {
       targetGlucose,
       hypoAlarm,
       hyperAlarm,
+      networkModalSSID,
+      networkModalPassword,
     };
     return values[field] || "";
   };
@@ -350,6 +528,8 @@ export const SettingsView = () => {
       hyperAlarm: setHyperAlarm,
       apiUrl: setApiUrl,
       wsUrl: setWsUrl,
+      networkModalSSID: setNetworkModalSSID,
+      networkModalPassword: setNetworkModalPassword,
     };
     
     const setter = setters[keyboardConfig.field];
@@ -1055,12 +1235,16 @@ export const SettingsView = () => {
                 </div>
               </div>
 
-              <Button 
-                variant="outline" 
-                size="lg" 
+              <Button
+                variant="outline"
+                size="lg"
                 className="w-full"
                 onClick={() => {
-                  window.open('/config', '_blank');
+                  if (featureFlags.networkModal) {
+                    handleOpenNetworkModal();
+                  } else {
+                    handleLegacyNetworkDialogOpen();
+                  }
                 }}
               >
                 Cambiar Red WiFi
@@ -1386,6 +1570,191 @@ export const SettingsView = () => {
         </TabsContent>
       </Tabs>
 
+      <Dialog
+        open={networkModalOpen}
+        onOpenChange={(open) => {
+          setNetworkModalOpen(open);
+        }}
+      >
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-3xl">Cambiar red Wi-Fi</DialogTitle>
+            <DialogDescription>
+              Ingresa el nombre y la contraseña de la red. Si el teclado interno está activo podrás usarlo tocando los campos.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-5">
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Nombre de la red (SSID)</Label>
+              <Input
+                value={networkModalSSID}
+                placeholder="MiRed"
+                readOnly={internalKeyboardEnabled}
+                onClick={() => {
+                  if (!internalKeyboardEnabled) {
+                    return;
+                  }
+                  openKeyboard(
+                    "Nombre de la red Wi-Fi",
+                    "text",
+                    "networkModalSSID",
+                    false,
+                    undefined,
+                    undefined,
+                    false,
+                    32
+                  );
+                }}
+                onChange={(event) => {
+                  if (internalKeyboardEnabled) {
+                    return;
+                  }
+                  setNetworkModalSSID(event.target.value);
+                }}
+                className={cn("text-lg", internalKeyboardEnabled && "cursor-pointer")}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Contraseña</Label>
+              <Input
+                type="password"
+                value={networkModalPassword}
+                placeholder="••••••••"
+                readOnly={internalKeyboardEnabled}
+                onClick={() => {
+                  if (!internalKeyboardEnabled) {
+                    return;
+                  }
+                  openKeyboard(
+                    "Contraseña Wi-Fi",
+                    "password",
+                    "networkModalPassword",
+                    false,
+                    undefined,
+                    undefined,
+                    true,
+                    63
+                  );
+                }}
+                onChange={(event) => {
+                  if (internalKeyboardEnabled) {
+                    return;
+                  }
+                  setNetworkModalPassword(event.target.value);
+                }}
+                className={cn("text-lg", internalKeyboardEnabled && "cursor-pointer")}
+              />
+              <p className="text-xs text-muted-foreground">Deja el campo vacío si la red es abierta.</p>
+            </div>
+
+            {networkModalStatus?.message ? (
+              <div
+                className={cn(
+                  "flex items-start gap-3 rounded-lg border px-4 py-3 text-sm",
+                  networkModalStatus.type === "error" && "border-destructive/40 bg-destructive/10 text-destructive",
+                  networkModalStatus.type === "success" && "border-emerald-500/30 bg-emerald-500/10 text-emerald-600",
+                  networkModalStatus.type === "info" && "border-primary/40 bg-primary/10 text-primary"
+                )}
+              >
+                {networkModalStatus.type === 'success' ? (
+                  <CheckCircle2 className="mt-0.5 h-5 w-5" />
+                ) : networkModalStatus.type === 'error' ? (
+                  <AlertCircle className="mt-0.5 h-5 w-5" />
+                ) : (
+                  <Info className="mt-0.5 h-5 w-5" />
+                )}
+                <p>{networkModalStatus.message}</p>
+              </div>
+            ) : null}
+          </div>
+
+          <DialogFooter className="flex flex-col gap-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                className="w-full sm:w-auto"
+                onClick={() => {
+                  setNetworkModalOpen(false);
+                }}
+              >
+                Cancelar
+              </Button>
+              <Button
+                type="button"
+                variant="glow"
+                size="lg"
+                className="w-full sm:w-auto"
+                onClick={handleNetworkModalConnect}
+                disabled={isNetworkModalConnecting}
+              >
+                {isNetworkModalConnecting ? 'Conectando…' : 'Conectar'}
+              </Button>
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              className="w-full justify-start text-sm text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                setNetworkModalOpen(false);
+                setLegacyNetworkDialogOpen(true);
+              }}
+            >
+              ¿Necesitas el asistente AP? Ábrelo en una nueva pestaña.
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={legacyNetworkDialogOpen}
+        onOpenChange={(open) => {
+          setLegacyNetworkDialogOpen(open);
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-2xl">Asistente Wi-Fi clásico</DialogTitle>
+            <DialogDescription>
+              Abriremos el asistente en una nueva pestaña para que nunca pierdas esta pantalla.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>1. Pulsa «Abrir asistente» para lanzar la configuración en modo AP.</p>
+            <p>2. Sigue las instrucciones y, al terminar, vuelve aquí y toca «Cerrar».</p>
+          </div>
+
+          <DialogFooter className="flex flex-col gap-3 sm:flex-row sm:justify-end">
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              className="w-full sm:w-auto"
+              onClick={() => {
+                setLegacyNetworkDialogOpen(false);
+              }}
+            >
+              Cerrar
+            </Button>
+            <Button
+              type="button"
+              variant="glow"
+              size="lg"
+              className="w-full sm:w-auto"
+              onClick={() => {
+                window.open('/config', '_blank', 'noopener,noreferrer');
+              }}
+            >
+              Abrir asistente
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <KeyboardDialog
         open={keyboardOpen}
         onClose={() => setKeyboardOpen(false)}
@@ -1398,6 +1767,7 @@ export const SettingsView = () => {
         min={keyboardConfig.min}
         max={keyboardConfig.max}
         allowEmpty={keyboardConfig.allowEmpty}
+        maxLength={keyboardConfig.maxLength}
       />
 
       <CalibrationWizard
