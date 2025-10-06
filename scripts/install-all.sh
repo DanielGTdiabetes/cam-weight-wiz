@@ -324,6 +324,90 @@ systemctl_safe() {
   fi
 }
 
+configure_bascula_ui_service() {
+  local unit="/etc/systemd/system/bascula-ui.service"
+  local override_dir="${unit}.d"
+  local override_file="${override_dir}/override.conf"
+  local target_uid
+
+  target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || printf '%s' '1000')"
+
+  install -d -m 0755 "${override_dir}"
+  cat > "${override_file}" <<EOF
+[Unit]
+After=network-online.target bascula-miniweb.service systemd-user-sessions.service
+Wants=network-online.target bascula-miniweb.service
+StartLimitIntervalSec=0
+
+[Service]
+ExecStart=
+ExecStartPre=
+User=${TARGET_USER}
+Group=${TARGET_GROUP}
+Environment=HOME=${TARGET_HOME}
+Environment=USER=${TARGET_USER}
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/${target_uid}
+PermissionsStartOnly=yes
+ExecStartPre=/bin/sh -c 'install -d -m0700 -o ${TARGET_USER} -g ${TARGET_GROUP} /run/user/${target_uid} && \
+  install -d -m0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula && \
+  install -o ${TARGET_USER} -g ${TARGET_GROUP} -m0644 /dev/null /var/log/bascula/ui.log && \
+  rm -f /tmp/.X0-lock'
+ExecStart=/usr/bin/startx ${BASCULA_CURRENT_LINK}/.xinitrc -- :0 vt1 -nocursor
+Restart=always
+RestartSec=3
+EOF
+  log "✓ Override de bascula-ui.service actualizado (${override_file})"
+
+  if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+    local verify_output
+    if ! verify_output="$(systemd-analyze verify "${unit}" "${override_file}" 2>&1)"; then
+      printf '%s\n' "${verify_output}" >&2
+      fail "systemd-analyze verify reportó errores para bascula-ui.service"
+    elif [[ -n "${verify_output}" ]]; then
+      printf '%s\n' "${verify_output}"
+    fi
+    log "✓ systemd-analyze verify bascula-ui.service"
+
+    systemctl daemon-reload
+    if ! systemctl restart bascula-ui.service; then
+      warn "Reinicio de bascula-ui.service falló; mostrando últimos logs"
+      journalctl -u bascula-ui.service -n 50 || true
+      fail "No se pudo reiniciar bascula-ui.service"
+    fi
+    if ! systemctl enable bascula-ui.service; then
+      warn "No se pudo habilitar bascula-ui.service"
+    else
+      log "✓ bascula-ui.service habilitado"
+    fi
+
+    log "─ systemctl cat bascula-ui.service"
+    systemctl cat bascula-ui.service || warn "No se pudo mostrar systemctl cat bascula-ui.service"
+  else
+    warn "systemd no disponible o ALLOW_SYSTEMD!=1; se omitió verificación/reinicio de bascula-ui.service"
+  fi
+
+  local kiosk_procs
+  if kiosk_procs="$(pgrep -a -f 'Xorg|startx|openbox|chromium' 2>/dev/null)"; then
+    log "Procesos kiosk detectados:"
+    printf '%s\n' "${kiosk_procs}"
+  else
+    warn "No se detectaron procesos kiosk (Xorg/startx/openbox/chromium)"
+    if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+      journalctl -u bascula-ui.service -n 50 || true
+    fi
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    log "miniweb status (curl http://127.0.0.1:8080/api/miniweb/status):"
+    if ! curl -sS http://127.0.0.1:8080/api/miniweb/status; then
+      warn "No se pudo consultar miniweb status"
+    fi
+  else
+    warn "curl no disponible para consultar miniweb status"
+  fi
+}
+
 safe_install() {
   local src="$1"
   local dst="$2"
@@ -1692,13 +1776,9 @@ Environment=XDG_RUNTIME_DIR=/run/user/${TARGET_UID}
 StandardOutput=journal
 StandardError=journal
 PermissionsStartOnly=yes
-ExecStartPre=-/usr/bin/chvt 1
-ExecStartPre=/usr/bin/mkdir -p /var/log/bascula
-ExecStartPre=/usr/bin/test -f /var/log/bascula/ui.log || /usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/ui.log
-ExecStartPre=/usr/bin/chown ${TARGET_USER}:${TARGET_GROUP} /var/log/bascula/ui.log
-ExecStart=${BASCULA_CURRENT_LINK}/scripts/start-kiosk-wrapper.sh
+ExecStart=/usr/bin/startx ${BASCULA_CURRENT_LINK}/.xinitrc -- :0 vt1 -nocursor
 Restart=always
-RestartSec=5
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
@@ -1708,20 +1788,19 @@ fi
 
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
   if [[ "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-    systemctl_safe daemon-reload
     systemctl disable --now bascula-app.service 2>/dev/null || true
     systemctl mask bascula-app.service 2>/dev/null || true
     rm -f /etc/systemd/system/multi-user.target.wants/bascula-app.service 2>/dev/null || true
     rm -f /etc/systemd/system/bascula-app.service 2>/dev/null || true
     systemctl_safe disable getty@tty1.service
-    systemctl_safe enable --now bascula-ui.service
-    log "✓ Servicio bascula-ui habilitado"
   else
     warn "ALLOW_SYSTEMD!=1: se omitió la habilitación de servicios"
   fi
 else
   warn "systemd no disponible: bascula-ui.service no se habilitó"
 fi
+
+configure_bascula_ui_service
 
 # Chromium managed policies
 log "Configurando políticas de Chromium..."
@@ -1855,10 +1934,9 @@ install_services() {
     rm -f /etc/systemd/system/multi-user.target.wants/bascula-app.service 2>/dev/null || true
     rm -f /etc/systemd/system/bascula-app.service 2>/dev/null || true
 
-    systemctl enable bascula-miniweb bascula-backend bascula-ui || true
+    systemctl enable bascula-miniweb bascula-backend || true
     systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
     systemctl is-active --quiet bascula-backend  || systemctl start bascula-backend
-    systemctl is-active --quiet bascula-ui       || systemctl start bascula-ui
 
     systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
     systemd-tmpfiles --create /etc/tmpfiles.d/bascula-x11.conf || true
@@ -1867,6 +1945,8 @@ install_services() {
   fi
 
   echo "[install] services ok: miniweb:8080, backend:8081, ui:kiosk"
+
+  configure_bascula_ui_service
 }
 
 # Llamada protegida (no afecta a AP/timers)
