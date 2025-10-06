@@ -409,13 +409,24 @@ const Index = () => {
         }));
       };
 
-      source.onmessage = (messageEvent) => {
+      const handleSseMessage = (messageEvent: MessageEvent<string>) => {
         try {
           const payload = JSON.parse(messageEvent.data) as WakeEvent;
           void handleWakeEvent(payload);
         } catch (error) {
           console.error('Failed to parse wake event payload', error);
         }
+      };
+
+      source.addEventListener('wake', (event) => {
+        handleSseMessage(event as MessageEvent<string>);
+      });
+      source.addEventListener('intent', (event) => {
+        handleSseMessage(event as MessageEvent<string>);
+      });
+
+      source.onmessage = (messageEvent) => {
+        handleSseMessage(messageEvent as MessageEvent<string>);
       };
 
       source.onerror = () => {
