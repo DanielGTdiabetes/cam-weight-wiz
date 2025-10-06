@@ -231,16 +231,11 @@ configure_hifiberry_audio() {
   fi
 
   cat > "${asound_conf}" <<'EOF'
+defaults.pcm.card 1
+defaults.ctl.card 1
 pcm.!default {
-  type asym
-  playback.pcm {
-    type plug
-    slave.pcm "hw:1,0"
-  }
-  capture.pcm {
-    type plug
-    slave.pcm "hw:0,0"
-  }
+  type plug
+  slave.pcm "hw:1,0"
 }
 ctl.!default {
   type hw
@@ -482,7 +477,7 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         x11-xserver-utils xserver-xorg-legacy xinit openbox
         fonts-dejavu-core fonts-noto-core
         libjpeg-dev zlib1g-dev libpng-dev
-        alsa-utils sox ffmpeg
+        alsa-utils pulseaudio sox ffmpeg
         libzbar0 gpiod python3-rpi.gpio
         network-manager dnsmasq-base dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
         uuid-runtime
@@ -674,7 +669,7 @@ fi
 
 log "[4a/20] Instalando herramientas de audio..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-    if apt-get install -y alsa-utils sox ffmpeg; then
+    if apt-get install -y alsa-utils pulseaudio sox ffmpeg; then
         log "✓ Herramientas de audio instaladas"
     else
         warn "No se pudieron instalar herramientas de audio"
@@ -1669,6 +1664,8 @@ if [[ -f "${SERVICE_FILE}" ]]; then
       -e "s|Environment=HOME=/home/pi|Environment=HOME=${TARGET_HOME}|g" \
       -e "s|Environment=USER=pi|Environment=USER=${TARGET_USER}|g" \
       -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000|Environment=XDG_RUNTIME_DIR=/run/user/${TARGET_UID}|g" \
+      -e "s|-o pi -g pi|-o ${TARGET_USER} -g ${TARGET_GROUP}|g" \
+      -e "s|chown pi:pi|chown ${TARGET_USER}:${TARGET_GROUP}|g" \
       "${SERVICE_FILE}" > "${TMP_SERVICE_FILE}"
   install -m 0644 "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-ui.service
   rm -f "${TMP_SERVICE_FILE}"
@@ -1677,8 +1674,8 @@ else
   cat > /etc/systemd/system/bascula-ui.service <<EOF
 [Unit]
 Description=Bascula Digital Pro - UI (Chromium kiosk)
-After=systemd-user-sessions.service network-online.target bascula-miniweb.service
-Wants=network-online.target bascula-miniweb.service
+After=systemd-user-sessions.service network-online.target sound.target bascula-miniweb.service
+Wants=network-online.target sound.target bascula-miniweb.service
 Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
@@ -1696,6 +1693,9 @@ StandardOutput=journal
 StandardError=journal
 PermissionsStartOnly=yes
 ExecStartPre=-/usr/bin/chvt 1
+ExecStartPre=/usr/bin/mkdir -p /var/log/bascula
+ExecStartPre=/usr/bin/test -f /var/log/bascula/ui.log || /usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/ui.log
+ExecStartPre=/usr/bin/chown ${TARGET_USER}:${TARGET_GROUP} /var/log/bascula/ui.log
 ExecStart=${BASCULA_CURRENT_LINK}/scripts/start-kiosk-wrapper.sh
 Restart=always
 RestartSec=5
@@ -1711,6 +1711,8 @@ if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     systemctl_safe daemon-reload
     systemctl disable --now bascula-app.service 2>/dev/null || true
     systemctl mask bascula-app.service 2>/dev/null || true
+    rm -f /etc/systemd/system/multi-user.target.wants/bascula-app.service 2>/dev/null || true
+    rm -f /etc/systemd/system/bascula-app.service 2>/dev/null || true
     systemctl_safe disable getty@tty1.service
     systemctl_safe enable --now bascula-ui.service
     log "✓ Servicio bascula-ui habilitado"
@@ -1731,9 +1733,7 @@ cat > /etc/chromium/policies/managed/bascula_policy.json <<'EOF'
   "AutoplayAllowed": true,
   "DefaultAudioCaptureSetting": 1,
   "DefaultVideoCaptureSetting": 1,
-  "URLAllowlist": ["http://127.0.0.1:8080", "http://localhost:8080"],
-  "ClipboardAllowed": true,
-  "ClipboardAllowedForUrls": ["http://127.0.0.1:8080/*", "http://localhost:8080/*"]
+  "URLAllowlist": ["http://127.0.0.1:8080", "http://localhost:8080"]
 }
 EOF
 log "✓ Políticas de Chromium configuradas"
@@ -1835,6 +1835,8 @@ install_services() {
         -e "s|Environment=HOME=/home/pi|Environment=HOME=${TARGET_HOME}|g" \
         -e "s|Environment=USER=pi|Environment=USER=${TARGET_USER}|g" \
         -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000|Environment=XDG_RUNTIME_DIR=/run/user/${target_uid}|g" \
+        -e "s|-o pi -g pi|-o ${TARGET_USER} -g ${TARGET_GROUP}|g" \
+        -e "s|chown pi:pi|chown ${TARGET_USER}:${TARGET_GROUP}|g" \
         systemd/bascula-ui.service > "${tmp_service}"
     install -m 0644 "${tmp_service}" /etc/systemd/system/bascula-ui.service
     rm -f "${tmp_service}"
@@ -1850,6 +1852,8 @@ install_services() {
     systemctl daemon-reload
     systemctl disable --now bascula-app.service 2>/dev/null || true
     systemctl mask bascula-app.service 2>/dev/null || true
+    rm -f /etc/systemd/system/multi-user.target.wants/bascula-app.service 2>/dev/null || true
+    rm -f /etc/systemd/system/bascula-app.service 2>/dev/null || true
 
     systemctl enable bascula-miniweb bascula-backend bascula-ui || true
     systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
