@@ -48,7 +48,13 @@ def get_chatgpt_api_key() -> Optional[str]:
     ]
 
     config = load_config()
-    integrations = config.get("integrations", {}) if isinstance(config, dict) else {}
+    if isinstance(config, dict):
+        potential_keys.append(config.get("openai_api_key"))
+        potential_keys.append(config.get("chatgpt_api_key"))
+        integrations = config.get("integrations", {}) if isinstance(config.get("integrations"), dict) else {}
+    else:
+        integrations = {}
+
     potential_keys.extend(
         [
             integrations.get("openai_api_key"),
@@ -68,6 +74,35 @@ def get_chatgpt_model() -> str:
     if configured_model:
         return configured_model
     return CHATGPT_MODELS[0]
+
+
+def _get_nightscout_credentials(config: Dict[str, Any]) -> tuple[str, str]:
+    url = ""
+    token = ""
+
+    raw_url = config.get("nightscout_url")
+    raw_token = config.get("nightscout_token")
+
+    if isinstance(raw_url, str):
+        url = raw_url.strip()
+    if isinstance(raw_token, str):
+        token = raw_token.strip()
+
+    diabetes = config.get("diabetes")
+    if isinstance(diabetes, dict):
+        if not url and isinstance(diabetes.get("ns_url"), str):
+            url = diabetes["ns_url"].strip()
+        if not token and isinstance(diabetes.get("ns_token"), str):
+            token = diabetes["ns_token"].strip()
+
+    integrations = config.get("integrations")
+    if isinstance(integrations, dict):
+        if not url and isinstance(integrations.get("nightscout_url"), str):
+            url = integrations["nightscout_url"].strip()
+        if not token and isinstance(integrations.get("nightscout_token"), str):
+            token = integrations["nightscout_token"].strip()
+
+    return url, token
 
 
 async def invoke_chatgpt(messages: List[Dict[str, str]]) -> Optional[str]:
@@ -475,6 +510,15 @@ def _default_config() -> Dict[str, Any]:
         "serial_baud": DEFAULT_SERIAL_BAUD,
         "network": {"miniweb_enabled": True, "miniweb_port": 8080},
         "diabetes": {"diabetes_enabled": False, "ns_url": "", "ns_token": ""},
+        "openai_api_key": "",
+        "nightscout_url": "",
+        "nightscout_token": "",
+        "integrations": {
+            "openai_api_key": "",
+            "chatgpt_api_key": "",
+            "nightscout_url": "",
+            "nightscout_token": "",
+        },
     }
 
 
@@ -494,10 +538,10 @@ def load_config() -> Dict[str, Any]:
     changed = False
 
     for key, value in defaults.items():
-        if key == "scale":
-            current = config.get("scale")
+        if isinstance(value, dict):
+            current = config.get(key)
             if not isinstance(current, dict):
-                config["scale"] = value.copy()
+                config[key] = json.loads(json.dumps(value))
                 changed = True
             else:
                 for sub_key, sub_value in value.items():
@@ -965,8 +1009,7 @@ async def get_timer_status():
 async def get_glucose():
     """Get current glucose from Nightscout"""
     config = load_config()
-    ns_url = config.get("diabetes", {}).get("ns_url", "")
-    ns_token = config.get("diabetes", {}).get("ns_token", "")
+    ns_url, ns_token = _get_nightscout_credentials(config)
     
     if not ns_url:
         raise HTTPException(status_code=400, detail="Nightscout not configured")
@@ -993,8 +1036,7 @@ async def get_glucose():
 async def export_bolus(data: BolusData):
     """Export bolus to Nightscout"""
     config = load_config()
-    ns_url = config.get("diabetes", {}).get("ns_url", "")
-    ns_token = config.get("diabetes", {}).get("ns_token", "")
+    ns_url, ns_token = _get_nightscout_credentials(config)
     
     if not ns_url:
         raise HTTPException(status_code=400, detail="Nightscout not configured")

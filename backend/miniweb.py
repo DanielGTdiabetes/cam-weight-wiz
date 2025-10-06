@@ -24,6 +24,8 @@ from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerat
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse, JSONResponse
@@ -114,6 +116,58 @@ def _save_json(path: Path, data: Dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
+def _extract_openai_api_key(config: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(config, dict):
+        return ""
+
+    candidates: List[Optional[str]] = [
+        config.get("openai_api_key"),
+    ]
+
+    integrations = config.get("integrations")
+    if isinstance(integrations, dict):
+        candidates.append(integrations.get("openai_api_key"))
+        candidates.append(integrations.get("chatgpt_api_key"))
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _extract_nightscout_credentials(config: Optional[Dict[str, Any]]) -> Tuple[str, str]:
+    if not isinstance(config, dict):
+        return "", ""
+
+    url = ""
+    token = ""
+
+    raw_url = config.get("nightscout_url")
+    raw_token = config.get("nightscout_token")
+
+    if isinstance(raw_url, str):
+        url = raw_url.strip()
+    if isinstance(raw_token, str):
+        token = raw_token.strip()
+
+    diabetes = config.get("diabetes")
+    if isinstance(diabetes, dict):
+        if not url and isinstance(diabetes.get("ns_url"), str):
+            url = diabetes["ns_url"].strip()
+        if not token and isinstance(diabetes.get("ns_token"), str):
+            token = diabetes["ns_token"].strip()
+
+    return url, token
+
+
+def _response_error_payload(response: httpx.Response) -> Any:
+    try:
+        data = response.json()
+        return data
+    except Exception:
+        return response.text
+
+
 def _default_config() -> Dict[str, Any]:
     return {
         "scale_backend": "uart",
@@ -125,6 +179,16 @@ def _default_config() -> Dict[str, Any]:
             "calibration_factor": DEFAULT_CALIBRATION_FACTOR,
             "sample_rate_hz": DEFAULT_SAMPLE_RATE,
             "filter_window": DEFAULT_FILTER_WINDOW,
+        },
+        "openai_api_key": "",
+        "nightscout_url": "",
+        "nightscout_token": "",
+        "integrations": {
+            "openai_api_key": "",
+        },
+        "diabetes": {
+            "ns_url": "",
+            "ns_token": "",
         },
     }
 
@@ -138,15 +202,15 @@ def _load_config() -> Dict[str, Any]:
     changed = False
 
     for key, value in defaults.items():
-        if key == "scale":
-            scale_cfg = config.get("scale")
-            if not isinstance(scale_cfg, dict):
-                config["scale"] = value.copy()
+        if isinstance(value, dict):
+            current = config.get(key)
+            if not isinstance(current, dict):
+                config[key] = json.loads(json.dumps(value))
                 changed = True
             else:
-                for scale_key, scale_value in value.items():
-                    if scale_key not in scale_cfg:
-                        scale_cfg[scale_key] = scale_value
+                for sub_key, sub_value in value.items():
+                    if sub_key not in current:
+                        current[sub_key] = sub_value
                         changed = True
         else:
             if key not in config:
@@ -2691,6 +2755,15 @@ class NetworkConnectRequest(BaseModel):
     psk: str
 
 
+class OpenAISettingsPayload(BaseModel):
+    apiKey: Optional[str] = None
+
+
+class NightscoutSettingsPayload(BaseModel):
+    url: Optional[str] = None
+    token: Optional[str] = None
+
+
 # ---------- PIN persistente ----------
 CURRENT_PIN = _get_or_create_pin()
 
@@ -2734,6 +2807,148 @@ async def verify_pin(data: PinVerification, request: Request):
         return {"success": True}
     _register_fail(ip)
     raise HTTPException(status_code=403, detail="Invalid PIN")
+
+
+@app.get("/api/settings/openai")
+async def get_openai_settings():
+    config = _load_config()
+    key = _extract_openai_api_key(config)
+    return {"hasKey": bool(key)}
+
+
+@app.post("/api/settings/openai")
+async def update_openai_settings(payload: OpenAISettingsPayload):
+    config = _load_config()
+    api_key = (payload.apiKey or "").strip()
+
+    integrations = config.get("integrations")
+    if not isinstance(integrations, dict):
+        integrations = {}
+    integrations["openai_api_key"] = api_key
+    integrations["chatgpt_api_key"] = api_key
+    config["integrations"] = integrations
+    config["openai_api_key"] = api_key
+
+    _save_json(CONFIG_PATH, config)
+    return {"hasKey": bool(api_key)}
+
+
+@app.get("/api/settings/nightscout")
+async def get_nightscout_settings():
+    config = _load_config()
+    url, token = _extract_nightscout_credentials(config)
+    return {"url": url, "hasToken": bool(token)}
+
+
+@app.post("/api/settings/nightscout")
+async def update_nightscout_settings(payload: NightscoutSettingsPayload):
+    config = _load_config()
+    current_url, current_token = _extract_nightscout_credentials(config)
+
+    if isinstance(payload.url, str):
+        url = payload.url.strip()
+    elif payload.url is None:
+        url = current_url
+    else:
+        url = str(payload.url).strip()
+
+    if payload.token is None:
+        token = current_token
+    elif isinstance(payload.token, str):
+        token = payload.token.strip()
+    else:
+        token = str(payload.token).strip()
+
+    config["nightscout_url"] = url
+    config["nightscout_token"] = token
+
+    diabetes = config.get("diabetes")
+    if not isinstance(diabetes, dict):
+        diabetes = {}
+    diabetes["ns_url"] = url
+    diabetes["ns_token"] = token
+    if url:
+        diabetes["diabetes_enabled"] = True
+    else:
+        diabetes["diabetes_enabled"] = False
+    config["diabetes"] = diabetes
+
+    integrations = config.get("integrations")
+    if not isinstance(integrations, dict):
+        integrations = {}
+    integrations["nightscout_url"] = url
+    integrations["nightscout_token"] = token
+    config["integrations"] = integrations
+
+    _save_json(CONFIG_PATH, config)
+    return {"url": url, "hasToken": bool(token)}
+
+
+@app.get("/api/test/openai")
+async def test_openai_settings():
+    config = _load_config()
+    api_key = _extract_openai_api_key(config)
+    if not api_key:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "OpenAI API key no configurada"})
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    voices_url = os.getenv("OPENAI_VOICES_URL", "https://api.openai.com/v1/audio/voices")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(voices_url, headers=headers)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        payload = _response_error_payload(exc.response)
+        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "error": payload})
+    except httpx.RequestError as exc:
+        return JSONResponse(status_code=502, content={"ok": False, "error": f"Error de conexión: {exc}"})
+    except Exception as exc:  # pragma: no cover - defensivo
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+    data = response.json()
+    raw_voices = data.get("voices") or data.get("data")
+    voices: List[str] = []
+    if isinstance(raw_voices, list):
+        for item in raw_voices:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("id")
+                if isinstance(name, str) and name:
+                    voices.append(name)
+            elif isinstance(item, str) and item:
+                voices.append(item)
+
+    return {"ok": True, "voices": voices}
+
+
+@app.get("/api/test/nightscout")
+async def test_nightscout_settings():
+    config = _load_config()
+    url, token = _extract_nightscout_credentials(config)
+    if not url:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Nightscout no configurado"})
+
+    normalized_url = url.rstrip("/")
+    headers = {"API-SECRET": token} if token else {}
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.get(f"{normalized_url}/api/v1/status.json", headers=headers)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        payload = _response_error_payload(exc.response)
+        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "error": payload})
+    except httpx.RequestError as exc:
+        return JSONResponse(status_code=502, content={"ok": False, "error": f"Error de conexión: {exc}"})
+    except Exception as exc:  # pragma: no cover - defensivo
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+
+    try:
+        status_payload = response.json()
+    except Exception:
+        status_payload = response.text
+
+    return {"ok": True, "status": status_payload}
 
 
 @app.get("/api/miniweb/scan-networks")
