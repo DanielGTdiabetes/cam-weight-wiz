@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { api, type GeneratedRecipe, type RecipeStep } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
+import { useNavSafeExit } from "@/hooks/useNavSafeExit";
 
 interface SpeechRecognitionEvent extends Event {
   results: SpeechRecognitionResultList;
@@ -50,6 +51,11 @@ interface IngredientDisplay {
   needsScale: boolean;
 }
 
+interface RecipesViewProps {
+  context?: "page" | "modal";
+  onClose?: () => void;
+}
+
 const mapIngredients = (recipe: GeneratedRecipe | null): IngredientDisplay[] => {
   if (!recipe?.ingredients) {
     return [];
@@ -62,7 +68,11 @@ const mapIngredients = (recipe: GeneratedRecipe | null): IngredientDisplay[] => 
   }));
 };
 
-export const RecipesView = () => {
+export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}) => {
+  const { navEnabled, isTouchDevice, goBack, handleClose, isModal } = useNavSafeExit({
+    context,
+    onClose,
+  });
   const [recipe, setRecipe] = useState<GeneratedRecipe | null>(null);
   const [currentStepIndex, setCurrentStepIndex] = useState(0);
   const [recipeStarted, setRecipeStarted] = useState(false);
@@ -256,9 +266,26 @@ export const RecipesView = () => {
 
   const currentProgress = recipe ? Math.min(((currentStepIndex + 1) / recipe.steps.length) * 100, 100) : 0;
 
+  const navControls = navEnabled ? (
+    <div className="flex items-center gap-2 p-4">
+      <Button variant="outline" onClick={goBack} className="gap-2">
+        <ArrowLeft className="h-4 w-4" />
+        Atrás
+      </Button>
+      {isModal && (
+        <Button variant="ghost" onClick={handleClose} className="gap-2">
+          <X className="h-4 w-4" />
+          Cerrar
+        </Button>
+      )}
+    </div>
+  ) : null;
+
+  let content: JSX.Element | null;
+
   if (!recipeStarted) {
-    return (
-      <div className="flex h-full items-center justify-center p-8">
+    content = (
+      <div className="flex flex-1 items-center justify-center p-8">
         <Card className="w-full max-w-2xl p-8">
           <div className="mb-8 text-center">
             <div className="mb-4 flex justify-center">
@@ -312,157 +339,172 @@ export const RecipesView = () => {
         </Card>
       </div>
     );
-  }
-
-  if (!recipe || !currentStep) {
-    return null;
-  }
-
-  return (
-    <div className="flex h-full flex-col gap-4 p-4">
-      <div className="grid gap-4 md:grid-cols-[1fr_1fr]">
-        <Card className="border-primary/30 p-6">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-2xl font-bold">{recipe.title}</h2>
-              <p className="text-sm text-muted-foreground">Raciones sugeridas: {recipe.servings}</p>
-            </div>
-            <Button variant="outline" onClick={handleCancel}>
-              <X className="mr-2 h-4 w-4" /> Cancelar
-            </Button>
-          </div>
-
-          {ingredients.length > 0 && (
-            <div className="mb-4">
-              <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-muted-foreground">
-                <ListChecks className="h-4 w-4" /> Ingredientes preparados
+  } else if (!recipe || !currentStep) {
+    content = null;
+  } else {
+    content = (
+      <div className="flex flex-1 flex-col gap-4 p-4">
+        <div className="grid gap-4 md:grid-cols-[1fr_1fr]">
+          <Card className="border-primary/30 p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold">{recipe.title}</h2>
+                <p className="text-sm text-muted-foreground">Raciones sugeridas: {recipe.servings}</p>
               </div>
-              <ul className="space-y-1 text-sm">
-                {ingredients.map((ingredient, index) => (
-                  <li key={`${ingredient.name}-${index}`} className="flex items-center justify-between">
-                    <span>{ingredient.name}</span>
-                    <span className="text-muted-foreground">
-                      {ingredient.quantity !== null ? `${ingredient.quantity}${ingredient.unit}` : ingredient.unit}
-                      {ingredient.needsScale && ' · Usa la báscula'}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+              <Button variant="outline" onClick={handleCancel}>
+                <X className="mr-2 h-4 w-4" /> Cancelar
+              </Button>
             </div>
-          )}
 
-          <div className="mb-3 flex items-center justify-between text-sm text-muted-foreground">
-            <span>Paso {currentStepIndex + 1} de {recipe.steps.length}</span>
-            <span>{currentProgress.toFixed(0)}%</span>
-          </div>
-          <div className="mb-6 h-2 w-full overflow-hidden rounded-full bg-muted">
-            <div
-              className="h-full bg-primary transition-all duration-500"
-              style={{ width: `${currentProgress}%` }}
+            {ingredients.length > 0 && (
+              <div className="mb-4">
+                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-muted-foreground">
+                  <ListChecks className="h-4 w-4" /> Ingredientes preparados
+                </div>
+                <ul className="space-y-1 text-sm">
+                  {ingredients.map((ingredient, index) => (
+                    <li key={`${ingredient.name}-${index}`} className="flex items-center justify-between">
+                      <span>{ingredient.name}</span>
+                      <span className="text-muted-foreground">
+                        {ingredient.quantity !== null ? `${ingredient.quantity}${ingredient.unit}` : ingredient.unit}
+                        {ingredient.needsScale && ' · Usa la báscula'}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="mb-3 flex items-center justify-between text-sm text-muted-foreground">
+              <span>Paso {currentStepIndex + 1} de {recipe.steps.length}</span>
+              <span>{currentProgress.toFixed(0)}%</span>
+            </div>
+            <div className="mb-6 h-2 w-full overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full bg-primary transition-all duration-500"
+                style={{ width: `${currentProgress}%` }}
+              />
+            </div>
+
+            <Card className="border-primary/40 bg-primary/5 p-6">
+              <div className="mb-3 flex items-center gap-3">
+                <ChefHat className="h-6 w-6 text-primary" />
+                <h3 className="text-xl font-bold">Paso {currentStep.index}</h3>
+              </div>
+              <p className="text-2xl leading-relaxed">{currentStep.instruction}</p>
+
+              {currentStep.needsScale && currentStep.expectedWeight && (
+                <div className="mt-4 rounded-lg bg-primary/10 p-4 text-center text-primary">
+                  <p className="text-sm">Peso objetivo</p>
+                  <p className="text-4xl font-bold">{currentStep.expectedWeight} g</p>
+                </div>
+              )}
+            </Card>
+          </Card>
+
+          <Card className="border-primary/20 p-6">
+            <h3 className="mb-3 text-xl font-bold">Tu respuesta</h3>
+            <Textarea
+              value={currentResponse}
+              onChange={(event) => setStepResponses((prev) => ({ ...prev, [currentStepIndex]: event.target.value }))}
+              placeholder="Escribe observaciones, pesos medidos o dudas para el asistente"
+              className="min-h-32"
             />
-          </div>
 
-          <Card className="border-primary/40 bg-primary/5 p-6">
-            <div className="mb-3 flex items-center gap-3">
-              <ChefHat className="h-6 w-6 text-primary" />
-              <h3 className="text-xl font-bold">Paso {currentStep.index}</h3>
+            <div className="mt-3 flex gap-3">
+              <Button
+                onClick={handleMicToggle}
+                variant={isListening ? "destructive" : "outline"}
+                className="flex-1"
+              >
+                {isListening ? (
+                  <>
+                    <MicOff className="mr-2 h-4 w-4" /> Detener voz
+                  </>
+                ) : (
+                  <>
+                    <Mic className="mr-2 h-4 w-4" /> Dictar
+                  </>
+                )}
+              </Button>
+              <Button
+                onClick={() => setStepResponses((prev) => ({ ...prev, [currentStepIndex]: "" }))}
+                variant="outline"
+              >
+                Limpiar
+              </Button>
             </div>
-            <p className="text-2xl leading-relaxed">{currentStep.instruction}</p>
 
-            {currentStep.needsScale && currentStep.expectedWeight && (
-              <div className="mt-4 rounded-lg bg-primary/10 p-4 text-center text-primary">
-                <p className="text-sm">Peso objetivo</p>
-                <p className="text-4xl font-bold">{currentStep.expectedWeight} g</p>
+            {assistantMessage && (
+              <div className="mt-4 rounded-lg border border-primary/30 bg-primary/10 p-4 text-sm">
+                <p className="font-semibold">Asistente:</p>
+                <p>{assistantMessage}</p>
               </div>
             )}
           </Card>
-        </Card>
+        </div>
 
-        <Card className="border-primary/20 p-6">
-          <h3 className="mb-3 text-xl font-bold">Tu respuesta</h3>
-          <Textarea
-            value={currentResponse}
-            onChange={(event) => setStepResponses((prev) => ({ ...prev, [currentStepIndex]: event.target.value }))}
-            placeholder="Escribe observaciones, pesos medidos o dudas para el asistente"
-            className="min-h-32"
-          />
-
-          <div className="mt-3 flex gap-3">
-            <Button
-              onClick={handleMicToggle}
-              variant={isListening ? "destructive" : "outline"}
-              className="flex-1"
-            >
-              {isListening ? (
-                <>
-                  <MicOff className="mr-2 h-4 w-4" /> Detener voz
-                </>
-              ) : (
-                <>
-                  <Mic className="mr-2 h-4 w-4" /> Dictar
-                </>
-              )}
-            </Button>
-            <Button
-              onClick={() => setStepResponses((prev) => ({ ...prev, [currentStepIndex]: "" }))}
-              variant="outline"
-            >
-              Limpiar
-            </Button>
-          </div>
-
-          {assistantMessage && (
-            <div className="mt-4 rounded-lg border border-primary/30 bg-primary/10 p-4 text-sm">
-              <p className="font-semibold">Asistente:</p>
-              <p>{assistantMessage}</p>
-            </div>
-          )}
-        </Card>
+        <div className="mt-auto grid grid-cols-4 gap-3">
+          <Button
+            onClick={handleCancel}
+            variant="outline"
+            size="xl"
+            className="h-16 text-xl"
+          >
+            <X className="mr-2 h-5 w-5" /> Cancelar
+          </Button>
+          <Button
+            onClick={handlePrevious}
+            disabled={currentStepIndex === 0}
+            variant="secondary"
+            size="xl"
+            className="h-16 text-xl"
+          >
+            <ArrowLeft className="mr-2 h-5 w-5" /> Anterior
+          </Button>
+          <Button
+            onClick={handleMicToggle}
+            variant={isListening ? "destructive" : "outline"}
+            size="xl"
+            className="h-16 text-xl"
+          >
+            {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+          </Button>
+          <Button
+            onClick={handleNext}
+            disabled={isAdvancing || recipeCompleted}
+            variant="glow"
+            size="xl"
+            className="h-16 text-xl"
+          >
+            {recipeCompleted ? (
+              "Completado"
+            ) : (
+              <>
+                Siguiente
+                <ArrowRight className="ml-2 h-5 w-5" />
+              </>
+            )}
+          </Button>
+        </div>
       </div>
+    );
+  }
 
-      <div className="mt-auto grid grid-cols-4 gap-3">
+  return (
+    <div className="relative flex h-full flex-col">
+      {navControls}
+      {content}
+      {navEnabled && isTouchDevice && (
         <Button
-          onClick={handleCancel}
-          variant="outline"
-          size="xl"
-          className="h-16 text-xl"
-        >
-          <X className="mr-2 h-5 w-5" /> Cancelar
-        </Button>
-        <Button
-          onClick={handlePrevious}
-          disabled={currentStepIndex === 0}
-          variant="secondary"
-          size="xl"
-          className="h-16 text-xl"
-        >
-          <ArrowLeft className="mr-2 h-5 w-5" /> Anterior
-        </Button>
-        <Button
-          onClick={handleMicToggle}
-          variant={isListening ? "destructive" : "outline"}
-          size="xl"
-          className="h-16 text-xl"
-        >
-          {isListening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
-        </Button>
-        <Button
-          onClick={handleNext}
-          disabled={isAdvancing || recipeCompleted}
           variant="glow"
-          size="xl"
-          className="h-16 text-xl"
+          size="lg"
+          onClick={goBack}
+          className="fixed bottom-6 right-6 z-50 rounded-full px-6 py-6 shadow-lg"
         >
-          {recipeCompleted ? (
-            "Completado"
-          ) : (
-            <>
-              Siguiente
-              <ArrowRight className="ml-2 h-5 w-5" />
-            </>
-          )}
+          Salir
         </Button>
-      </div>
+      )}
     </div>
   );
 };
