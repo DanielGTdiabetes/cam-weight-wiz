@@ -3,13 +3,13 @@ import { Mic, MicOff, ChefHat, ArrowLeft, ArrowRight, X, ListChecks } from "luci
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
-import { cn } from "@/lib/utils";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useToast } from "@/hooks/use-toast";
 import { api, type GeneratedRecipe, type RecipeStep } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
 import { useNavSafeExit } from "@/hooks/useNavSafeExit";
+import { useNavigate } from "react-router-dom";
 
 interface SpeechRecognitionEvent extends Event {
   results: SpeechRecognitionResultList;
@@ -71,7 +71,8 @@ const mapIngredients = (recipe: GeneratedRecipe | null): IngredientDisplay[] => 
 };
 
 export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}) => {
-  const { navEnabled, isTouchDevice, handleClose, isModal } = useNavSafeExit({
+  const navigate = useNavigate();
+  const { navEnabled, isModal } = useNavSafeExit({
     context,
     onClose,
   });
@@ -106,7 +107,37 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     setIsListening(false);
   }, []);
 
-  useEffect(() => () => stopRecognition(), [stopRecognition]);
+  const cleanupMedia = useCallback(() => {
+    stopRecognition();
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      if (typeof window.speechSynthesis !== "undefined") {
+        window.speechSynthesis.cancel();
+      }
+    } catch (error) {
+      console.warn("Failed to cancel speech synthesis", error);
+    }
+
+    try {
+      const audioElements = Array.from(window.document.querySelectorAll("audio"));
+      audioElements.forEach((audio) => {
+        try {
+          audio.pause();
+          audio.currentTime = 0;
+        } catch (error) {
+          console.warn("Failed to stop audio element", error);
+        }
+      });
+    } catch (error) {
+      console.warn("Failed to reset audio elements", error);
+    }
+  }, [stopRecognition]);
+
+  useEffect(() => () => cleanupMedia(), [cleanupMedia]);
 
   const getRecognitionInstance = (): SpeechRecognitionInstance | null => {
     if (typeof window === "undefined") {
@@ -180,7 +211,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     }
   };
 
-  const resetState = () => {
+  const resetState = useCallback(() => {
     setRecipe(null);
     setRecipeStarted(false);
     setRecipeCompleted(false);
@@ -188,8 +219,8 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     setAssistantMessage(null);
     setStepResponses({});
     setUserPrompt("");
-    stopRecognition();
-  };
+    cleanupMedia();
+  }, [cleanupMedia]);
 
   const handleStart = async () => {
     const prompt = userPrompt.trim();
@@ -267,16 +298,36 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     resetState();
   };
 
+  const fallbackNavigate = useCallback(() => {
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      navigate(-1);
+      return;
+    }
+
+    navigate("/", { replace: true });
+  }, [navigate]);
+
+  const handleExit = useCallback(() => {
+    resetState();
+
+    if (onClose) {
+      onClose();
+      return;
+    }
+
+    fallbackNavigate();
+  }, [fallbackNavigate, onClose, resetState]);
+
   const currentProgress = recipe ? Math.min(((currentStepIndex + 1) / recipe.steps.length) * 100, 100) : 0;
 
   const navControls = navEnabled ? (
     <div className="flex items-center gap-2 p-4">
-      <Button variant="outline" onClick={handleClose} className="gap-2">
+      <Button variant="outline" onClick={handleExit} className="gap-2">
         <ArrowLeft className="h-4 w-4" />
         Atrás
       </Button>
       {isModal && (
-        <Button variant="ghost" onClick={handleClose} className="gap-2">
+        <Button variant="ghost" onClick={handleExit} className="gap-2">
           <X className="h-4 w-4" />
           Cerrar
         </Button>
@@ -501,17 +552,17 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
   return (
     <div className="relative flex h-full flex-col">
       {navControls}
-      {content}
-      {navEnabled && isTouchDevice && (
+      <div className="absolute right-4 top-4 z-50 flex items-center">
         <Button
-          variant="glow"
+          variant="secondary"
           size="lg"
-          onClick={handleClose}
-          className="fixed bottom-6 right-6 z-50 rounded-full px-6 py-6 shadow-lg"
+          onClick={handleExit}
+          className="shadow-md"
         >
-          Salir
+          <X className="mr-2 h-4 w-4" /> Salir
         </Button>
-      )}
+      </div>
+      {content}
     </div>
   );
 };
