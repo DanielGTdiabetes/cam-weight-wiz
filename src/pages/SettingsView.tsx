@@ -16,6 +16,7 @@ import {
   BellRing,
   AlertCircle,
   Info,
+  Loader2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -67,6 +68,26 @@ type NetworkModalStatus = {
   message: string;
 };
 
+type MiniWebStatusResponse = {
+  ip?: string;
+  ip_address?: string;
+  ssid?: string;
+  [key: string]: unknown;
+};
+
+type MiniEbStatusState = {
+  status: "loading" | "ready" | "error";
+  ip?: string;
+  ssid?: string;
+  error?: string;
+};
+
+type OtaStatus = {
+  current: string;
+  latest: string;
+  hasUpdate: boolean;
+};
+
 export const SettingsView = () => {
   const { toast } = useToast();
   const { weight } = useScaleWebSocket();
@@ -77,6 +98,7 @@ export const SettingsView = () => {
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [voiceId, setVoiceId] = useState<string | undefined>(undefined);
   const voiceIdRef = useRef<string | undefined>(undefined);
+  const miniEbErrorNotifiedRef = useRef(false);
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
@@ -112,13 +134,14 @@ export const SettingsView = () => {
   const [targetGlucose, setTargetGlucose] = useState("100");
   const [hypoAlarm, setHypoAlarm] = useState("70");
   const [hyperAlarm, setHyperAlarm] = useState("180");
-  const [networkIP, setNetworkIP] = useState<string>("");
+  const [networkIP, setNetworkIP] = useState<string | null>(null);
+  const [miniEbStatus, setMiniEbStatus] = useState<MiniEbStatusState>({ status: "loading" });
   
   const [tempValue, setTempValue] = useState("");
   const [isTestingAudio, setIsTestingAudio] = useState(false);
   const [isTestingChatGPT, setIsTestingChatGPT] = useState(false);
   const [isTestingNightscout, setIsTestingNightscout] = useState(false);
-  const [availableUpdates, setAvailableUpdates] = useState<{ available: boolean; version?: string } | null>(null);
+  const [otaStatus, setOtaStatus] = useState<OtaStatus | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
   const [isInstallingUpdate, setIsInstallingUpdate] = useState(false);
   const [networkSSID, setNetworkSSID] = useState<string>("—");
@@ -143,24 +166,131 @@ export const SettingsView = () => {
     [apiUrl]
   );
 
-  const refreshNetworkStatus = useCallback(async () => {
-    try {
-      const response = await fetch('/api/miniweb/status', { cache: 'no-store' });
-      if (response.ok) {
-        const status = await response.json();
-        setNetworkIP(status.ip || status.ip_address || "—");
-        setNetworkSSID(status.ssid || "—");
-        setNetworkIP2(status.ip || status.ip_address || "—");
-        return;
-      }
-    } catch (err) {
-      console.error("Failed to get network status", err);
+  const formatVersion = (value?: string) => {
+    if (!value) {
+      return "—";
     }
 
-    setNetworkIP("—");
-    setNetworkSSID("—");
-    setNetworkIP2("—");
-  }, []);
+    return value.startsWith("v") ? value : `v${value}`;
+  };
+
+  const refreshNetworkStatus = useCallback(
+    async ({ silent = false }: { silent?: boolean } = {}) => {
+      const debugEnabled = featureFlags.debugLogs;
+      const logDebug = (...args: unknown[]) => {
+        if (debugEnabled) {
+          console.debug("[SettingsView][MINI-EB]", ...args);
+        }
+      };
+
+      if (!silent) {
+        setMiniEbStatus({ status: "loading" });
+      }
+
+      const fetchStatus = async (): Promise<MiniWebStatusResponse> => {
+        if (!featureFlags.miniEbStable) {
+          const response = await fetch("/api/miniweb/status", { cache: "no-store" });
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          return (await response.json()) as MiniWebStatusResponse;
+        }
+
+        const delays = [0, 1000, 2000, 4000];
+        let lastError: unknown;
+
+        for (let attempt = 0; attempt < delays.length; attempt++) {
+          const delay = delays[attempt];
+          if (delay > 0) {
+            logDebug(`Esperando ${delay}ms antes del intento ${attempt + 1}`);
+            await new Promise<void>((resolve) => {
+              window.setTimeout(resolve, delay);
+            });
+          }
+
+          try {
+            logDebug(`Intento MINI-EB ${attempt + 1}`);
+            const controller = new AbortController();
+            const timeoutId = window.setTimeout(() => controller.abort(), 5000);
+
+            try {
+              const response = await fetch("/api/miniweb/status", {
+                cache: "no-store",
+                signal: controller.signal,
+              });
+
+              if (response.ok) {
+                const data = (await response.json()) as MiniWebStatusResponse;
+                logDebug("Respuesta MINI-EB OK", data);
+                return data;
+              }
+
+              const bodyText = await response.text().catch(() => "");
+              lastError = new Error(`HTTP ${response.status}: ${bodyText}`);
+              logDebug("Respuesta MINI-EB no OK", response.status, bodyText);
+            } finally {
+              window.clearTimeout(timeoutId);
+            }
+          } catch (error) {
+            lastError = error;
+            if (error instanceof DOMException && error.name === 'AbortError') {
+              logDebug("Intento MINI-EB expirado (timeout)");
+            } else {
+              logDebug("Error al consultar MINI-EB", error);
+            }
+          }
+        }
+
+        throw lastError ?? new Error("No se pudo obtener el estado MINI-EB");
+      };
+
+      try {
+        logDebug("Consultando estado MINI-EB", { silent });
+        const status = await fetchStatus();
+        const rawIp =
+          typeof status?.ip === "string" && status.ip.trim().length > 0
+            ? status.ip.trim()
+            : typeof status?.ip_address === "string" && status.ip_address.trim().length > 0
+              ? status.ip_address.trim()
+              : null;
+        const ssid =
+          typeof status?.ssid === "string" && status.ssid.trim().length > 0
+            ? status.ssid.trim()
+            : "—";
+
+        if (!rawIp) {
+          throw new Error("Respuesta MINI-EB sin IP");
+        }
+
+        setNetworkIP(rawIp);
+        setNetworkSSID(ssid);
+        setNetworkIP2(rawIp);
+        setMiniEbStatus({ status: "ready", ip: rawIp, ssid });
+        miniEbErrorNotifiedRef.current = false;
+        logDebug("MINI-EB listo", { ip: rawIp, ssid });
+      } catch (error) {
+        setNetworkIP(null);
+        setNetworkSSID("—");
+        setNetworkIP2("—");
+        setMiniEbStatus({
+          status: "error",
+          error: "No se pudo obtener el acceso MINI-EB. Inténtalo de nuevo.",
+        });
+
+        if (featureFlags.miniEbStable && !miniEbErrorNotifiedRef.current) {
+          toast({
+            title: "Error MINI-EB",
+            description: "No se pudo obtener el acceso MINI-EB.",
+            variant: "destructive",
+          });
+          miniEbErrorNotifiedRef.current = true;
+        }
+
+        logDebug("Fallo al consultar MINI-EB", error);
+      }
+    },
+    [featureFlags.debugLogs, featureFlags.miniEbStable, toast]
+  );
 
   // Load settings on mount
   useEffect(() => {
@@ -190,7 +320,7 @@ export const SettingsView = () => {
 
     // Refresh network status every 10 seconds
     const interval = setInterval(() => {
-      void refreshNetworkStatus();
+      void refreshNetworkStatus({ silent: true });
     }, 10000);
 
     return () => clearInterval(interval);
@@ -873,17 +1003,18 @@ export const SettingsView = () => {
   const handleCheckUpdates = async () => {
     setIsCheckingUpdates(true);
     try {
-      const result = await api.checkUpdates();
-      setAvailableUpdates(result);
-      if (result.available) {
+      const result = await api.getOtaStatus();
+      setOtaStatus(result);
+
+      if (result.hasUpdate) {
         toast({
           title: "Actualización disponible",
-          description: `Versión ${result.version} disponible`,
+          description: `Versión ${result.latest} lista para instalar`,
         });
       } else {
         toast({
           title: "Sistema actualizado",
-          description: "No hay actualizaciones disponibles",
+          description: `La versión actual es ${result.current}`,
         });
       }
     } catch (error) {
@@ -898,7 +1029,7 @@ export const SettingsView = () => {
   };
 
   const handleInstallUpdate = async () => {
-    if (!availableUpdates?.available) return;
+    if (!featureFlags.otaApply || !otaStatus?.hasUpdate) return;
     
     if (!confirm("El dispositivo se reiniciará después de la actualización. ¿Continuar?")) {
       return;
@@ -1293,20 +1424,69 @@ export const SettingsView = () => {
               <div>
                 <Label className="text-lg font-medium mb-2 block">Acceso Mini-Web</Label>
                 <div className="rounded-lg border border-border p-4 space-y-3">
-                  <div>
-                    <p className="text-sm text-muted-foreground">URL:</p>
-                    <p className="text-lg font-mono break-all">
-                      {networkIP ? `http://${networkIP}:8080` : "Obteniendo..."}
-                    </p>
-                  </div>
-                  {networkIP && (
-                    <div className="flex justify-center py-3 bg-white rounded">
-                      <img 
-                        src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=http://${networkIP}:8080`}
-                        alt="QR Code"
-                        className="w-48 h-48"
-                      />
-                    </div>
+                  {featureFlags.miniEbStable ? (
+                    <>
+                      {miniEbStatus.status === "loading" && (
+                        <div className="flex items-center gap-2 text-muted-foreground">
+                          <Loader2 className="h-5 w-5 animate-spin" />
+                          <span>Cargando acceso MINI-EB…</span>
+                        </div>
+                      )}
+
+                      {miniEbStatus.status === "error" && (
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-2 text-destructive">
+                            <AlertCircle className="h-5 w-5" />
+                            <span>{miniEbStatus.error ?? "No se pudo obtener el acceso MINI-EB."}</span>
+                          </div>
+                          <Button variant="outline" size="sm" onClick={() => void refreshNetworkStatus()}>
+                            Reintentar
+                          </Button>
+                        </div>
+                      )}
+
+                      {miniEbStatus.status === "ready" && miniEbStatus.ip && (
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-2 text-success">
+                            <CheckCircle2 className="h-5 w-5" />
+                            <span>Listo</span>
+                          </div>
+                          <div>
+                            <p className="text-sm text-muted-foreground">URL:</p>
+                            <p className="text-lg font-mono break-all">{`http://${miniEbStatus.ip}:8080`}</p>
+                          </div>
+                          <div>
+                            <p className="text-sm text-muted-foreground">Red conectada:</p>
+                            <p className="text-lg font-medium">{miniEbStatus.ssid ?? "—"}</p>
+                          </div>
+                          <div className="flex justify-center rounded bg-white py-3">
+                            <img
+                              src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=http://${miniEbStatus.ip}:8080`}
+                              alt="Código QR MINI-EB"
+                              className="h-48 w-48"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <p className="text-sm text-muted-foreground">URL:</p>
+                        <p className="text-lg font-mono break-all">
+                          {networkIP ? `http://${networkIP}:8080` : "Obteniendo..."}
+                        </p>
+                      </div>
+                      {networkIP && (
+                        <div className="flex justify-center py-3 bg-white rounded">
+                          <img
+                            src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=http://${networkIP!}:8080`}
+                            alt="QR Code"
+                            className="w-48 h-48"
+                          />
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -1509,14 +1689,25 @@ export const SettingsView = () => {
             <h3 className="mb-4 text-2xl font-bold">Actualizaciones OTA</h3>
             
             <div className="space-y-6">
-              <div className="rounded-lg bg-muted p-6 text-center">
-                <p className="mb-2 text-sm text-muted-foreground">Versión Actual</p>
-                <p className="text-4xl font-bold text-primary">v2.5.0</p>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-lg bg-muted p-6 text-center">
+                  <p className="mb-2 text-sm text-muted-foreground">Versión Actual</p>
+                  <p className="text-4xl font-bold text-primary">{formatVersion(otaStatus?.current)}</p>
+                </div>
+                <div className="rounded-lg bg-muted p-6 text-center">
+                  <p className="mb-2 text-sm text-muted-foreground">Última disponible</p>
+                  <p className="text-3xl font-semibold">{formatVersion(otaStatus?.latest)}</p>
+                  {otaStatus && (
+                    <p className={`mt-2 text-sm ${otaStatus.hasUpdate ? "text-warning" : "text-success"}`}>
+                      {otaStatus.hasUpdate ? "Actualización pendiente" : "Sistema al día"}
+                    </p>
+                  )}
+                </div>
               </div>
 
-              <Button 
-                variant="glow" 
-                size="xl" 
+              <Button
+                variant="glow"
+                size="xl"
                 className="w-full text-xl"
                 onClick={handleCheckUpdates}
                 disabled={isCheckingUpdates}
@@ -1525,37 +1716,41 @@ export const SettingsView = () => {
                 {isCheckingUpdates ? "Verificando..." : "Buscar Actualizaciones"}
               </Button>
 
-              {availableUpdates && (
-                <div className={`rounded-lg border p-4 animate-fade-in ${availableUpdates.available ? "border-primary bg-primary/5" : "border-success bg-success/5"}`}>
-                  {availableUpdates.available ? (
-                    <>
-                      <p className="font-medium text-primary mb-2">
-                        📦 Nueva versión disponible: {availableUpdates.version}
+              {otaStatus && (
+                <div className={`rounded-lg border p-4 animate-fade-in ${otaStatus.hasUpdate ? "border-primary bg-primary/5" : "border-success bg-success/5"}`}>
+                  {otaStatus.hasUpdate ? (
+                    <div className="space-y-3">
+                      <p className="font-medium text-primary">
+                        📦 Nueva versión disponible: {formatVersion(otaStatus.latest)}
                       </p>
-                      <Button
-                        variant="glow"
-                        size="lg"
-                        className="w-full"
-                        onClick={handleInstallUpdate}
-                        disabled={isInstallingUpdate}
-                      >
-                        {isInstallingUpdate ? (
-                          <>
-                            <Download className="mr-2 h-5 w-5 animate-spin" />
-                            Instalando...
-                          </>
-                        ) : (
-                          <>
-                            <Download className="mr-2 h-5 w-5" />
-                            Instalar Actualización
-                          </>
-                        )}
-                      </Button>
-                    </>
+                      {featureFlags.otaApply ? (
+                        <Button
+                          variant="glow"
+                          size="lg"
+                          className="w-full"
+                          onClick={handleInstallUpdate}
+                          disabled={isInstallingUpdate}
+                        >
+                          {isInstallingUpdate ? (
+                            <>
+                              <Download className="mr-2 h-5 w-5 animate-spin" />
+                              Instalando...
+                            </>
+                          ) : (
+                            <>
+                              <Download className="mr-2 h-5 w-5" />
+                              Instalar Actualización
+                            </>
+                          )}
+                        </Button>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          La instalación automática estará disponible próximamente.
+                        </p>
+                      )}
+                    </div>
                   ) : (
-                    <p className="font-medium text-success">
-                      ✓ El sistema está actualizado
-                    </p>
+                    <p className="font-medium text-success">✓ El sistema está actualizado</p>
                   )}
                 </div>
               )}
