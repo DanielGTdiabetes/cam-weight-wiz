@@ -1,5 +1,7 @@
 // Structured Logger Service
 
+import { storage } from './storage';
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 interface LogEntry {
@@ -21,8 +23,24 @@ class Logger {
     }
   }
 
+  private isDebugFlagEnabled(): boolean {
+    if (import.meta.env.DEV) {
+      return true;
+    }
+
+    try {
+      const settings = storage.getSettings();
+      return settings.ui.flags.debugLogs;
+    } catch {
+      return false;
+    }
+  }
+
   private shouldLog(level: LogLevel): boolean {
     const levels: LogLevel[] = ['debug', 'info', 'warn', 'error'];
+    if (level === 'debug' && !this.isDebugFlagEnabled()) {
+      return false;
+    }
     return levels.indexOf(level) >= levels.indexOf(this.minLevel);
   }
 
@@ -57,7 +75,9 @@ class Logger {
       error: '❌',
     };
 
-    console.log(
+    const loggerFn = level === 'debug' ? console.debug : console.log;
+
+    loggerFn(
       `%c${emoji[level]} [${level.toUpperCase()}] ${message}`,
       styles[level],
       context ?? ''

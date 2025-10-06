@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
 import { storage } from "@/services/storage";
+import { FEATURE_FLAG_DEFINITIONS, getFeatureFlags, setFeatureFlag, type FeatureFlagKey, type FeatureFlags } from "@/services/featureFlags";
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { cn } from "@/lib/utils";
@@ -20,6 +21,7 @@ export const SettingsView = () => {
   const { weight } = useScaleWebSocket();
   const localClient = isLocalClient();
   const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
+  const [featureFlags, setFeatureFlags] = useState<FeatureFlags>(() => getFeatureFlags());
   
   // Load settings on mount
   useEffect(() => {
@@ -38,6 +40,7 @@ export const SettingsView = () => {
     setTargetGlucose(settings.targetGlucose.toString());
     setHypoAlarm(settings.hypoAlarm.toString());
     setHyperAlarm(settings.hyperAlarm.toString());
+    setFeatureFlags(getFeatureFlags());
 
     // Fetch network status (IP and SSID)
     const fetchNetworkStatus = async () => {
@@ -102,6 +105,15 @@ export const SettingsView = () => {
   const [networkSSID, setNetworkSSID] = useState<string>("—");
   const [networkIP2, setNetworkIP2] = useState<string>("—");
   const [internalKeyboardEnabled, setInternalKeyboardEnabled] = useState(localClient);
+
+  const handleFeatureFlagToggle = (key: FeatureFlagKey, value: boolean, title: string) => {
+    const updated = setFeatureFlag(key, value);
+    setFeatureFlags(updated);
+    toast({
+      title: value ? "Función activada" : "Función desactivada",
+      description: title,
+    });
+  };
 
   // Save settings when they change
   useEffect(() => {
@@ -432,7 +444,7 @@ export const SettingsView = () => {
         <TabsContent value="general" className="space-y-4">
           <Card className="p-6">
             <h3 className="mb-4 text-2xl font-bold">Configuración General</h3>
-            
+
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
@@ -466,6 +478,30 @@ export const SettingsView = () => {
                 <Volume2 className="mr-2 h-5 w-5" />
                 {isTestingAudio ? "Probando..." : "Probar Audio"}
               </Button>
+            </div>
+          </Card>
+
+          <Card className="p-6">
+            <h3 className="text-2xl font-bold">Funciones experimentales</h3>
+            <p className="mb-6 mt-2 text-sm text-muted-foreground">
+              Activa solo las funciones que necesites probar. Todas se pueden desactivar en cualquier momento si generan
+              problemas.
+            </p>
+
+            <div className="space-y-5">
+              {FEATURE_FLAG_DEFINITIONS.map((definition) => (
+                <div key={definition.key} className="flex items-start justify-between gap-4">
+                  <div>
+                    <Label className="text-lg font-medium">{definition.title}</Label>
+                    <p className="text-sm text-muted-foreground">{definition.description}</p>
+                  </div>
+                  <Switch
+                    checked={featureFlags[definition.key]}
+                    onCheckedChange={(value) => handleFeatureFlagToggle(definition.key, value, definition.title)}
+                    className="mt-1 scale-125"
+                  />
+                </div>
+              ))}
             </div>
           </Card>
         </TabsContent>
