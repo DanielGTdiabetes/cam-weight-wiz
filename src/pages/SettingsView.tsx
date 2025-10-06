@@ -20,6 +20,7 @@ import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
@@ -77,6 +78,9 @@ export const SettingsView = () => {
     setTargetGlucose(settings.targetGlucose.toString());
     setHypoAlarm(settings.hypoAlarm.toString());
     setHyperAlarm(settings.hyperAlarm.toString());
+    setTimerAlarmSoundEnabled(settings.timerAlarmSoundEnabled);
+    setTimerVoiceAnnouncementsEnabled(settings.timerVoiceAnnouncementsEnabled);
+    setUiVolume(settings.uiVolume ?? 1);
     setFeatureFlags(getFeatureFlags());
 
     // Fetch network status (IP and SSID)
@@ -113,6 +117,9 @@ export const SettingsView = () => {
   const [isTestingBrowserVoice, setIsTestingBrowserVoice] = useState(false);
   const [diabetesMode, setDiabetesMode] = useState(false);
   const [bolusAssistant, setBolusAssistant] = useState(false);
+  const [timerAlarmSoundEnabled, setTimerAlarmSoundEnabled] = useState(true);
+  const [timerVoiceAnnouncementsEnabled, setTimerVoiceAnnouncementsEnabled] = useState(false);
+  const [uiVolume, setUiVolume] = useState(1);
   
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [keyboardConfig, setKeyboardConfig] = useState<{
@@ -269,6 +276,18 @@ export const SettingsView = () => {
   useEffect(() => {
     storage.saveSettings({ isVoiceActive: voiceEnabled });
   }, [voiceEnabled]);
+
+  useEffect(() => {
+    storage.saveSettings({ timerAlarmSoundEnabled });
+  }, [timerAlarmSoundEnabled]);
+
+  useEffect(() => {
+    storage.saveSettings({ timerVoiceAnnouncementsEnabled });
+  }, [timerVoiceAnnouncementsEnabled]);
+
+  useEffect(() => {
+    storage.saveSettings({ uiVolume });
+  }, [uiVolume]);
 
   useEffect(() => {
     voiceIdRef.current = voiceId;
@@ -845,6 +864,75 @@ export const SettingsView = () => {
                   {isTestingAudio ? "Probando..." : "Probar Audio"}
                 </Button>
               )}
+
+              {featureFlags.timerAlarms ? (
+                <div className="space-y-6 border-t border-border pt-6">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label className="text-lg font-medium">Alarmas sonoras</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Reproduce beeps cuando el temporizador finaliza.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={timerAlarmSoundEnabled}
+                      onCheckedChange={setTimerAlarmSoundEnabled}
+                      className="scale-150"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label className="text-lg font-medium">Anunciar por voz</Label>
+                      <p className="text-sm text-muted-foreground">
+                        Envía un mensaje hablado al terminar el temporizador.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={timerVoiceAnnouncementsEnabled}
+                      onCheckedChange={setTimerVoiceAnnouncementsEnabled}
+                      className="scale-150"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label className="text-lg font-medium">Volumen de interfaz</Label>
+                    <p className="text-sm text-muted-foreground">
+                      Ajusta el volumen de los sonidos (0 = silencio, 1 = máximo).
+                    </p>
+                    <div className="flex items-center gap-4">
+                      <Slider
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        value={[uiVolume]}
+                        onValueChange={(value) => {
+                          const [first] = value;
+                          const clamped = Math.min(Math.max(first ?? 0, 0), 1);
+                          setUiVolume(Number(clamped.toFixed(2)));
+                        }}
+                        className="max-w-[240px]"
+                      />
+                      <Input
+                        type="number"
+                        step="0.05"
+                        min="0"
+                        max="1"
+                        value={uiVolume}
+                        onChange={(event) => {
+                          const numeric = Number(event.target.value);
+                          if (Number.isNaN(numeric)) {
+                            return;
+                          }
+                          const clamped = Math.min(Math.max(numeric, 0), 1);
+                          setUiVolume(Number(clamped.toFixed(2)));
+                        }}
+                        className="w-24"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </Card>
 

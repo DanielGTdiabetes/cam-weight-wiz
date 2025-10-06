@@ -4,6 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { api } from "@/services/api";
+import { apiWrapper } from "@/services/apiWrapper";
+import { storage } from "@/services/storage";
 import { useNavSafeExit } from "@/hooks/useNavSafeExit";
 
 declare global {
@@ -26,37 +28,40 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
   const [isRunning, setIsRunning] = useState(false);
   const [inputMinutes, setInputMinutes] = useState(5);
   const [showPresets, setShowPresets] = useState(true);
+  const [alarmActive, setAlarmActive] = useState(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const completionTriggeredRef = useRef(false);
+  const alarmIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const alarmTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  useEffect(() => () => {
-    if (audioContextRef.current) {
-      try {
-        audioContextRef.current.close();
-      } catch (error) {
-        console.error("Error closing audio context", error);
-      }
-    }
-  }, []);
-
-  const playAlarm = useCallback(() => {
+  const playBeep = useCallback((volume = 1) => {
     if (typeof window === "undefined") {
       return;
     }
+
+    const normalizedVolume = Math.min(Math.max(volume, 0), 1);
+    if (normalizedVolume <= 0) {
+      return;
+    }
+
     const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
     if (!AudioContextClass) {
       return;
     }
+
     if (!audioContextRef.current || audioContextRef.current.state === "closed") {
       audioContextRef.current = new AudioContextClass();
     }
+
     const context = audioContextRef.current;
     if (!context) {
       return;
     }
+
     if (context.state === "suspended") {
       void context.resume().catch(() => undefined);
     }
+
     const oscillator = context.createOscillator();
     const gain = context.createGain();
 
@@ -64,23 +69,95 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
     oscillator.frequency.setValueAtTime(880, context.currentTime);
     gain.gain.setValueAtTime(0.0001, context.currentTime);
 
+    const targetGain = Math.max(0.0001, 0.25 * normalizedVolume);
+
     oscillator.connect(gain);
     gain.connect(context.destination);
 
     oscillator.start();
-    gain.gain.exponentialRampToValueAtTime(0.25, context.currentTime + 0.05);
+    gain.gain.exponentialRampToValueAtTime(targetGain, context.currentTime + 0.05);
     gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 1.4);
     oscillator.stop(context.currentTime + 1.5);
   }, []);
+
+  const stopAlarmFeedback = useCallback(() => {
+    if (alarmIntervalRef.current) {
+      clearInterval(alarmIntervalRef.current);
+      alarmIntervalRef.current = null;
+    }
+
+    if (alarmTimeoutRef.current) {
+      clearTimeout(alarmTimeoutRef.current);
+      alarmTimeoutRef.current = null;
+    }
+
+    setAlarmActive(false);
+  }, []);
+
+  useEffect(() => () => {
+    stopAlarmFeedback();
+    if (audioContextRef.current) {
+      try {
+        audioContextRef.current.close();
+      } catch (error) {
+        console.error("Error closing audio context", error);
+      }
+    }
+  }, [stopAlarmFeedback]);
 
   const triggerCompletionFeedback = useCallback(() => {
     if (completionTriggeredRef.current) {
       return;
     }
+
     completionTriggeredRef.current = true;
-    playAlarm();
-    void api.speak("Temporizador finalizado").catch(() => undefined);
-  }, [playAlarm]);
+
+    const settings = storage.getSettings();
+    const volume = Math.min(Math.max(settings.uiVolume ?? 1, 0), 1);
+    const timerAlarmsEnabled = Boolean(settings.ui.flags.timerAlarms);
+
+    stopAlarmFeedback();
+
+    if (timerAlarmsEnabled) {
+      if (settings.timerAlarmSoundEnabled && volume > 0) {
+        playBeep(volume);
+        if (alarmIntervalRef.current) {
+          clearInterval(alarmIntervalRef.current);
+        }
+        alarmIntervalRef.current = setInterval(() => {
+          playBeep(volume);
+          if (alarmTimeoutRef.current) {
+            clearTimeout(alarmTimeoutRef.current);
+          }
+          alarmTimeoutRef.current = setTimeout(() => {
+            playBeep(volume);
+          }, 400);
+        }, 3000);
+        setAlarmActive(true);
+      }
+
+      if (settings.timerVoiceAnnouncementsEnabled) {
+        const params = new URLSearchParams({ text: "Tiempo cumplido" });
+        if (settings.voiceId) {
+          params.set("voice", settings.voiceId);
+        }
+
+        void apiWrapper
+          .post(`/api/voice/tts/say?${params.toString()}`)
+          .catch((error) => {
+            console.error("Failed to send timer completion TTS", error);
+            void api.speak("Tiempo cumplido", settings.voiceId).catch(() => undefined);
+          });
+      }
+
+      if (!settings.timerAlarmSoundEnabled || volume === 0) {
+        setAlarmActive(false);
+      }
+    } else {
+      playBeep(volume);
+      void api.speak("Temporizador finalizado").catch(() => undefined);
+    }
+  }, [playBeep, stopAlarmFeedback]);
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -101,6 +178,7 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
 
   const handleStart = (mins?: number) => {
     completionTriggeredRef.current = false;
+    stopAlarmFeedback();
     if (mins !== undefined) {
       setSeconds(mins * 60);
       setInputMinutes(mins);
@@ -124,9 +202,14 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
 
   const handleReset = () => {
     completionTriggeredRef.current = false;
+    stopAlarmFeedback();
     setSeconds(0);
     setIsRunning(false);
     setShowPresets(true);
+  };
+
+  const handleStopAlarm = () => {
+    stopAlarmFeedback();
   };
 
   const formatTime = (totalSeconds: number) => {
@@ -359,6 +442,17 @@ export const TimerFullView = ({ context = "page", onClose }: TimerFullViewProps 
               <RotateCcw className="mr-2 h-5 w-5" />
               Reiniciar
             </Button>
+            {alarmActive && (
+              <Button
+                onClick={handleStopAlarm}
+                size="lg"
+                variant="destructive"
+                className="h-14 w-32 text-base"
+              >
+                <X className="mr-2 h-5 w-5" />
+                Detener
+              </Button>
+            )}
           </div>
         </div>
       </Card>
