@@ -16,6 +16,7 @@ import time
 import threading
 import shlex
 import tempfile
+import traceback
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple
@@ -25,7 +26,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -51,6 +52,17 @@ DEFAULT_SERIAL_BAUD = 115200
 
 LOG_SCALE = logging.getLogger("bascula.scale")
 LOG_NETWORK = logging.getLogger("bascula.network")
+LOG_OTA = logging.getLogger("bascula.ota")
+
+OTA_RELEASES_DIR = Path("/opt/bascula/releases")
+OTA_CURRENT_LINK = Path("/opt/bascula/current")
+OTA_LOG_PATH = Path("/var/log/bascula/ota.log")
+OTA_STATE_PATH = Path("/opt/bascula/data/ota-state.json")
+OTA_REPO_URL = "https://github.com/DanielGTdiabetes/cam-weight-wiz"
+
+_OTA_STATE_LOCK = threading.Lock()
+_ota_state: Dict[str, Any] = {}
+_ota_worker_thread: Optional[threading.Thread] = None
 
 NMCLI_BIN = Path("/usr/bin/nmcli")
 NM_CONNECTIONS_DIR = Path("/etc/NetworkManager/system-connections")
@@ -79,6 +91,11 @@ class CalibrationPayload(BaseModel):
 
 class CalibrationApplyPayload(BaseModel):
     reference_grams: float
+
+
+class OTAApplyPayload(BaseModel):
+    target: Optional[str] = None
+
 
 # ---------- Helpers ----------
 def _load_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -162,6 +179,416 @@ def _write_pin(pin: str) -> None:
     except Exception:
         pass
 
+
+def _default_ota_state() -> Dict[str, Any]:
+    return {
+        "status": "idle",
+        "started_at": 0,
+        "finished_at": 0,
+        "current": "unknown",
+        "target": "",
+        "message": "",
+        "progress": 0,
+    }
+
+
+def _normalize_ota_state(raw: Dict[str, Any] | None) -> Dict[str, Any]:
+    state = _default_ota_state()
+    if not isinstance(raw, dict):
+        return state
+
+    allowed_status = {"idle", "running", "success", "error"}
+    status = str(raw.get("status", state["status"]))
+    if status not in allowed_status:
+        status = state["status"]
+
+    def _to_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+
+    def _to_progress(value: Any) -> int:
+        prog = _to_int(value)
+        return max(0, min(100, prog))
+
+    message = str(raw.get("message", ""))[:300]
+    current = str(raw.get("current", state["current"]))
+    target = str(raw.get("target", state["target"]))
+
+    state.update(
+        {
+            "status": status,
+            "started_at": _to_int(raw.get("started_at", state["started_at"])),
+            "finished_at": _to_int(raw.get("finished_at", state["finished_at"])),
+            "current": current,
+            "target": target,
+            "message": message,
+            "progress": _to_progress(raw.get("progress", state["progress"])),
+        }
+    )
+    return state
+
+
+def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    os.replace(tmp_path, path)
+
+
+def _load_ota_state_from_disk() -> Dict[str, Any]:
+    try:
+        raw = json.loads(OTA_STATE_PATH.read_text())
+    except FileNotFoundError:
+        return _default_ota_state()
+    except Exception:
+        return _default_ota_state()
+    return _normalize_ota_state(raw)
+
+
+def _write_ota_state_to_disk(state: Dict[str, Any]) -> None:
+    try:
+        _atomic_write_json(OTA_STATE_PATH, state)
+    except Exception as exc:
+        LOG_OTA.warning("No se pudo escribir ota-state.json: %s", exc)
+
+
+class _OTAEventManager:
+    def __init__(self) -> None:
+        self._listeners: list[tuple[asyncio.Queue[str], asyncio.AbstractEventLoop]] = []
+        self._lock = threading.Lock()
+
+    def register(self, queue: asyncio.Queue[str], loop: asyncio.AbstractEventLoop) -> None:
+        with self._lock:
+            self._listeners.append((queue, loop))
+
+    def unregister(self, queue: asyncio.Queue[str]) -> None:
+        with self._lock:
+            self._listeners = [item for item in self._listeners if item[0] is not queue]
+
+    def broadcast(self, payload: str) -> None:
+        with self._lock:
+            listeners = list(self._listeners)
+        for queue, loop in listeners:
+            loop.call_soon_threadsafe(queue.put_nowait, payload)
+
+
+_ota_event_manager = _OTAEventManager()
+
+
+def _format_sse(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\n" f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _append_ota_log(message: str) -> None:
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S%z")
+    line = f"{timestamp} {message.strip()}"
+    try:
+        OTA_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with OTA_LOG_PATH.open("a", encoding="utf-8") as fp:
+            fp.write(line + "\n")
+    except Exception as exc:
+        LOG_OTA.warning("No se pudo escribir en el log OTA: %s", exc)
+    try:
+        payload = _format_sse("log", {"line": line})
+        _ota_event_manager.broadcast(payload)
+    except RuntimeError:
+        # No event loop running yet
+        pass
+
+
+def _tail_file(path: Path, max_lines: int) -> str:
+    if max_lines <= 0:
+        return ""
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fp:
+            from collections import deque
+
+            buffer = deque(fp, maxlen=max_lines)
+    except FileNotFoundError:
+        return ""
+    except Exception as exc:
+        LOG_OTA.warning("No se pudo leer el log OTA: %s", exc)
+        return ""
+    return "".join(buffer)
+
+
+def _get_current_release_label() -> str:
+    try:
+        if OTA_CURRENT_LINK.exists():
+            resolved = OTA_CURRENT_LINK.resolve()
+            git_dir = resolved if resolved.is_dir() else resolved.parent
+            cmd = ["git", "-C", str(git_dir), "rev-parse", "--short", "HEAD"]
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if proc.returncode == 0:
+                return proc.stdout.strip() or resolved.name
+            return resolved.name
+    except Exception as exc:
+        LOG_OTA.debug("No se pudo determinar release actual: %s", exc)
+    return "unknown"
+
+
+def _get_repo_head_commit(path: Path) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception as exc:
+        LOG_OTA.debug("No se pudo obtener commit en %s: %s", path, exc)
+        return None
+    if proc.returncode == 0:
+        commit = proc.stdout.strip()
+        return commit or None
+    return None
+
+
+def _discover_latest_remote_commit() -> str | None:
+    cmd = ["git", "ls-remote", OTA_REPO_URL, "main"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
+    except Exception as exc:
+        LOG_OTA.warning("No se pudo consultar el último commit remoto: %s", exc)
+        return None
+    if proc.returncode != 0:
+        LOG_OTA.warning("git ls-remote devolvió código %s", proc.returncode)
+        return None
+    output = proc.stdout.strip()
+    if not output:
+        return None
+    commit = output.split()[0]
+    return commit if commit else None
+
+
+def _run_logged_command(
+    cmd: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    check: bool = True,
+    input_text: str | None = None,
+) -> int:
+    display = " ".join(shlex.quote(part) for part in cmd)
+    LOG_OTA.info("[ota] Ejecutando: %s", display)
+    _append_ota_log(f"[ota] Ejecutando: {display}")
+    process = subprocess.Popen(
+        list(cmd),
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        stdin=subprocess.PIPE if input_text is not None else None,
+        text=True,
+    )
+    if input_text is not None and process.stdin:
+        try:
+            process.stdin.write(input_text)
+            process.stdin.close()
+        except Exception:
+            pass
+    if process.stdout:
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if line:
+                LOG_OTA.info("[ota] %s", line)
+            _append_ota_log(f"[ota] {line}")
+    returncode = process.wait()
+    if returncode != 0:
+        msg = f"Comando falló (exit {returncode}): {display}"
+        LOG_OTA.error("[ota] %s", msg)
+        _append_ota_log(f"[ota] {msg}")
+        if check:
+            raise RuntimeError(msg)
+    return returncode
+
+
+def _run_smoke_tests() -> None:
+    tests: list[tuple[str, Sequence[str]]] = [
+        ("health", ["curl", "-fsS", "http://127.0.0.1:8080/health"]),
+        ("openapi", ["curl", "-fsS", "http://127.0.0.1:8080/openapi.json"]),
+    ]
+    for label, cmd in tests:
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=15)
+        except Exception as exc:
+            LOG_OTA.warning("[ota] Smoke test %s no se pudo ejecutar: %s", label, exc)
+            _append_ota_log(f"[ota] Smoke test {label} no se pudo ejecutar: {exc}")
+            continue
+        if proc.returncode != 0:
+            LOG_OTA.warning(
+                "[ota] Smoke test %s falló con código %s", label, proc.returncode
+            )
+            _append_ota_log(
+                f"[ota] Smoke test {label} falló (exit {proc.returncode}): {proc.stdout.strip()} {proc.stderr.strip() if proc.stderr else ''}"
+            )
+            continue
+        output = proc.stdout.strip()
+        if label == "openapi":
+            try:
+                data = json.loads(output)
+                if "paths" not in data:
+                    raise ValueError("paths ausente")
+                _append_ota_log("[ota] Smoke test openapi: paths detectados")
+            except Exception as exc:
+                LOG_OTA.warning("[ota] Smoke test openapi con advertencia: %s", exc)
+                _append_ota_log(f"[ota] Smoke test openapi advertencia: {exc}")
+        else:
+            _append_ota_log(f"[ota] Smoke test {label}: OK")
+
+
+def _ota_worker(target: Optional[str]) -> None:
+    global _ota_worker_thread
+    started_at = int(time.time())
+    current_release = _get_current_release_label()
+    latest_commit = _discover_latest_remote_commit() if not target else None
+    target_label = target or (latest_commit or "main")
+
+    _update_ota_state(
+        {
+            "status": "running",
+            "started_at": started_at,
+            "finished_at": 0,
+            "current": current_release,
+            "target": target_label,
+            "message": "Preparando actualización",
+            "progress": 0,
+        }
+    )
+
+    _append_ota_log(
+        f"[ota] Iniciando job: current={current_release} target={target_label}"
+    )
+
+    release_dir: Optional[Path] = None
+
+    try:
+        OTA_RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+        release_dir = OTA_RELEASES_DIR / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+        _update_ota_state({"progress": 10, "message": "Clonando repositorio"})
+        _run_logged_command(
+            [
+                "git",
+                "clone",
+                "--branch",
+                "main",
+                "--depth",
+                "1",
+                OTA_REPO_URL,
+                str(release_dir),
+            ]
+        )
+        _update_ota_state({"progress": 30, "message": "Repositorio clonado"})
+
+        checkout_ref = target if target else None
+        if checkout_ref:
+            _update_ota_state({"message": f"Ajustando a {checkout_ref}"})
+            _run_logged_command(
+                ["git", "-C", str(release_dir), "fetch", "--depth", "1", "origin", checkout_ref]
+            )
+            _run_logged_command(
+                ["git", "-C", str(release_dir), "checkout", checkout_ref]
+            )
+
+        head_commit = _get_repo_head_commit(release_dir)
+        if head_commit:
+            _update_ota_state({"target": head_commit})
+
+        install_script = release_dir / "scripts" / "install-all.sh"
+        if not install_script.exists():
+            raise FileNotFoundError(f"No se encontró {install_script}")
+
+        _append_ota_log("[ota] Validando preinstalación")
+        _update_ota_state({"progress": 40, "message": "Validando instalación"})
+
+        _update_ota_state({"progress": 60, "message": "Instalando actualización"})
+        _run_logged_command(["sudo", "bash", "scripts/install-all.sh"], cwd=release_dir)
+
+        _update_ota_state({"progress": 80, "message": "Activando versión"})
+        _run_logged_command(["sudo", "ln", "-sfn", str(release_dir), str(OTA_CURRENT_LINK)])
+        _run_logged_command(["sudo", "systemctl", "daemon-reload"])
+        _run_logged_command(["sudo", "systemctl", "restart", "bascula-miniweb"])
+        _run_logged_command(
+            ["sudo", "systemctl", "restart", "bascula-app"], check=False
+        )
+
+        _update_ota_state({"progress": 90, "message": "Verificando servicios"})
+        _run_smoke_tests()
+
+        final_release = _get_current_release_label()
+        _update_ota_state(
+            {
+                "status": "success",
+                "finished_at": int(time.time()),
+                "progress": 100,
+                "current": final_release,
+                "message": "OTA aplicada",
+            }
+        )
+        _append_ota_log("[ota] OTA finalizada correctamente")
+    except Exception as exc:
+        error_message = str(exc)
+        truncated = error_message[:300]
+        _append_ota_log(f"[ota] ERROR: {error_message}")
+        tb_text = traceback.format_exc()
+        for line in tb_text.strip().splitlines():
+            _append_ota_log(f"[ota] {line}")
+        _update_ota_state(
+            {
+                "status": "error",
+                "finished_at": int(time.time()),
+                "message": truncated,
+            }
+        )
+    finally:
+        _ota_worker_thread = None
+
+
+def _start_ota_worker(target: Optional[str]) -> None:
+    global _ota_worker_thread
+    thread = threading.Thread(target=_ota_worker, args=(target,), daemon=True)
+    _ota_worker_thread = thread
+    thread.start()
+
+
+def _update_ota_state(changes: Dict[str, Any]) -> Dict[str, Any]:
+    global _ota_state
+    with _OTA_STATE_LOCK:
+        current_state = dict(_ota_state)
+        current_state.update(changes)
+        current_state = _normalize_ota_state(current_state)
+        _ota_state = current_state
+    _write_ota_state_to_disk(current_state)
+    try:
+        _ota_event_manager.broadcast(_format_sse("state", current_state))
+    except RuntimeError:
+        pass
+    return current_state
+
+
+def _get_ota_state() -> Dict[str, Any]:
+    with _OTA_STATE_LOCK:
+        return dict(_ota_state)
+
+
+with _OTA_STATE_LOCK:
+    _ota_state = _load_ota_state_from_disk()
+    if _ota_state.get("status") == "running":
+        recovery_message = "Servicio miniweb reiniciado durante OTA"
+        _ota_state = _normalize_ota_state(
+            {
+                **_ota_state,
+                "status": "error",
+                "message": recovery_message,
+                "finished_at": int(time.time()),
+            }
+        )
+        _write_ota_state_to_disk(_ota_state)
+        try:
+            _append_ota_log(f"[ota] {recovery_message}")
+        except Exception:
+            pass
 
 def _get_or_create_pin() -> str:
     pin = _load_pin()
@@ -2114,6 +2541,61 @@ async def api_scale_calibrate_apply(payload: CalibrationApplyPayload):
     else:
         LOG_SCALE.warning("Calibration apply failed: %s", result.get("reason"))
     return result
+
+
+@app.post("/api/ota/apply")
+async def api_ota_apply(payload: OTAApplyPayload | None = None):
+    target = (payload.target or "").strip() if payload else ""
+    target_value = target or None
+    state = _get_ota_state()
+    worker_busy = _ota_worker_thread is not None and _ota_worker_thread.is_alive()
+    if state.get("status") == "running" or worker_busy:
+        return JSONResponse({"reason": "busy"}, status_code=409)
+
+    LOG_OTA.info("[ota] apply solicitado (target=%s)", target_value or "latest")
+    _append_ota_log(f"[ota] apply solicitado target={target_value or 'latest'}")
+    _start_ota_worker(target_value)
+    return {"ok": True, "job": "ota"}
+
+
+@app.get("/api/ota/status")
+async def api_ota_status():
+    return _get_ota_state()
+
+
+@app.get("/api/ota/logs")
+async def api_ota_logs(lines: int = 400):
+    try:
+        line_count = int(lines)
+    except (TypeError, ValueError):
+        line_count = 400
+    line_count = max(1, min(line_count, 2000))
+    text = _tail_file(OTA_LOG_PATH, line_count)
+    return PlainTextResponse(text)
+
+
+@app.get("/api/ota/events")
+async def api_ota_events(request: Request) -> StreamingResponse:
+    async def event_stream() -> AsyncGenerator[str, None]:
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        _ota_event_manager.register(queue, loop)
+        try:
+            await queue.put(_format_sse("state", _get_ota_state()))
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    message = await asyncio.wait_for(queue.get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                yield message
+        finally:
+            _ota_event_manager.unregister(queue)
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 # ---------- Static SPA ----------

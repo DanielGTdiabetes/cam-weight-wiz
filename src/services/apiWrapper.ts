@@ -36,6 +36,10 @@ class ApiWrapper {
     this.baseUrl = url;
   }
 
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   private async fetchWithTimeout(
     url: string,
     options: RequestInit,
