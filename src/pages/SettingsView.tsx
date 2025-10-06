@@ -210,7 +210,12 @@ export const SettingsView = () => {
       return "—";
     }
 
-    return value.startsWith("v") ? value : `v${value}`;
+    const normalized = value.trim();
+    if (!normalized || normalized.toLowerCase() === "unknown") {
+      return "—";
+    }
+
+    return normalized.startsWith("v") ? normalized : `v${normalized}`;
   };
 
   const refreshNetworkStatus = useCallback(
