@@ -40,6 +40,12 @@ Tras el reinicio:
 - El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 - Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
 
+### Dependencias Python críticas
+
+El backend y la miniweb requieren una serie de librerías que ahora se instalan desde `requirements.txt`. 【F:requirements.txt†L1-L20】
+Entre las más relevantes se encuentran `fastapi`, `uvicorn[standard]`, `pydantic`, `rapidfuzz` (>=3,<4), `vosk`, `picamera2` y `piper-tts`, necesarias para la API, reconocimiento de voz y cámara. 【F:requirements.txt†L2-L20】
+El instalador crea la `venv` con el usuario objetivo, instala esas dependencias y valida el entorno importando `fastapi`, `uvicorn` y `rapidfuzz` antes de habilitar los servicios, evitando fallos por módulos faltantes. 【F:scripts/install-all.sh†L1202-L1254】
+
 ## API de configuración de red
 
 La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo` ni edición manual de perfiles de NetworkManager:

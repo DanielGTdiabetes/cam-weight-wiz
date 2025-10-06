@@ -1186,9 +1186,17 @@ log "✓ Estructura OTA configurada"
 log "[12/20] Configurando entorno Python..."
 cd "${BASCULA_CURRENT_LINK}"
 if [[ ! -d ".venv" ]]; then
-  python3 -m venv .venv
+  set +e
+  runuser -l "${TARGET_USER}" -c "python3 -m venv '${BASCULA_CURRENT_LINK}/.venv'"
+  create_rc=$?
+  set -e
+  if [[ ${create_rc} -ne 0 ]]; then
+    warn "No se pudo crear la venv como ${TARGET_USER}; intentando como root"
+    python3 -m venv .venv
+  fi
 fi
 VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
+chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
 VENV_PY="${VENV_DIR}/bin/python"
 VENV_PIP="${VENV_DIR}/bin/pip"
 
@@ -1202,17 +1210,38 @@ export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BI
 export PIP_INDEX_URL="https://www.piwheels.org/simple"
 export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
 
+REQUIREMENTS_FILE="${BASCULA_CURRENT_LINK}/requirements.txt"
+
 if [[ "${NET_OK}" -eq 1 ]]; then
-  if ! ${VENV_PIP} install --upgrade pip wheel setuptools; then
-    warn "No se pudo actualizar pip/wheel/setuptools"
+  if ! sudo -H -u "${TARGET_USER}" env \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_PREFER_BINARY=1 \
+    PIP_INDEX_URL="${PIP_INDEX_URL}" \
+    PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
+    "${VENV_PY}" -m pip install --upgrade pip wheel setuptools; then
+    fail "No se pudo actualizar pip/wheel/setuptools en la venv"
   fi
-  if ! ${VENV_PIP} install fastapi 'uvicorn[standard]' websockets python-multipart \
-    pyserial opencv-python pillow pyzbar numpy aiofiles httpx \
-    pytesseract rapidocr-onnxruntime; then
-    warn "No se pudieron instalar todas las dependencias de Python"
+  if [[ -f "${REQUIREMENTS_FILE}" ]]; then
+    if ! sudo -H -u "${TARGET_USER}" env \
+      PIP_DISABLE_PIP_VERSION_CHECK=1 \
+      PIP_ROOT_USER_ACTION=ignore \
+      PIP_PREFER_BINARY=1 \
+      PIP_INDEX_URL="${PIP_INDEX_URL}" \
+      PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
+      "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
+      fail "No se pudieron instalar las dependencias Python desde requirements.txt"
+    fi
+  else
+    fail "No se encontró ${REQUIREMENTS_FILE}; instala las dependencias manualmente"
   fi
 else
-  warn "Sin red: omitiendo instalación de dependencias Python"
+  warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
+fi
+
+if ! sudo -H -u "${TARGET_USER}" "${VENV_PY}" -c "import fastapi,uvicorn,rapidfuzz"; then
+  err "[ERROR] Dependencias Python faltantes"
+  exit 1
 fi
 
 log "✓ Entorno Python configurado"
@@ -1715,9 +1744,24 @@ install_services() {
 }
 
 # Llamada protegida (no afecta a AP/timers)
+SERVICES_INSTALLED=0
 if [ -f systemd/bascula-miniweb.service ] && [ -f systemd/bascula-backend.service ] && [ -f systemd/bascula-ui.service ]; then
   install_services
+  SERVICES_INSTALLED=1
 else
   echo "[install] aviso: faltan units en systemd/ (miniweb/backend/ui); no se instalaron"
+fi
+
+if [[ ${SERVICES_INSTALLED} -eq 1 && "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if systemctl restart bascula-miniweb; then
+    sleep 3
+    if ! curl -fsS http://127.0.0.1:8080/health >/dev/null; then
+      err "[ERROR] miniweb no responde"
+      exit 1
+    fi
+  else
+    err "[ERROR] No se pudo reiniciar bascula-miniweb"
+    exit 1
+  fi
 fi
 # --- Fin bloque ---
