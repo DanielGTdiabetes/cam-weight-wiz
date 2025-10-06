@@ -34,6 +34,7 @@ from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
 from backend.voice import router as voice_router
 from backend.camera import router as camera_router
+from backend.wake import router as wake_router, init_wake_if_enabled
 
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -2430,8 +2431,11 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
+init_wake_if_enabled(app)
+
 app.include_router(voice_router)
 app.include_router(camera_router)
+app.include_router(wake_router)
 
 
 @app.get("/health")

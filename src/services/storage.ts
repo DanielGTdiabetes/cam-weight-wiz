@@ -62,6 +62,7 @@ export interface AppSettings {
   // UI settings
   isVoiceActive: boolean;
   voiceId?: string;
+  wakeWordEnabled: boolean;
   theme: 'dark' | 'light';
   timerAlarmSoundEnabled: boolean;
   timerVoiceAnnouncementsEnabled: boolean;
@@ -321,6 +322,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   hyperAlarm: 180,
   isVoiceActive: false,
   voiceId: undefined,
+  wakeWordEnabled: false,
   theme: 'dark',
   timerAlarmSoundEnabled: true,
   timerVoiceAnnouncementsEnabled: false,
@@ -337,6 +339,12 @@ const cloneSettings = (settings: AppSettings): AppSettings => ({
     flags: { ...settings.ui.flags },
   },
 });
+
+const dispatchSettingsUpdate = (settings: AppSettings) => {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('app-settings-updated', { detail: { settings } }));
+  }
+};
 
 const mergeSettings = (base: AppSettings, overrides?: AppSettingsUpdate): AppSettings => {
   const next = cloneSettings(base);
@@ -434,6 +442,7 @@ class StorageService {
       const current = this.getSettings();
       const updated = mergeSettings(current, settings);
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(updated));
+      dispatchSettingsUpdate(updated);
     } catch (error) {
       console.error('Error saving settings:', error);
     }
@@ -442,6 +451,7 @@ class StorageService {
   resetSettings(): void {
     try {
       localStorage.removeItem(SETTINGS_KEY);
+      dispatchSettingsUpdate(cloneSettings(DEFAULT_SETTINGS));
     } catch (error) {
       console.error('Error resetting settings:', error);
     }
