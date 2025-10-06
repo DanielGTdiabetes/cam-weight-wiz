@@ -233,7 +233,7 @@ class ApiService {
 
   // OTA Updates
   async getOtaStatus(): Promise<{ current: string; latest: string; hasUpdate: boolean }> {
-    return apiWrapper.get<{ current: string; latest: string; hasUpdate: boolean }>('/api/ota/check');
+    return apiWrapper.get<{ current: string; latest: string; hasUpdate: boolean }>('/api/updates/check');
   }
 
   async getOtaJobStatus(): Promise<OtaJobState> {
