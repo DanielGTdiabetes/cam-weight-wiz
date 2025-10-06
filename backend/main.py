@@ -431,6 +431,10 @@ VERSION_FILE = Path(os.getenv("BASCULA_VERSION_FILE", Path.home() / ".bascula" /
 class CalibrationRequest(BaseModel):
     known_grams: float
 
+
+class CalibrationApplyRequest(BaseModel):
+    reference_grams: float
+
 class TimerStart(BaseModel):
     seconds: int
 
@@ -661,6 +665,23 @@ async def set_calibration(data: CalibrationRequest):
     if service is None:
         return {"ok": False, "success": False, "reason": "service_not_initialized"}
     result = service.calibrate(data.known_grams)
+    result["success"] = result.get("ok", False)
+    return result
+
+
+@app.post("/api/scale/calibrate/apply")
+async def apply_calibration(data: CalibrationApplyRequest):
+    service = scale_service
+    if service is None:
+        return {"ok": True, "success": True, "message": "scale service not configured"}
+
+    calibrate_apply = getattr(service, "calibrate_apply", None)
+    if callable(calibrate_apply):
+        result = calibrate_apply(data.reference_grams)
+    else:
+        result = service.calibrate(data.reference_grams)
+
+    result.setdefault("message", "Calibración aplicada")
     result["success"] = result.get("ok", False)
     return result
 

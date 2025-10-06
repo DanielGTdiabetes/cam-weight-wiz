@@ -85,6 +85,15 @@ class ApiService {
     await apiWrapper.post('/api/scale/calibrate', { factor });
   }
 
+  async applyCalibration(
+    referenceGrams: number
+  ): Promise<{ ok: boolean; message?: string; calibration_factor?: number }> {
+    return apiWrapper.post<{ ok: boolean; message?: string; calibration_factor?: number }>(
+      '/api/scale/calibrate/apply',
+      { reference_grams: referenceGrams }
+    );
+  }
+
   // Food scanner endpoints
   async analyzeFood(imageBlob: Blob, weight: number): Promise<FoodAnalysis> {
     // FormData needs special handling, use native fetch

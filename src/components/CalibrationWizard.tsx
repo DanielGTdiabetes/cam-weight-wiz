@@ -15,9 +15,198 @@ interface CalibrationWizardProps {
   open: boolean;
   onClose: () => void;
   currentWeight?: number;
+  isCalibrationV2?: boolean;
 }
 
-export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: CalibrationWizardProps) => {
+interface CalibrationWizardBaseProps {
+  open: boolean;
+  onClose: () => void;
+  currentWeight: number;
+}
+
+const CalibrationWizardV2 = ({ open, onClose, currentWeight }: CalibrationWizardBaseProps) => {
+  const [step, setStep] = useState<1 | 2>(1);
+  const [referenceWeight, setReferenceWeight] = useState("100");
+  const [isApplying, setIsApplying] = useState(false);
+  const { toast } = useToast();
+
+  const resetWizard = () => {
+    setStep(1);
+    setReferenceWeight("100");
+    setIsApplying(false);
+  };
+
+  const totalSteps = 2;
+  const progress = ((step - 1) / (totalSteps - 1)) * 100;
+  const parsedReference = parseFloat(referenceWeight);
+  const referenceValid = Number.isFinite(parsedReference) && parsedReference > 0;
+  const hasReferenceOnScale = Math.abs(currentWeight) > 0.05;
+
+  const handleApply = async () => {
+    if (!referenceValid) {
+      toast({
+        title: "Peso inválido",
+        description: "Introduce un peso de referencia mayor a 0 g.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsApplying(true);
+    try {
+      const response = await api.applyCalibration(parsedReference);
+      if (response.ok) {
+        if (typeof response.calibration_factor === "number" && Number.isFinite(response.calibration_factor)) {
+          storage.saveSettings({ calibrationFactor: response.calibration_factor });
+        }
+
+        toast({
+          title: "Calibración aplicada",
+          description: response.message ?? `Referencia registrada: ${parsedReference.toFixed(1)} g`,
+        });
+
+        if (navigator.vibrate) {
+          navigator.vibrate([40, 60, 40]);
+        }
+
+        resetWizard();
+        onClose();
+      } else {
+        toast({
+          title: "Error",
+          description: response.message ?? "No se pudo aplicar la calibración",
+          variant: "destructive",
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "No se pudo aplicar la calibración",
+        variant: "destructive",
+      });
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(dialogOpen) => {
+        if (!dialogOpen) {
+          resetWizard();
+          onClose();
+        }
+      }}
+    >
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-2xl">
+            <Scale className="h-6 w-6" />
+            Asistente de Calibración
+          </DialogTitle>
+        </DialogHeader>
+
+        <Progress value={Number.isFinite(progress) ? progress : 0} className="mb-4" />
+
+        {step === 1 ? (
+          <Card className="p-6">
+            <div className="space-y-6 text-center">
+              <div className="flex justify-center">
+                <div className="rounded-full bg-primary/20 p-6">
+                  <Weight className="h-16 w-16 text-primary" />
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <h3 className="text-2xl font-bold">Paso 1: Coloca el peso de referencia</h3>
+                <p className="text-muted-foreground">
+                  Asegúrate de que la báscula marque el peso estable antes de continuar.
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Usa el botón <span className="font-semibold text-foreground">Cero</span> si necesitas ajustar la tara antes de
+                  colocar el peso.
+                </p>
+              </div>
+
+              <div className={cn("text-6xl font-bold", hasReferenceOnScale ? "text-primary" : "text-muted-foreground")}> 
+                {currentWeight.toFixed(1)} g
+              </div>
+
+              {!hasReferenceOnScale && (
+                <p className="text-sm text-warning">
+                  Espera a que la báscula detecte el peso de referencia.
+                </p>
+              )}
+
+              <Button
+                onClick={() => setStep(2)}
+                size="xxl"
+                variant="glow"
+                className="w-full"
+              >
+                Continuar
+              </Button>
+            </div>
+          </Card>
+        ) : (
+          <Card className="p-6">
+            <div className="space-y-6">
+              <div className="space-y-2 text-center">
+                <div className="flex justify-center">
+                  <div className="rounded-full bg-secondary/20 p-6">
+                    <Scale className="h-16 w-16 text-secondary" />
+                  </div>
+                </div>
+                <h3 className="text-2xl font-bold">Paso 2: Introduce el peso exacto</h3>
+                <p className="text-muted-foreground">
+                  Escribe el valor en gramos de tu peso de referencia para aplicar la calibración.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <Label className="text-lg">Peso de referencia (g)</Label>
+                <Input
+                  type="number"
+                  value={referenceWeight}
+                  onChange={(event) => setReferenceWeight(event.target.value)}
+                  className="h-16 text-center text-2xl"
+                  placeholder="100"
+                  min="0"
+                />
+                <p className="text-sm text-muted-foreground text-center">
+                  Ejemplo: pesa calibrada de 100 g o cualquier referencia certificada.
+                </p>
+              </div>
+
+              <div className="text-center">
+                <p className="mb-2 text-sm text-muted-foreground">Lectura actual</p>
+                <div className="text-5xl font-bold text-primary">{currentWeight.toFixed(1)} g</div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <Button onClick={() => setStep(1)} size="lg" variant="outline" disabled={isApplying}>
+                  Atrás
+                </Button>
+                <Button
+                  onClick={handleApply}
+                  size="lg"
+                  variant="glow"
+                  className="flex items-center justify-center"
+                  disabled={isApplying || !referenceValid}
+                >
+                  {isApplying ? "Aplicando..." : "Aplicar"}
+                </Button>
+              </div>
+            </div>
+          </Card>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+const CalibrationWizardLegacy = ({ open, onClose, currentWeight }: CalibrationWizardBaseProps) => {
   const [step, setStep] = useState(1);
   const [knownWeight, setKnownWeight] = useState("100");
   const [rawValue, setRawValue] = useState(0);
@@ -34,7 +223,6 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
   const handleZero = async () => {
     try {
       await api.scaleZero();
-      // Haptic feedback
       if (navigator.vibrate) {
         navigator.vibrate([30, 50, 30]);
       }
@@ -49,10 +237,8 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
   };
 
   const handleMeasure = () => {
-    // In a real implementation, this would read from the scale
-    // For now, we use the current weight as the raw value
     setRawValue(currentWeight);
-    
+
     const known = parseFloat(knownWeight);
     if (known > 0 && currentWeight > 0) {
       const factor = currentWeight / known;
@@ -71,13 +257,12 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
     try {
       await api.setCalibrationFactor(calibrationFactor);
       storage.saveSettings({ calibrationFactor });
-      
+
       toast({
         title: "¡Calibración completada!",
         description: `Factor de calibración: ${calibrationFactor.toFixed(4)}`,
       });
 
-      // Haptic feedback
       if (navigator.vibrate) {
         navigator.vibrate([50, 100, 50, 100, 50]);
       }
@@ -96,12 +281,15 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
   const progress = (step / 3) * 100;
 
   return (
-    <Dialog open={open} onOpenChange={(open) => {
-      if (!open) {
-        resetWizard();
-        onClose();
-      }
-    }}>
+    <Dialog
+      open={open}
+      onOpenChange={(dialogOpen) => {
+        if (!dialogOpen) {
+          resetWizard();
+          onClose();
+        }
+      }}
+    >
       <DialogContent className="max-w-2xl">
         <DialogHeader>
           <DialogTitle className="text-2xl flex items-center gap-2">
@@ -112,7 +300,6 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
 
         <Progress value={progress} className="mb-4" />
 
-        {/* Step 1: Zero */}
         {step === 1 && (
           <Card className="p-6">
             <div className="text-center space-y-6">
@@ -121,7 +308,7 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
                   <Scale className="h-16 w-16 text-primary" />
                 </div>
               </div>
-              
+
               <div>
                 <h3 className="text-2xl font-bold mb-2">Paso 1: Zero</h3>
                 <p className="text-muted-foreground">
@@ -129,10 +316,12 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
                 </p>
               </div>
 
-              <div className={cn(
-                "text-6xl font-bold",
-                currentWeight === 0 ? "text-success" : "text-warning"
-              )}>
+              <div
+                className={cn(
+                  "text-6xl font-bold",
+                  currentWeight === 0 ? "text-success" : "text-warning"
+                )}
+              >
                 {currentWeight.toFixed(1)} g
               </div>
 
@@ -155,7 +344,6 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
           </Card>
         )}
 
-        {/* Step 2: Known Weight */}
         {step === 2 && (
           <Card className="p-6">
             <div className="space-y-6">
@@ -165,7 +353,7 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
                     <Weight className="h-16 w-16 text-secondary" />
                   </div>
                 </div>
-                
+
                 <h3 className="text-2xl font-bold mb-2">Paso 2: Peso Conocido</h3>
                 <p className="text-muted-foreground">
                   Coloca un peso conocido en la báscula
@@ -214,7 +402,6 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
           </Card>
         )}
 
-        {/* Step 3: Save */}
         {step === 3 && (
           <Card className="p-6">
             <div className="text-center space-y-6">
@@ -223,7 +410,7 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
                   <Check className="h-16 w-16 text-success" />
                 </div>
               </div>
-              
+
               <div>
                 <h3 className="text-2xl font-bold mb-2">¡Calibración Lista!</h3>
                 <p className="text-muted-foreground">
@@ -271,4 +458,17 @@ export const CalibrationWizard = ({ open, onClose, currentWeight = 0 }: Calibrat
       </DialogContent>
     </Dialog>
   );
+};
+
+export const CalibrationWizard = ({
+  open,
+  onClose,
+  currentWeight = 0,
+  isCalibrationV2 = false,
+}: CalibrationWizardProps) => {
+  if (isCalibrationV2) {
+    return <CalibrationWizardV2 open={open} onClose={onClose} currentWeight={currentWeight} />;
+  }
+
+  return <CalibrationWizardLegacy open={open} onClose={onClose} currentWeight={currentWeight} />;
 };

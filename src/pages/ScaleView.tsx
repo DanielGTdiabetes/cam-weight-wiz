@@ -17,6 +17,13 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   const { weight, isStable, unit, isConnected, error, reconnectAttempts, connectionState } = useScaleWebSocket();
   const [displayUnit, setDisplayUnit] = useState<"g" | "ml">("g");
   const [decimals, setDecimals] = useState(1);
+  const [calibrationV2Enabled, setCalibrationV2Enabled] = useState(() => {
+    try {
+      return storage.getSettings().ui.flags.calibrationV2;
+    } catch {
+      return false;
+    }
+  });
   const { toast } = useToast();
   const localClient = isLocalClient();
 
@@ -41,6 +48,25 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   }, []);
 
   useEffect(() => {
+    const handleStorageChange = () => {
+      try {
+        setCalibrationV2Enabled(storage.getSettings().ui.flags.calibrationV2);
+      } catch {
+        setCalibrationV2Enabled(false);
+      }
+    };
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.addEventListener("storage", handleStorageChange);
+    return () => {
+      window.removeEventListener("storage", handleStorageChange);
+    };
+  }, []);
+
+  useEffect(() => {
     if (error) {
       toast({
         title: "Error de conexión",
@@ -53,11 +79,11 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   const handleTare = async () => {
     try {
       await api.scaleTare();
-      toast({ title: "Tara realizada" });
+      toast({ title: calibrationV2Enabled ? "Tara aplicada" : "Tara realizada" });
     } catch (err) {
       toast({
         title: "Error",
-        description: "No se pudo realizar la tara",
+        description: calibrationV2Enabled ? "No se pudo aplicar la tara" : "No se pudo realizar la tara",
         variant: "destructive",
       });
     }
@@ -158,7 +184,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
           disabled={!isConnected}
           className="h-16 text-xl"
         >
-          TARA
+          {calibrationV2Enabled ? "Cero" : "TARA"}
         </Button>
         
         <Button
