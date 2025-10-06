@@ -17,6 +17,7 @@ import {
   AlertCircle,
   Info,
   Loader2,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -85,6 +86,8 @@ type MiniWebStatusResponse = {
   ip?: string;
   ip_address?: string;
   ssid?: string;
+  ap_active?: boolean;
+  connectivity?: string;
   [key: string]: unknown;
 };
 
@@ -168,7 +171,8 @@ export const SettingsView = () => {
   const [hyperAlarm, setHyperAlarm] = useState("180");
   const [networkIP, setNetworkIP] = useState<string | null>(null);
   const [miniEbStatus, setMiniEbStatus] = useState<MiniEbStatusState>({ status: "loading" });
-  
+  const [isApRecoveryMode, setIsApRecoveryMode] = useState(false);
+
   const [tempValue, setTempValue] = useState("");
   const [isTestingAudio, setIsTestingAudio] = useState(false);
   const [isTestingChatGPT, setIsTestingChatGPT] = useState(false);
@@ -294,6 +298,10 @@ export const SettingsView = () => {
       try {
         logDebug("Consultando estado MINI-EB", { silent });
         const status = await fetchStatus();
+        const connectivity =
+          typeof status?.connectivity === "string" ? status.connectivity.toLowerCase() : undefined;
+        const apActive = Boolean(status?.ap_active);
+        setIsApRecoveryMode(apActive || (connectivity ? connectivity !== "full" : false));
         const rawIp =
           typeof status?.ip === "string" && status.ip.trim().length > 0
             ? status.ip.trim()
@@ -319,6 +327,7 @@ export const SettingsView = () => {
         setNetworkIP(null);
         setNetworkSSID("—");
         setNetworkIP2("—");
+        setIsApRecoveryMode(false);
         setMiniEbStatus({
           status: "error",
           error: "No se pudo obtener el acceso MINI-EB. Inténtalo de nuevo.",
@@ -1774,6 +1783,30 @@ export const SettingsView = () => {
                   <p className="text-sm text-muted-foreground">{networkIP2}</p>
                 </div>
               </div>
+
+              {isApRecoveryMode && (
+                <div className="space-y-3 rounded-lg border border-warning/40 bg-warning/10 p-4">
+                  <div className="flex items-start gap-3">
+                    <AlertCircle className="mt-1 h-5 w-5 text-warning" />
+                    <div className="space-y-1">
+                      <p className="font-semibold text-warning-foreground">Modo recuperación activo</p>
+                      <p className="text-sm text-warning-foreground/80">
+                        La báscula está emitiendo la Wi-Fi "Bascula-Setup". Usa la mini-web para conectarla a tu red habitual.
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="glow"
+                    size="lg"
+                    className="w-full justify-center sm:w-auto"
+                    onClick={() => window.open('http://192.168.4.1:8080/config', '_blank', 'noopener,noreferrer')}
+                  >
+                    <ExternalLink className="mr-2 h-5 w-5" />
+                    Abrir Mini-Web (http://192.168.4.1:8080/config)
+                  </Button>
+                </div>
+              )}
 
               <Button
                 variant="outline"

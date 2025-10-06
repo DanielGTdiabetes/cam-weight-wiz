@@ -1,12 +1,23 @@
 import { useEffect, useState } from "react";
-import { Wifi, QrCode, Settings, KeyRound, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import {
+  Wifi,
+  QrCode,
+  Settings,
+  KeyRound,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  ExternalLink,
+  Home,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
 export const APModeScreen = () => {
-  const apSSID = "Bascula-AP";
+  const apSSID = "Bascula-Setup";
   const apPassword = "Bascula1234";
-  const miniWebURL = "http://192.168.4.1:8080";
+  const appURL = "http://192.168.4.1:8080";
+  const configURL = "http://192.168.4.1:8080/config";
   const [miniWebPin, setMiniWebPin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
   const [verifyState, setVerifyState] = useState<{
@@ -58,6 +69,19 @@ export const APModeScreen = () => {
       window.clearInterval(interval);
     };
   }, []);
+
+  const handleOpenMiniWeb = () => {
+    window.location.href = "/config";
+  };
+
+  const handleReturnToApp = () => {
+    if (window.history.length > 1) {
+      window.history.back();
+      return;
+    }
+
+    window.location.href = "/";
+  };
 
   const handleVerifyWifi = async () => {
     setVerifyState({ status: "checking" });
@@ -132,14 +156,14 @@ export const APModeScreen = () => {
           </div>
           <h1 className="mb-4 text-4xl font-bold">Modo Punto de Acceso</h1>
           <p className="text-xl text-muted-foreground">
-            No se detectó ninguna red WiFi conocida
+            Conéctate a <strong>{apSSID}</strong> y abre {configURL}
           </p>
         </div>
 
         <div className="mb-8 space-y-6">
           {/* AP Info */}
           <div className="rounded-lg border border-border bg-muted/30 p-6">
-            <h2 className="mb-4 text-xl font-bold">Red WiFi Activa:</h2>
+            <h2 className="mb-4 text-xl font-bold">Red WiFi para configuración</h2>
             <div className="space-y-3">
               <div>
                 <p className="text-sm text-muted-foreground">Nombre de Red (SSID):</p>
@@ -178,7 +202,9 @@ export const APModeScreen = () => {
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   1
                 </span>
-                <p>Conecta tu móvil o tablet a la red <strong>{apSSID}</strong></p>
+                <p>
+                  Conecta tu móvil, tablet u ordenador a la Wi-Fi <strong>{apSSID}</strong>
+                </p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
@@ -190,7 +216,9 @@ export const APModeScreen = () => {
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   3
                 </span>
-                <p>Abre un navegador y accede a: <strong>{miniWebURL}</strong></p>
+                <p>
+                  Abre un navegador y escribe: <strong>{configURL}</strong>
+                </p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
@@ -198,7 +226,7 @@ export const APModeScreen = () => {
                 </span>
                 <p>
                   Introduce el PIN <strong>{miniWebPin ?? "mostrado en esta pantalla"}</strong> y
-                  configura tu red WiFi desde la mini-web
+                  configura tu red WiFi desde la mini-web de configuración
                 </p>
               </li>
             </ol>
@@ -208,15 +236,38 @@ export const APModeScreen = () => {
           <div className="rounded-lg border border-primary/30 bg-primary/5 p-6 text-center">
             <QrCode className="mx-auto mb-3 h-32 w-32 text-primary" />
             <p className="text-sm text-muted-foreground">
-              Escanea para acceder a la mini-web
+              Escanea para abrir la mini-web de configuración
             </p>
             <p className="mt-2 text-xs font-mono text-muted-foreground">
-              {miniWebURL}
+              {configURL}
             </p>
           </div>
         </div>
 
         <div className="space-y-4">
+          <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-left">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="mt-1 h-5 w-5 text-warning" />
+              <div className="space-y-1 text-sm">
+                <p className="font-semibold text-warning-foreground">Recuerda:</p>
+                <p className="text-warning-foreground/80">
+                  {appURL} abre la app principal (esta pantalla). Para configurar la red usa siempre {configURL}.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Button onClick={handleOpenMiniWeb} variant="glow" size="xl" className="w-full text-xl">
+              <ExternalLink className="mr-2 h-6 w-6" />
+              Abrir Mini-Web de Configuración
+            </Button>
+            <Button onClick={handleReturnToApp} variant="outline" size="xl" className="w-full text-xl">
+              <Home className="mr-2 h-6 w-6" />
+              Salir / Volver a la app
+            </Button>
+          </div>
+
           <Button
             onClick={handleVerifyWifi}
             variant="glow"
