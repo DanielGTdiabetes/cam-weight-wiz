@@ -58,9 +58,10 @@ export interface AppSettings {
   targetGlucose: number;
   hypoAlarm: number;
   hyperAlarm: number;
-  
+
   // UI settings
   isVoiceActive: boolean;
+  voiceId?: string;
   theme: 'dark' | 'light';
   ui: UiSettings;
 }
@@ -316,6 +317,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   hypoAlarm: 70,
   hyperAlarm: 180,
   isVoiceActive: false,
+  voiceId: undefined,
   theme: 'dark',
   ui: {
     flags: { ...DEFAULT_FEATURE_FLAGS },

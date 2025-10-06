@@ -172,7 +172,18 @@ class ApiService {
 
   // Voice/TTS endpoints
   async speak(text: string, voice?: string): Promise<void> {
-    await apiWrapper.post('/api/voice/speak', { text, voice });
+    const payload = voice ? { text, voice } : { text };
+
+    try {
+      await apiWrapper.post('/api/voice/speak', payload);
+    } catch {
+      const params = new URLSearchParams({ text });
+      if (voice) {
+        params.set('voice', voice);
+      }
+
+      await apiWrapper.post(`/api/voice/tts/say?${params.toString()}`);
+    }
   }
 
   // Recipe endpoints
