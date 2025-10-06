@@ -36,7 +36,7 @@ Incluye:
 Tras el reinicio:
 
 - `bascula-miniweb.service` sirve la mini-web y la API en `http://localhost:8080`.
-- `bascula-app.service` lanza Chromium en modo kiosk apuntando a `http://localhost:8080`.
+- `bascula-ui.service` lanza Chromium en modo kiosk apuntando a `http://localhost:8080` y gestiona el flujo de inicio tolerante a reinicios.
 - El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 - Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
 

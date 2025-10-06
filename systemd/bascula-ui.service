@@ -4,8 +4,7 @@ After=systemd-user-sessions.service network-online.target bascula-miniweb.servic
 Wants=network-online.target bascula-miniweb.service
 Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
-StartLimitIntervalSec=120
-StartLimitBurst=3
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -24,12 +23,10 @@ StandardInput=tty
 StandardOutput=journal
 StandardError=journal
 PermissionsStartOnly=yes
-ExecStartPre=/usr/bin/chvt 1
-ExecStartPre=/usr/bin/install -d -m 0755 -o pi -g pi /var/log/bascula
-ExecStartPre=/usr/bin/install -o pi -g pi -m 0644 /dev/null /var/log/bascula/ui.log
-ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
+ExecStartPre=-/usr/bin/chvt 1
+ExecStart=/opt/bascula/current/scripts/start-kiosk-wrapper.sh
 Restart=always
-RestartSec=2
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target

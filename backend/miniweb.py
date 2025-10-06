@@ -802,7 +802,7 @@ def _ota_worker(target: Optional[str]) -> None:
         _run_logged_command(["sudo", "ln", "-sfn", str(release_dir), str(OTA_CURRENT_LINK)])
         _run_logged_command(["sudo", "systemctl", "daemon-reload"])
         _run_logged_command(
-            ["sudo", "systemctl", "restart", "bascula-app"], check=False
+            ["sudo", "systemctl", "restart", "bascula-ui"], check=False
         )
 
         _update_ota_state({"progress": 90, "message": "Verificando servicios"})
