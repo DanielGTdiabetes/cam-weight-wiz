@@ -63,6 +63,9 @@ export interface AppSettings {
   isVoiceActive: boolean;
   voiceId?: string;
   theme: 'dark' | 'light';
+  timerAlarmSoundEnabled: boolean;
+  timerVoiceAnnouncementsEnabled: boolean;
+  uiVolume: number;
   ui: UiSettings;
 }
 
@@ -319,6 +322,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   isVoiceActive: false,
   voiceId: undefined,
   theme: 'dark',
+  timerAlarmSoundEnabled: true,
+  timerVoiceAnnouncementsEnabled: false,
+  uiVolume: 1,
   ui: {
     flags: { ...DEFAULT_FEATURE_FLAGS },
   },
