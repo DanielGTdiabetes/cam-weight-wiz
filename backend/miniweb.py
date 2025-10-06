@@ -61,6 +61,7 @@ OTA_STATE_PATH = Path("/opt/bascula/data/ota-state.json")
 OTA_REPO_URL = "https://github.com/DanielGTdiabetes/cam-weight-wiz"
 
 _OTA_STATE_LOCK = threading.Lock()
+_OTA_WORKER_LOCK = threading.Lock()
 _ota_state: Dict[str, Any] = {}
 _ota_worker_thread: Optional[threading.Thread] = None
 
@@ -508,7 +509,6 @@ def _ota_worker(target: Optional[str]) -> None:
         _update_ota_state({"progress": 80, "message": "Activando versión"})
         _run_logged_command(["sudo", "ln", "-sfn", str(release_dir), str(OTA_CURRENT_LINK)])
         _run_logged_command(["sudo", "systemctl", "daemon-reload"])
-        _run_logged_command(["sudo", "systemctl", "restart", "bascula-miniweb"])
         _run_logged_command(
             ["sudo", "systemctl", "restart", "bascula-app"], check=False
         )
@@ -527,6 +527,9 @@ def _ota_worker(target: Optional[str]) -> None:
             }
         )
         _append_ota_log("[ota] OTA finalizada correctamente")
+        LOG_OTA.info("[ota] Programando reinicio de miniweb")
+        _append_ota_log("[ota] Reinicio de miniweb programado")
+        _schedule_miniweb_restart()
     except Exception as exc:
         error_message = str(exc)
         truncated = error_message[:300]
@@ -542,14 +545,44 @@ def _ota_worker(target: Optional[str]) -> None:
             }
         )
     finally:
-        _ota_worker_thread = None
+        with _OTA_WORKER_LOCK:
+            _ota_worker_thread = None
 
 
-def _start_ota_worker(target: Optional[str]) -> None:
+def _start_ota_worker(target: Optional[str]) -> bool:
     global _ota_worker_thread
-    thread = threading.Thread(target=_ota_worker, args=(target,), daemon=True)
-    _ota_worker_thread = thread
-    thread.start()
+    with _OTA_WORKER_LOCK:
+        if _ota_worker_thread is not None:
+            if _ota_worker_thread.is_alive():
+                return False
+            _ota_worker_thread = None
+        thread = threading.Thread(target=_ota_worker, args=(target,), daemon=True)
+        _ota_worker_thread = thread
+        thread.start()
+        return True
+
+
+def _schedule_miniweb_restart(delay_seconds: float = 1.0) -> None:
+    def _restart() -> None:
+        try:
+            time.sleep(delay_seconds)
+            LOG_OTA.info("[ota] Reiniciando miniweb tras completar OTA")
+            try:
+                _append_ota_log("[ota] Reiniciando miniweb tras completar OTA")
+            except Exception:
+                pass
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "bascula-miniweb"],
+                check=False,
+            )
+        except Exception as exc:
+            LOG_OTA.error("[ota] Error al reiniciar miniweb: %s", exc)
+            try:
+                _append_ota_log(f"[ota] Error al reiniciar miniweb: {exc}")
+            except Exception:
+                pass
+
+    threading.Thread(target=_restart, daemon=True).start()
 
 
 def _update_ota_state(changes: Dict[str, Any]) -> Dict[str, Any]:
@@ -2548,13 +2581,14 @@ async def api_ota_apply(payload: OTAApplyPayload | None = None):
     target = (payload.target or "").strip() if payload else ""
     target_value = target or None
     state = _get_ota_state()
-    worker_busy = _ota_worker_thread is not None and _ota_worker_thread.is_alive()
-    if state.get("status") == "running" or worker_busy:
+    if state.get("status") == "running":
+        return JSONResponse({"reason": "busy"}, status_code=409)
+
+    if not _start_ota_worker(target_value):
         return JSONResponse({"reason": "busy"}, status_code=409)
 
     LOG_OTA.info("[ota] apply solicitado (target=%s)", target_value or "latest")
     _append_ota_log(f"[ota] apply solicitado target={target_value or 'latest'}")
-    _start_ota_worker(target_value)
     return {"ok": True, "job": "ota"}
 
 
