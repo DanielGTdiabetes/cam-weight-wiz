@@ -159,6 +159,7 @@ const Index = () => {
     setCurrentView("menu");
     setTimerSeconds(undefined);
     setBasculinMood("sleeping");
+    setMascoMsg(undefined);
   };
 
   const handleNavigate = (view: string) => {
@@ -481,6 +482,7 @@ const Index = () => {
   };
 
   const showTopBar = currentView !== "menu" && currentView !== "timer" && currentView !== "recipes";
+  const shouldShowMascot = !showRecovery && !showAPMode;
 
   // Show special screens first
   if (showRecovery) {
@@ -503,7 +505,7 @@ const Index = () => {
 
       {/* Basculin Mascot */}
       <BasculinMascot
-        isActive={currentView !== "menu"}
+        isActive={shouldShowMascot}
         message={mascoMsg}
         position="corner"
         mood={basculinMood}
