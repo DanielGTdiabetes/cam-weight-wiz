@@ -46,6 +46,7 @@ export const MiniWebConfig = () => {
   const [devicePin, setDevicePin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
   const [isPinValid, setIsPinValid] = useState(false);
+  const [isRecoveryMode, setIsRecoveryMode] = useState(false);
   const { toast } = useToast();
 
   const selectedNetwork = networks.find((network) => network.ssid === selectedSSID);
@@ -75,6 +76,49 @@ export const MiniWebConfig = () => {
     };
 
     fetchPin();
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+    const controller = new AbortController();
+
+    const fetchStatus = async () => {
+      try {
+        const response = await fetch('/api/miniweb/status', {
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (response.ok) {
+          const data = (await response.json()) as {
+            ap_active?: boolean;
+            connectivity?: string;
+          };
+          const connectivity = typeof data?.connectivity === 'string' ? data.connectivity.toLowerCase() : undefined;
+          const inRecovery = Boolean(data?.ap_active) || (connectivity ? connectivity !== 'full' : false);
+          setIsRecoveryMode(inRecovery);
+        } else {
+          setIsRecoveryMode(false);
+        }
+      } catch (error) {
+        if (!isMounted) {
+          return;
+        }
+        setIsRecoveryMode(false);
+        logger.debug('Failed to fetch AP status for miniweb', { error });
+      }
+    };
+
+    void fetchStatus();
+
+    return () => {
+      isMounted = false;
+      controller.abort();
+    };
   }, []);
 
   // Check PIN for security
@@ -307,16 +351,25 @@ export const MiniWebConfig = () => {
                 <Lock className="h-16 w-16 text-primary" />
               </div>
             </div>
-            <h1 className="text-3xl font-bold mb-2">Asistente de configuración</h1>
+            <h1 className="text-3xl font-bold mb-2">Báscula — Configuración de Red y Servicios</h1>
             <p className="text-muted-foreground">
-              Configuración WiFi - Modo AP
+              Introduce el PIN para acceder a la mini-web de ajustes.
             </p>
           </div>
 
-            <div className="space-y-6">
-              <div className="space-y-2">
-                <Label className="text-lg">PIN de Acceso</Label>
-                <Input
+          {isRecoveryMode && (
+            <div className="mb-6 flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-4 text-left">
+              <AlertCircle className="mt-1 h-5 w-5 text-warning" />
+              <p className="text-sm text-warning-foreground">
+                Estás en modo recuperación (AP). Primero conecta la báscula a una Wi-Fi para continuar.
+              </p>
+            </div>
+          )}
+
+          <div className="space-y-6">
+            <div className="space-y-2">
+              <Label className="text-lg">PIN de Acceso</Label>
+              <Input
                   type="password"
                   value={pinInput}
                   onChange={(e) => setPinInput(e.target.value)}
@@ -358,11 +411,20 @@ export const MiniWebConfig = () => {
       <div className="max-w-2xl mx-auto py-8">
         <Card className="p-8 border-primary/30">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-bold mb-2">Configuración WiFi</h1>
+            <h1 className="text-3xl font-bold mb-2">Báscula — Configuración de Red y Servicios</h1>
             <p className="text-muted-foreground">
-              Selecciona una red y conéctate
+              Gestiona la Wi-Fi y los servicios conectados desde la mini-web oficial.
             </p>
           </div>
+
+          {isRecoveryMode && (
+            <div className="mb-6 flex items-start gap-3 rounded-lg border border-warning/40 bg-warning/10 p-4 text-left">
+              <AlertCircle className="mt-1 h-5 w-5 text-warning" />
+              <p className="text-sm text-warning-foreground">
+                Estás en modo recuperación (AP). Primero conecta la báscula a una Wi-Fi para continuar.
+              </p>
+            </div>
+          )}
 
           <div className="space-y-6">
             {/* Scan Button */}
