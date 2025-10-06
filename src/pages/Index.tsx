@@ -19,6 +19,8 @@ import { networkDetector, NetworkStatus } from "@/services/networkDetector";
 import { api, type WakeEvent, type WakeStatus } from "@/services/api";
 import { apiWrapper } from "@/services/apiWrapper";
 import { storage, type AppSettings } from "@/services/storage";
+import { formatWeight } from "@/lib/format";
+import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 
 const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
@@ -43,6 +45,7 @@ const Index = () => {
   const wakeOverlayTimeoutRef = useRef<number | null>(null);
   const wakeEventSourceRef = useRef<EventSource | null>(null);
   const wakeReconnectTimeoutRef = useRef<number | null>(null);
+  const scaleDecimals = useScaleDecimals();
 
   // Monitor glucose if diabetes mode is enabled
   const glucoseData = useGlucoseMonitor(diabetesMode);
@@ -239,8 +242,9 @@ const Index = () => {
             const response = await api.getScaleWeight();
             const value = typeof response.value === 'number' ? response.value : null;
             if (value !== null) {
-              const formatted = value.toFixed(1);
-              setMascoMsg(`Peso estable: ${formatted} gramos.`);
+              const formatted = formatWeight(value, scaleDecimals);
+              const messageWeight = formatted === '–' ? formatted : `${formatted} gramos`;
+              setMascoMsg(`Peso estable: ${messageWeight}.`);
               setBasculinMood("happy");
             } else {
               setMascoMsg("No detecto peso estable ahora mismo.");
@@ -300,7 +304,7 @@ const Index = () => {
           return;
       }
     },
-    [handleTimerStart]
+    [handleTimerStart, scaleDecimals]
   );
 
   useEffect(() => {

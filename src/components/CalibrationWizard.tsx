@@ -10,6 +10,8 @@ import { cn } from "@/lib/utils";
 import { api } from "@/services/api";
 import { storage } from "@/services/storage";
 import { useToast } from "@/hooks/use-toast";
+import { formatWeight } from "@/lib/format";
+import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 
 interface CalibrationWizardProps {
   open: boolean;
@@ -29,6 +31,7 @@ const CalibrationWizardV2 = ({ open, onClose, currentWeight }: CalibrationWizard
   const [referenceWeight, setReferenceWeight] = useState("100");
   const [isApplying, setIsApplying] = useState(false);
   const { toast } = useToast();
+  const decimals = useScaleDecimals();
 
   const resetWizard = () => {
     setStep(1);
@@ -62,7 +65,7 @@ const CalibrationWizardV2 = ({ open, onClose, currentWeight }: CalibrationWizard
 
         toast({
           title: "Calibración aplicada",
-          description: response.message ?? `Referencia registrada: ${parsedReference.toFixed(1)} g`,
+          description: response.message ?? `Referencia registrada: ${formatWeight(parsedReference, decimals)} g`,
         });
 
         if (navigator.vibrate) {
@@ -129,8 +132,11 @@ const CalibrationWizardV2 = ({ open, onClose, currentWeight }: CalibrationWizard
                 </p>
               </div>
 
-              <div className={cn("text-6xl font-bold", hasReferenceOnScale ? "text-primary" : "text-muted-foreground")}> 
-                {currentWeight.toFixed(1)} g
+              <div
+                className={cn("text-6xl font-bold", hasReferenceOnScale ? "text-primary" : "text-muted-foreground")}
+                style={{ fontFeatureSettings: '"tnum"' }}
+              >
+                {formatWeight(currentWeight, decimals)} g
               </div>
 
               {!hasReferenceOnScale && (
@@ -181,7 +187,12 @@ const CalibrationWizardV2 = ({ open, onClose, currentWeight }: CalibrationWizard
 
               <div className="text-center">
                 <p className="mb-2 text-sm text-muted-foreground">Lectura actual</p>
-                <div className="text-5xl font-bold text-primary">{currentWeight.toFixed(1)} g</div>
+                <div
+                  className="text-5xl font-bold text-primary"
+                  style={{ fontFeatureSettings: '"tnum"' }}
+                >
+                  {formatWeight(currentWeight, decimals)} g
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -212,6 +223,7 @@ const CalibrationWizardLegacy = ({ open, onClose, currentWeight }: CalibrationWi
   const [rawValue, setRawValue] = useState(0);
   const [calibrationFactor, setCalibrationFactor] = useState(0);
   const { toast } = useToast();
+  const decimals = useScaleDecimals();
 
   const resetWizard = () => {
     setStep(1);
@@ -321,8 +333,9 @@ const CalibrationWizardLegacy = ({ open, onClose, currentWeight }: CalibrationWi
                   "text-6xl font-bold",
                   currentWeight === 0 ? "text-success" : "text-warning"
                 )}
+                style={{ fontFeatureSettings: '"tnum"' }}
               >
-                {currentWeight.toFixed(1)} g
+                {formatWeight(currentWeight, decimals)} g
               </div>
 
               <Button
@@ -376,8 +389,11 @@ const CalibrationWizardLegacy = ({ open, onClose, currentWeight }: CalibrationWi
 
               <div className="text-center">
                 <p className="text-sm text-muted-foreground mb-2">Lectura actual:</p>
-                <div className="text-5xl font-bold text-primary">
-                  {currentWeight.toFixed(1)} g
+                <div
+                  className="text-5xl font-bold text-primary"
+                  style={{ fontFeatureSettings: '"tnum"' }}
+                >
+                  {formatWeight(currentWeight, decimals)} g
                 </div>
               </div>
 
@@ -425,7 +441,9 @@ const CalibrationWizardLegacy = ({ open, onClose, currentWeight }: CalibrationWi
                 </div>
                 <div>
                   <p className="text-sm text-muted-foreground">Valor medido:</p>
-                  <p className="text-2xl font-bold">{rawValue.toFixed(1)} g</p>
+                  <p className="text-2xl font-bold" style={{ fontFeatureSettings: '"tnum"' }}>
+                    {formatWeight(rawValue, decimals)} g
+                  </p>
                 </div>
                 <div className="border-t border-border pt-4">
                   <p className="text-sm text-muted-foreground">Factor de calibración:</p>
