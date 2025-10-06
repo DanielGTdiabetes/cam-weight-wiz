@@ -165,9 +165,9 @@ const Index = () => {
       case "scanner":
         return <FoodScannerView />;
       case "timer":
-        return <TimerFullView />;
+        return <TimerFullView onClose={handleBackToMenu} />;
       case "recipes":
-        return <RecipesView />;
+        return <RecipesView onClose={handleBackToMenu} />;
       case "settings":
         return <SettingsView />;
       default:

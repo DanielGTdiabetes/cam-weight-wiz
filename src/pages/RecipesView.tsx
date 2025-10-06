@@ -69,7 +69,7 @@ const mapIngredients = (recipe: GeneratedRecipe | null): IngredientDisplay[] => 
 };
 
 export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}) => {
-  const { navEnabled, isTouchDevice, goBack, handleClose, isModal } = useNavSafeExit({
+  const { navEnabled, isTouchDevice, handleClose, isModal } = useNavSafeExit({
     context,
     onClose,
   });
@@ -268,7 +268,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
 
   const navControls = navEnabled ? (
     <div className="flex items-center gap-2 p-4">
-      <Button variant="outline" onClick={goBack} className="gap-2">
+      <Button variant="outline" onClick={handleClose} className="gap-2">
         <ArrowLeft className="h-4 w-4" />
         Atrás
       </Button>
@@ -499,7 +499,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
         <Button
           variant="glow"
           size="lg"
-          onClick={goBack}
+          onClick={handleClose}
           className="fixed bottom-6 right-6 z-50 rounded-full px-6 py-6 shadow-lg"
         >
           Salir
