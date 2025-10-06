@@ -128,7 +128,7 @@ El sistema queda instalado con estructura OTA:
 
 Servicios systemd:
 - bascula-miniweb.service    # Backend mini-web (puerto 8080)
-- bascula-app.service        # UI kiosk (Chromium fullscreen)
+- bascula-ui.service         # UI kiosk (Chromium fullscreen)
 - ocr-service.service        # OCR API (puerto 8078)
 - bascula-net-fallback.timer # AP fallback automático
 ```
@@ -152,7 +152,7 @@ Después del reinicio, todos los servicios arrancarán automáticamente.
 sudo systemctl status bascula-miniweb
 
 # UI kiosk
-sudo systemctl status bascula-app
+sudo systemctl status bascula-ui
 
 # OCR service
 sudo systemctl status ocr-service
@@ -162,7 +162,7 @@ sudo systemctl status nginx
 
 # Ver logs en tiempo real
 sudo journalctl -u bascula-miniweb -f
-sudo journalctl -u bascula-app -f
+sudo journalctl -u bascula-ui -f
 sudo journalctl -u ocr-service -f
 ```
 

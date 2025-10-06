@@ -317,6 +317,8 @@ if [[ "${HAS_SYSTEMD}" -eq 0 ]]; then
   warn "systemd no está activo (PID 1); se omitirán comandos systemctl"
 fi
 
+ALLOW_SYSTEMD="${ALLOW_SYSTEMD:-1}"
+
 systemctl_safe() {
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
     if ! systemctl "$@"; then
@@ -918,7 +920,7 @@ polkit.addRule(function(action, subject) {
   var id = action.id;
   var unit = action.lookup("unit") || "";
   function allowed(u) {
-    return u == "bascula-miniweb.service" || u == "bascula-app.service" || u == "ocr-service.service";
+    return u == "bascula-miniweb.service" || u == "bascula-ui.service" || u == "ocr-service.service";
   }
   if ((subject.user == "${TARGET_USER}" || subject.isInGroup("${TARGET_GROUP}")) &&
       (id == "org.freedesktop.systemd1.manage-units" ||
@@ -1656,58 +1658,30 @@ EOF
   chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.xinitrc"
 fi
 
-# Determinar binario startx/xinit disponible
-if [[ -z "${STARTX_BIN}" ]]; then
-  STARTX_BIN="$(command -v startx || command -v xinit || true)"
-fi
-if [[ -z "${STARTX_BIN}" ]]; then
-  fail "No se encontró startx/xinit"
-fi
-
-if [[ "${STARTX_BIN##*/}" == "startx" ]]; then
-  STARTX_CMD="${STARTX_BIN} -- :0 vt1"
-else
-  STARTX_CMD="${STARTX_BIN} ${TARGET_HOME}/.xinitrc -- :0 vt1"
-fi
-
-# Crear servicio systemd usando el archivo del proyecto o uno por defecto
+# Instalar servicio bascula-ui actualizado
 SERVICE_FILE="${BASCULA_CURRENT_LINK}/systemd/bascula-ui.service"
+TARGET_UID="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || 1000)"
 if [[ -f "${SERVICE_FILE}" ]]; then
-  # Usar el servicio del proyecto reemplazando las variables
   TMP_SERVICE_FILE="$(mktemp)"
-  sed -e "s|/home/pi|${TARGET_HOME}|g" \
-      -e "s|User=pi|User=${TARGET_USER}|g" \
+  sed -e "s|User=pi|User=${TARGET_USER}|g" \
       -e "s|Group=pi|Group=${TARGET_GROUP}|g" \
-      -e "s|/home/pi/bascula-ui|${BASCULA_CURRENT_LINK}|g" \
+      -e "s|/opt/bascula/current|${BASCULA_CURRENT_LINK}|g" \
+      -e "s|Environment=HOME=/home/pi|Environment=HOME=${TARGET_HOME}|g" \
+      -e "s|Environment=USER=pi|Environment=USER=${TARGET_USER}|g" \
+      -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000|Environment=XDG_RUNTIME_DIR=/run/user/${TARGET_UID}|g" \
       "${SERVICE_FILE}" > "${TMP_SERVICE_FILE}"
-
-  if grep -q '^After=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
-    :
-  elif grep -q '^After=' "${TMP_SERVICE_FILE}"; then
-    sed -i 's/^After=\(.*\)$/After=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
-  else
-    sed -i '/^\[Unit\]/a After=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
-  fi
-
-  if grep -q '^Requires=.*bascula-miniweb\.service' "${TMP_SERVICE_FILE}"; then
-    :
-  elif grep -q '^Requires=' "${TMP_SERVICE_FILE}"; then
-    sed -i 's/^Requires=\(.*\)$/Requires=\1 bascula-miniweb.service/' "${TMP_SERVICE_FILE}"
-  else
-    sed -i '/^\[Unit\]/a Requires=bascula-miniweb.service' "${TMP_SERVICE_FILE}"
-  fi
-
-  mv "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-app.service
-  log "✓ bascula-app.service copiado desde el proyecto"
+  install -m 0644 "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-ui.service
+  rm -f "${TMP_SERVICE_FILE}"
+  log "✓ bascula-ui.service actualizado"
 else
-  cat > /etc/systemd/system/bascula-app.service <<EOF
+  cat > /etc/systemd/system/bascula-ui.service <<EOF
 [Unit]
-Description=Bascula Digital Pro - UI (Xorg kiosk)
-After=network-online.target bascula-miniweb.service
-Wants=network-online.target
+Description=Bascula Digital Pro - UI (Chromium kiosk)
+After=systemd-user-sessions.service network-online.target bascula-miniweb.service
+Wants=network-online.target bascula-miniweb.service
+Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
-StartLimitIntervalSec=120
-StartLimitBurst=3
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -1716,38 +1690,70 @@ Group=${TARGET_GROUP}
 WorkingDirectory=${BASCULA_CURRENT_LINK}
 Environment=HOME=${TARGET_HOME}
 Environment=USER=${TARGET_USER}
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u ${TARGET_USER})
-PermissionsStartOnly=yes
-ExecStartPre=/usr/bin/install -d -m 0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula
-ExecStartPre=/usr/bin/install -o ${TARGET_USER} -g ${TARGET_GROUP} -m 0644 /dev/null /var/log/bascula/app.log
-ExecStartPre=/usr/bin/install -d -m 0700 -o ${TARGET_USER} -g ${TARGET_GROUP} ${TARGET_HOME}/.local/share/xorg
-ExecStart=${STARTX_CMD}
-Restart=on-failure
-RestartSec=2
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/${TARGET_UID}
 StandardOutput=journal
 StandardError=journal
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
+PermissionsStartOnly=yes
+ExecStartPre=-/usr/bin/chvt 1
+ExecStart=${BASCULA_CURRENT_LINK}/scripts/start-kiosk-wrapper.sh
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  log "✓ bascula-app.service creado por defecto"
+  log "✓ bascula-ui.service generado por defecto"
 fi
 
-systemctl_safe daemon-reload
-systemctl_safe disable getty@tty1.service
-systemctl_safe enable bascula-app.service
-log "✓ UI kiosk configurado"
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if [[ "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+    systemctl_safe daemon-reload
+    systemctl disable --now bascula-app.service 2>/dev/null || true
+    systemctl mask bascula-app.service 2>/dev/null || true
+    systemctl_safe disable getty@tty1.service
+    systemctl_safe enable --now bascula-ui.service
+    log "✓ Servicio bascula-ui habilitado"
+  else
+    warn "ALLOW_SYSTEMD!=1: se omitió la habilitación de servicios"
+  fi
+else
+  warn "systemd no disponible: bascula-ui.service no se habilitó"
+fi
+
+# Chromium managed policies
+log "Configurando políticas de Chromium..."
+install -d -m 0755 /etc/chromium/policies/managed
+cat > /etc/chromium/policies/managed/bascula_policy.json <<'EOF'
+{
+  "AudioCaptureAllowed": true,
+  "VideoCaptureAllowed": true,
+  "AutoplayAllowed": true,
+  "DefaultAudioCaptureSetting": 1,
+  "DefaultVideoCaptureSetting": 1,
+  "URLAllowlist": ["http://127.0.0.1:8080", "http://localhost:8080"],
+  "ClipboardAllowed": true,
+  "ClipboardAllowedForUrls": ["http://127.0.0.1:8080/*", "http://localhost:8080/*"]
+}
+EOF
+log "✓ Políticas de Chromium configuradas"
 
 # Setup tmpfiles
 log "[19/20] Configurando tmpfiles..."
-cat > /etc/tmpfiles.d/bascula.conf <<EOF
-d /run/bascula 0755 ${TARGET_USER} ${TARGET_GROUP} -
-f /run/bascula.alive 0666 ${TARGET_USER} ${TARGET_GROUP} -
-EOF
-systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
+if [[ -f "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula.conf" ]]; then
+  install -m 0644 "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula.conf" /etc/tmpfiles.d/bascula.conf
+else
+  warn "systemd/tmpfiles.d/bascula.conf no encontrado en el repositorio"
+fi
+if [[ -f "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula-x11.conf" ]]; then
+  install -m 0644 "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula-x11.conf" /etc/tmpfiles.d/bascula-x11.conf
+fi
+if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+  systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
+  systemd-tmpfiles --create /etc/tmpfiles.d/bascula-x11.conf || true
+else
+  warn "tmpfiles no ejecutado (systemd o ALLOW_SYSTEMD deshabilitado)"
+fi
 log "✓ tmpfiles configurado"
 
 # Final permissions
@@ -1794,7 +1800,7 @@ echo "  Mini-Web: visita http://${IP:-<IP>}:8080 · PIN: consulta /api/miniweb/p
 echo ""
 echo "Comandos útiles:"
 echo "  journalctl -u bascula-miniweb.service -f"
-echo "  journalctl -u bascula-app.service -f"
+echo "  journalctl -u bascula-ui.service -f"
 echo "  journalctl -u ocr-service.service -f"
 echo "  journalctl -u x735-fan.service -f    # monitorear ventilador"
 echo "  libcamera-hello  # probar cámara"
@@ -1804,6 +1810,7 @@ echo ""
 log "Instalación finalizada"
 log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
 systemctl_safe status bascula-miniweb --no-pager -l
+systemctl_safe status bascula-ui --no-pager -l
 if command -v ss >/dev/null 2>&1; then
   ss -ltnp | grep 8080 || true
 else
@@ -1817,15 +1824,43 @@ install_services() {
   # Copiar units del repo (solo los nuestros)
   install -m 0644 systemd/bascula-miniweb.service /etc/systemd/system/bascula-miniweb.service
   install -m 0644 systemd/bascula-backend.service  /etc/systemd/system/bascula-backend.service
-  install -m 0644 systemd/bascula-ui.service       /etc/systemd/system/bascula-ui.service
 
-  systemctl daemon-reload
+  if [ -f systemd/bascula-ui.service ]; then
+    local tmp_service="$(mktemp)"
+    local target_uid
+    target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || 1000)"
+    sed -e "s|User=pi|User=${TARGET_USER}|g" \
+        -e "s|Group=pi|Group=${TARGET_GROUP}|g" \
+        -e "s|/opt/bascula/current|${BASCULA_CURRENT_LINK}|g" \
+        -e "s|Environment=HOME=/home/pi|Environment=HOME=${TARGET_HOME}|g" \
+        -e "s|Environment=USER=pi|Environment=USER=${TARGET_USER}|g" \
+        -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000|Environment=XDG_RUNTIME_DIR=/run/user/${target_uid}|g" \
+        systemd/bascula-ui.service > "${tmp_service}"
+    install -m 0644 "${tmp_service}" /etc/systemd/system/bascula-ui.service
+    rm -f "${tmp_service}"
+  fi
+  if [ -f systemd/tmpfiles.d/bascula.conf ]; then
+    install -m 0644 systemd/tmpfiles.d/bascula.conf /etc/tmpfiles.d/bascula.conf
+  fi
+  if [ -f systemd/tmpfiles.d/bascula-x11.conf ]; then
+    install -m 0644 systemd/tmpfiles.d/bascula-x11.conf /etc/tmpfiles.d/bascula-x11.conf
+  fi
 
-  # Habilitar/arrancar si no están activos
-  systemctl enable bascula-miniweb bascula-backend bascula-ui || true
-  systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
-  systemctl is-active --quiet bascula-backend  || systemctl start bascula-backend
-  systemctl is-active --quiet bascula-ui       || systemctl start bascula-ui
+  if [[ "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+    systemctl daemon-reload
+    systemctl disable --now bascula-app.service 2>/dev/null || true
+    systemctl mask bascula-app.service 2>/dev/null || true
+
+    systemctl enable bascula-miniweb bascula-backend bascula-ui || true
+    systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
+    systemctl is-active --quiet bascula-backend  || systemctl start bascula-backend
+    systemctl is-active --quiet bascula-ui       || systemctl start bascula-ui
+
+    systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
+    systemd-tmpfiles --create /etc/tmpfiles.d/bascula-x11.conf || true
+  else
+    echo "[install] ALLOW_SYSTEMD!=1; units copiados pero no habilitados"
+  fi
 
   echo "[install] services ok: miniweb:8080, backend:8081, ui:kiosk"
 }

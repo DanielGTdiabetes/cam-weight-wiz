@@ -149,12 +149,12 @@ Una vez que el sistema arranque correctamente:
 ```bash
 # Ver estado de los servicios
 sudo systemctl status bascula-miniweb.service
-sudo systemctl status bascula-app.service
+sudo systemctl status bascula-ui.service
 sudo systemctl status ocr-service.service
 
 # Ver logs
 journalctl -u bascula-miniweb.service -f
-journalctl -u bascula-app.service -f
+journalctl -u bascula-ui.service -f
 ```
 
 ## Script de Instalación Seguro

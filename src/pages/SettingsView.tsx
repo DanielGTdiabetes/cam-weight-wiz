@@ -2910,7 +2910,7 @@ export const SettingsView = () => {
               <pre className="mt-2 whitespace-pre-wrap font-mono text-[11px] leading-5 text-foreground">
 {`sudo ln -sfn /opt/bascula/releases/<anterior> /opt/bascula/current
 sudo systemctl daemon-reload
-sudo systemctl restart bascula-miniweb bascula-app`}
+sudo systemctl restart bascula-miniweb bascula-ui`}
               </pre>
             </div>
           </div>
