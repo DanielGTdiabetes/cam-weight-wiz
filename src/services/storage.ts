@@ -28,7 +28,8 @@ export type FeatureFlagKey =
   | 'miniEbStable'
   | 'otaCheck'
   | 'otaApply'
-  | 'debugLogs';
+  | 'debugLogs'
+  | 'mascotMotion';
 
 export type FeatureFlags = Record<FeatureFlagKey, boolean>;
 
@@ -302,6 +303,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   otaCheck: false,
   otaApply: false,
   debugLogs: false,
+  mascotMotion: false,
 };
 
 const DEFAULT_SETTINGS: AppSettings = {

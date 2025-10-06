@@ -50,6 +50,11 @@ export const FEATURE_FLAG_DEFINITIONS: Array<{
     title: 'Logs de depuración',
     description: 'Muestra logs adicionales en consola para diagnósticos.',
   },
+  {
+    key: 'mascotMotion',
+    title: 'Animación de mascota',
+    description: 'Activa movimiento suave y reacciones animadas de Basculin.',
+  },
 ];
 
 const cloneFlags = (flags: FeatureFlags): FeatureFlags => ({
@@ -62,6 +67,7 @@ const cloneFlags = (flags: FeatureFlags): FeatureFlags => ({
   otaCheck: flags.otaCheck,
   otaApply: flags.otaApply,
   debugLogs: flags.debugLogs,
+  mascotMotion: flags.mascotMotion,
 });
 
 export const getFeatureFlags = (): FeatureFlags => {
