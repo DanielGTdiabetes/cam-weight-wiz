@@ -3,6 +3,7 @@
  */
 import { useEffect, useRef, useCallback } from 'react';
 import { storage } from '@/services/storage';
+import type { AppSettingsUpdate } from '@/services/storage';
 import { logger } from '@/services/logger';
 
 const WS_BASE_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8080";
@@ -58,12 +59,17 @@ export const useSettingsSync = () => {
         // Actualizar storage local
         const updates: Record<string, unknown> = {};
         
-        if (message.fields.includes('openai') && data.network?.openai_api_key) {
+        const networkChanged = message.fields.includes('network') || message.fields.includes('openai');
+        if (networkChanged && data.network?.openai_api_key) {
           updates.chatGptKey = data.network.openai_api_key === '__stored__' ? '' : data.network.openai_api_key;
         }
-        
-        if (message.fields.includes('nightscout') && data.diabetes) {
-          if (data.diabetes.nightscout_url) {
+
+        const diabetesChanged = message.fields.includes('diabetes') || message.fields.includes('nightscout');
+        if (diabetesChanged && data.diabetes) {
+          if (
+            typeof data.diabetes.nightscout_url === 'string' &&
+            data.diabetes.nightscout_url !== '__stored__'
+          ) {
             updates.nightscoutUrl = data.diabetes.nightscout_url;
           }
           if (data.diabetes.nightscout_token === '__stored__') {
@@ -80,7 +86,7 @@ export const useSettingsSync = () => {
         }
         
         if (Object.keys(updates).length > 0) {
-          storage.saveSettings(updates as any);
+          storage.saveSettings(updates as AppSettingsUpdate);
           
           // Dispatch event para que componentes reaccionen
           window.dispatchEvent(new CustomEvent('settings-synced', {

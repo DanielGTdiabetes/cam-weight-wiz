@@ -222,8 +222,8 @@ export const SettingsView = () => {
   const [miniwebPinStatus, setMiniwebPinStatus] = useState<"idle" | "loading" | "error">("idle");
 
   const remoteLocked = !localClient && !pinVerified;
-  const openAiKeyboardEnabled = internalKeyboardEnabled && !remoteLocked;
-  const nightscoutKeyboardEnabled = internalKeyboardEnabled && !remoteLocked;
+  const openAiKeyboardEnabled = internalKeyboardEnabled && localClient;
+  const nightscoutKeyboardEnabled = internalKeyboardEnabled && localClient;
   const [securityPinInput, setSecurityPinInput] = useState("");
   const [pinVerified, setPinVerified] = useState(localClient);
   const [verifyingPin, setVerifyingPin] = useState(false);
@@ -473,17 +473,32 @@ export const SettingsView = () => {
           return;
         }
 
-        const hasKey = Boolean(payload.openai?.hasKey);
-        setBackendHasOpenAIKey(hasKey);
+        const openAiValue =
+          typeof payload.network?.openai_api_key === "string" ? payload.network.openai_api_key.trim() : "";
+        const openAiStored = openAiValue === "__stored__";
+        setBackendHasOpenAIKey(openAiStored || Boolean(openAiValue));
+        if (openAiValue && !openAiStored) {
+          setChatGptKey(openAiValue);
+          storage.saveSettings({ chatGptKey: openAiValue });
+        }
 
-        if (payload.nightscout) {
-          const rawUrl = typeof payload.nightscout.url === "string" ? payload.nightscout.url.trim() : "";
-          setBackendNightscoutUrl(rawUrl || null);
-          setBackendNightscoutHasToken(Boolean(payload.nightscout.hasToken));
-          if (rawUrl) {
-            setNightscoutUrl(rawUrl);
-            storage.saveSettings({ nightscoutUrl: rawUrl });
+        if (payload.diabetes) {
+          const rawUrl = typeof payload.diabetes.nightscout_url === "string"
+            ? payload.diabetes.nightscout_url.trim()
+            : "";
+          const urlStored = rawUrl === "__stored__";
+          const sanitizedUrl = urlStored ? "" : rawUrl;
+          setBackendNightscoutUrl(sanitizedUrl || null);
+          if (sanitizedUrl) {
+            setNightscoutUrl(sanitizedUrl);
+            storage.saveSettings({ nightscoutUrl: sanitizedUrl });
           }
+
+          const rawToken = typeof payload.diabetes.nightscout_token === "string"
+            ? payload.diabetes.nightscout_token.trim()
+            : "";
+          const tokenStored = rawToken === "__stored__";
+          setBackendNightscoutHasToken(tokenStored || Boolean(rawToken));
         } else {
           setBackendNightscoutUrl(null);
           setBackendNightscoutHasToken(false);
@@ -1450,14 +1465,17 @@ export const SettingsView = () => {
     setIsSavingOpenAI(true);
     try {
       const payload: BackendSettingsUpdate & { pin?: string } = {
-        openai: { apiKey: trimmedKey || null },
+        network: { openai_api_key: trimmedKey || null },
       };
       if (pin) {
         payload.pin = pin;
       }
       const response = await api.updateBackendSettings(payload);
 
-      const persistedKey = Boolean(response.openai?.hasKey || trimmedKey);
+      const persistedKey = Boolean(
+        (typeof response.network?.openai_api_key === "string" && response.network.openai_api_key === "__stored__") ||
+          trimmedKey,
+      );
       setBackendHasOpenAIKey(persistedKey);
       setChatGptKey(trimmedKey);
       storage.saveSettings({ chatGptKey: trimmedKey });
@@ -1489,19 +1507,24 @@ export const SettingsView = () => {
     setIsSavingNightscout(true);
     try {
       const payload: BackendSettingsUpdate & { pin?: string } = {
-        nightscout: { url: trimmedUrl || null, token: trimmedToken || null },
+        diabetes: { nightscout_url: trimmedUrl || null, nightscout_token: trimmedToken || null },
       };
       if (pin) {
         payload.pin = pin;
       }
       const response = await api.updateBackendSettings(payload);
 
-      const backendUrl =
-        typeof response.nightscout?.url === "string" && response.nightscout.url.trim()
-          ? response.nightscout.url.trim()
-          : trimmedUrl;
+      const responseUrl =
+        typeof response.diabetes?.nightscout_url === "string"
+          ? response.diabetes.nightscout_url.trim()
+          : "";
+      const backendUrl = responseUrl === "__stored__" ? trimmedUrl : responseUrl || trimmedUrl;
       setBackendNightscoutUrl(backendUrl || null);
-      const persistedToken = Boolean(response.nightscout?.hasToken || trimmedToken);
+      const responseToken =
+        typeof response.diabetes?.nightscout_token === "string"
+          ? response.diabetes.nightscout_token.trim()
+          : "";
+      const persistedToken = responseToken === "__stored__" || Boolean(trimmedToken);
       setBackendNightscoutHasToken(persistedToken);
 
       setNightscoutUrl(trimmedUrl);

@@ -18,10 +18,11 @@ except Exception:  # pragma: no cover - ConfigDict no disponible en Pydantic v1
 class SettingsSchema(BaseModel):
     """Esquema de configuración completo"""
 
-    class Config:
-        extra = "allow"
+    if ConfigDict is None:
+        class Config:  # type: ignore[too-many-ancestors]
+            extra = "allow"
 
-    if ConfigDict is not None:  # type: ignore[truthy-bool]
+    else:  # pragma: no cover - executed only with Pydantic v2
         model_config = ConfigDict(extra="allow")  # type: ignore[misc]
     
     class NetworkSettings(BaseModel):
@@ -149,12 +150,28 @@ class SettingsService:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
-        
+
         # Asegurar permisos
         os.chmod(tmp_path, 0o600)
-        
+
         # Atomic rename
         os.replace(tmp_path, self.config_path)
+
+        # Garantizar permisos/propietario correctos tras el rename
+        try:
+            if os.getuid() == 0:
+                import pwd
+
+                pi_uid = pwd.getpwnam("pi").pw_uid
+                pi_gid = pwd.getpwnam("pi").pw_gid
+                os.chown(self.config_path, pi_uid, pi_gid)
+        except (KeyError, PermissionError, ImportError):
+            pass
+        finally:
+            try:
+                os.chmod(self.config_path, 0o600)
+            except PermissionError:
+                pass
     
     def load(self) -> SettingsSchema:
         """Carga y valida configuración"""
@@ -229,6 +246,8 @@ class SettingsService:
                 data["network"]["openai_api_key"] = "__stored__"
             if data.get("diabetes", {}).get("nightscout_token"):
                 data["diabetes"]["nightscout_token"] = "__stored__"
+            if data.get("diabetes", {}).get("nightscout_url"):
+                data["diabetes"]["nightscout_url"] = "__stored__"
             if data.get("openai_api_key"):
                 data["openai_api_key"] = "__stored__"
             if data.get("nightscout_token"):

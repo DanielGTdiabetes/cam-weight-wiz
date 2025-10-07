@@ -103,22 +103,27 @@ export interface BackendSettingsPayload {
   tts?: Record<string, unknown>;
   scale?: Record<string, unknown>;
   serial?: { device?: string; baud?: number };
-  network?: { status?: BackendWifiStatus | null; ap?: { ssid: string; ip: string } };
-  openai?: { hasKey?: boolean };
-  nightscout?: { url?: string; hasToken?: boolean };
+  network?: {
+    status?: BackendWifiStatus | null;
+    ap?: { ssid: string; ip: string };
+    openai_api_key?: string | null;
+  };
+  diabetes?: {
+    nightscout_url?: string | null;
+    nightscout_token?: string | null;
+  };
   integrations?: Record<string, unknown>;
 }
 
 export interface BackendSettingsUpdate {
   pin?: string;
-  openai?: { apiKey?: string | null };
-  nightscout?: { url?: string | null; token?: string | null };
+  network?: { openai_api_key?: string | null } & Record<string, unknown>;
+  diabetes?: { nightscout_url?: string | null; nightscout_token?: string | null } & Record<string, unknown>;
   ui?: Record<string, unknown>;
   tts?: Record<string, unknown>;
   scale?: Record<string, unknown>;
   serial?: Record<string, unknown>;
   integrations?: Record<string, unknown>;
-  network?: Record<string, unknown>;
 }
 
 export interface IntegrationTestResponse {

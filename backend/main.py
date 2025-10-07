@@ -68,6 +68,9 @@ def get_chatgpt_api_key() -> Optional[str]:
     if isinstance(config, dict):
         potential_keys.append(config.get("openai_api_key"))
         potential_keys.append(config.get("chatgpt_api_key"))
+        network_cfg = config.get("network")
+        if isinstance(network_cfg, dict):
+            potential_keys.append(network_cfg.get("openai_api_key"))
         integrations = config.get("integrations", {}) if isinstance(config.get("integrations"), dict) else {}
     else:
         integrations = {}
@@ -116,6 +119,10 @@ def _get_nightscout_credentials(config: Dict[str, Any]) -> tuple[str, str]:
 
     diabetes = config.get("diabetes")
     if isinstance(diabetes, dict):
+        if not url and isinstance(diabetes.get("nightscout_url"), str):
+            url = diabetes["nightscout_url"].strip()
+        if not token and isinstance(diabetes.get("nightscout_token"), str):
+            token = diabetes["nightscout_token"].strip()
         if not url and isinstance(diabetes.get("ns_url"), str):
             url = diabetes["ns_url"].strip()
         if not token and isinstance(diabetes.get("ns_token"), str):
@@ -313,7 +320,12 @@ def _require_pin_header(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail="PIN incorrecto")
 
 
-def require_pin(authorization: Optional[str] = Header(None)) -> None:
+def require_pin(request: Request, authorization: Optional[str] = Header(None)) -> None:
+    client = request.client
+    client_host = client.host if client else None
+    if client_host in {"127.0.0.1", "::1", "::ffff:127.0.0.1"} or client_host is None:
+        return
+
     _require_pin_header(authorization)
 
 
@@ -580,8 +592,14 @@ def _default_config() -> Dict[str, Any]:
         "scale_backend": "uart",
         "serial_device": DEFAULT_SERIAL_DEVICE,
         "serial_baud": DEFAULT_SERIAL_BAUD,
-        "network": {"miniweb_enabled": True, "miniweb_port": 8080},
-        "diabetes": {"diabetes_enabled": False, "ns_url": "", "ns_token": ""},
+        "network": {"miniweb_enabled": True, "miniweb_port": 8080, "openai_api_key": ""},
+        "diabetes": {
+            "diabetes_enabled": False,
+            "ns_url": "",
+            "ns_token": "",
+            "nightscout_url": "",
+            "nightscout_token": "",
+        },
         "nightscout": {"url": "", "token": ""},
         "openai_api_key": "",
         "nightscout_url": "",
@@ -693,6 +711,12 @@ def _migrate_legacy_nightscout(config: Dict[str, Any]) -> bool:
     if diabetes_cfg.get("ns_token") != final_token:
         diabetes_cfg["ns_token"] = final_token
         changed = True
+    if diabetes_cfg.get("nightscout_url") != final_url:
+        diabetes_cfg["nightscout_url"] = final_url
+        changed = True
+    if diabetes_cfg.get("nightscout_token") != final_token:
+        diabetes_cfg["nightscout_token"] = final_token
+        changed = True
     desired_enabled = bool(final_url)
     if diabetes_cfg.get("diabetes_enabled") != desired_enabled:
         diabetes_cfg["diabetes_enabled"] = desired_enabled
@@ -707,6 +731,13 @@ def _migrate_legacy_nightscout(config: Dict[str, Any]) -> bool:
         integrations_cfg["nightscout_token"] = final_token
         changed = True
     config["integrations"] = integrations_cfg
+
+    if config.get("nightscout_url") != final_url:
+        config["nightscout_url"] = final_url
+        changed = True
+    if config.get("nightscout_token") != final_token:
+        config["nightscout_token"] = final_token
+        changed = True
 
     return changed
 
@@ -1429,6 +1460,142 @@ class SettingsTestNightscoutRequest(BaseModel):
         extra = "ignore"
 
 
+_SECRET_PLACEHOLDER = "__stored__"
+
+
+def _resolve_secret(value: Any, current: Any) -> Any:
+    if isinstance(value, str) and value.strip() == _SECRET_PLACEHOLDER:
+        return current
+    return value
+
+
+def _deep_merge_dict(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge_dict(target[key], value)
+        else:
+            target[key] = value
+
+
+def _normalize_settings_payload(payload: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+
+    existing_network = existing.get("network") if isinstance(existing.get("network"), dict) else {}
+    existing_diabetes = existing.get("diabetes") if isinstance(existing.get("diabetes"), dict) else {}
+
+    if isinstance(payload.get("network"), dict):
+        network_updates: Dict[str, Any] = {}
+        for key, value in payload["network"].items():
+            if key == "openai_api_key":
+                network_updates[key] = _resolve_secret(value, existing_network.get("openai_api_key"))
+            else:
+                network_updates[key] = value
+        if network_updates:
+            normalized["network"] = network_updates
+
+    if isinstance(payload.get("diabetes"), dict):
+        diabetes_updates: Dict[str, Any] = {}
+        for key, value in payload["diabetes"].items():
+            if key in {"nightscout_url", "nightscout_token"}:
+                diabetes_updates[key] = _resolve_secret(value, existing_diabetes.get(key))
+            else:
+                diabetes_updates[key] = value
+        if diabetes_updates:
+            normalized["diabetes"] = diabetes_updates
+
+    if isinstance(payload.get("openai"), dict):
+        api_key = payload["openai"].get("apiKey")
+        normalized.setdefault("network", {})["openai_api_key"] = _resolve_secret(
+            api_key, existing_network.get("openai_api_key")
+        )
+
+    if "openai_api_key" in payload:
+        normalized.setdefault("network", {})["openai_api_key"] = _resolve_secret(
+            payload.get("openai_api_key"), existing_network.get("openai_api_key")
+        )
+
+    nightscout_payload = payload.get("nightscout")
+    if isinstance(nightscout_payload, dict):
+        if "url" in nightscout_payload:
+            normalized.setdefault("diabetes", {})["nightscout_url"] = _resolve_secret(
+                nightscout_payload.get("url"), existing_diabetes.get("nightscout_url")
+            )
+        if "token" in nightscout_payload:
+            normalized.setdefault("diabetes", {})["nightscout_token"] = _resolve_secret(
+                nightscout_payload.get("token"), existing_diabetes.get("nightscout_token")
+            )
+
+    if "nightscout_url" in payload:
+        normalized.setdefault("diabetes", {})["nightscout_url"] = _resolve_secret(
+            payload.get("nightscout_url"), existing_diabetes.get("nightscout_url")
+        )
+
+    if "nightscout_token" in payload:
+        normalized.setdefault("diabetes", {})["nightscout_token"] = _resolve_secret(
+            payload.get("nightscout_token"), existing_diabetes.get("nightscout_token")
+        )
+
+    for key, value in payload.items():
+        if key in {"openai", "nightscout", "openai_api_key", "nightscout_url", "nightscout_token"}:
+            continue
+        if key in {"network", "diabetes"}:
+            continue  # Already handled above
+        normalized[key] = value
+
+    return normalized
+
+
+def _synchronize_secret_aliases(config: Dict[str, Any]) -> None:
+    network_cfg = config.get("network") if isinstance(config.get("network"), dict) else {}
+    diabetes_cfg = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
+
+    openai_value = network_cfg.get("openai_api_key") if isinstance(network_cfg, dict) else None
+    openai_str = openai_value.strip() if isinstance(openai_value, str) else ""
+    config["openai_api_key"] = openai_str
+    integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
+    integrations_cfg["openai_api_key"] = openai_str
+    config["integrations"] = integrations_cfg
+
+    nightscout_url_candidates = [
+        diabetes_cfg.get("nightscout_url") if isinstance(diabetes_cfg, dict) else None,
+        diabetes_cfg.get("ns_url") if isinstance(diabetes_cfg, dict) else None,
+        config.get("nightscout_url"),
+        (config.get("nightscout", {}).get("url") if isinstance(config.get("nightscout"), dict) else None),
+    ]
+    nightscout_token_candidates = [
+        diabetes_cfg.get("nightscout_token") if isinstance(diabetes_cfg, dict) else None,
+        diabetes_cfg.get("ns_token") if isinstance(diabetes_cfg, dict) else None,
+        config.get("nightscout_token"),
+        (config.get("nightscout", {}).get("token") if isinstance(config.get("nightscout"), dict) else None),
+    ]
+
+    final_ns_url = next(
+        (value.strip() for value in nightscout_url_candidates if isinstance(value, str) and value.strip()),
+        "",
+    )
+    final_ns_token = next(
+        (value.strip() for value in nightscout_token_candidates if isinstance(value, str) and value.strip()),
+        "",
+    )
+
+    if isinstance(diabetes_cfg, dict):
+        diabetes_cfg["nightscout_url"] = final_ns_url
+        diabetes_cfg["nightscout_token"] = final_ns_token
+        diabetes_cfg["ns_url"] = final_ns_url
+        diabetes_cfg["ns_token"] = final_ns_token
+        diabetes_cfg["diabetes_enabled"] = bool(final_ns_url)
+        config["diabetes"] = diabetes_cfg
+
+    config["nightscout_url"] = final_ns_url
+    config["nightscout_token"] = final_ns_token
+
+    nightscout_cfg = config.get("nightscout") if isinstance(config.get("nightscout"), dict) else {}
+    if isinstance(nightscout_cfg, dict):
+        nightscout_cfg["url"] = final_ns_url
+        nightscout_cfg["token"] = final_ns_token
+        config["nightscout"] = nightscout_cfg
+
+
 @app.get("/api/settings")
 async def get_settings():
     """Get current settings"""
@@ -1438,27 +1605,17 @@ async def get_settings():
 @app.put("/api/settings")
 async def update_settings(settings: dict, _: None = Depends(require_pin)):
     """Update settings"""
-    existing = load_config()
-    network_payload = settings.get("network")
-    if isinstance(network_payload, dict):
-        if network_payload.get("openai_api_key") == "__stored__":
-            network_payload["openai_api_key"] = existing.get("network", {}).get("openai_api_key", "")
-    diabetes_payload = settings.get("diabetes")
-    if isinstance(diabetes_payload, dict):
-        if diabetes_payload.get("nightscout_token") == "__stored__":
-            diabetes_payload["nightscout_token"] = existing.get("diabetes", {}).get("nightscout_token", "")
-    legacy_openai = settings.get("openai_api_key")
-    if legacy_openai == "__stored__":
-        settings["openai_api_key"] = existing.get("openai_api_key", "")
-    legacy_nightscout = settings.get("nightscout_token")
-    if legacy_nightscout == "__stored__":
-        settings["nightscout_token"] = existing.get("nightscout_token", "")
-
     try:
-        save_config(settings)
-        return {"success": True}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        existing = load_config()
+        normalized_updates = _normalize_settings_payload(settings, existing)
+        merged = deepcopy(existing)
+        _deep_merge_dict(merged, normalized_updates)
+        _synchronize_secret_aliases(merged)
+        save_config(merged)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return _settings_service.get_for_client(include_secrets=False)
 
 
 @app.post("/api/settings/test/openai")
@@ -1548,13 +1705,27 @@ async def settings_test_nightscout(
         return JSONResponse(status_code=400, content={"ok": False, "message": "Nightscout no está configurado."})
 
     normalized_url = target_url.rstrip("/")
-    endpoint = f"{normalized_url}/api/v1/status.json"
     headers = {"API-SECRET": target_token} if target_token else {}
+
+    response: Optional[httpx.Response] = None
+    used_endpoint = "status"
 
     try:
         async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-            response = await client.get(endpoint, headers=headers)
-        response.raise_for_status()
+            try:
+                response = await client.get(f"{normalized_url}/api/v1/status", headers=headers)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as status_error:
+                if status_error.response.status_code in {404, 405}:
+                    used_endpoint = "entries"
+                    response = await client.get(
+                        f"{normalized_url}/api/v1/entries",
+                        headers=headers,
+                        params={"count": 1},
+                    )
+                    response.raise_for_status()
+                else:
+                    raise
     except httpx.HTTPStatusError as exc:
         message = f"Nightscout respondió con {exc.response.status_code}"
         try:
@@ -1580,6 +1751,8 @@ async def settings_test_nightscout(
             status = data.get("status") or data.get("name") or data.get("version")
             if isinstance(status, str) and status:
                 message = f"Nightscout operativo ({status})"
+            elif used_endpoint == "entries":
+                message = "Nightscout respondió con entradas recientes."
     except Exception:
         pass
 
