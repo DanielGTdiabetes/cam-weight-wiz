@@ -3098,6 +3098,8 @@ def _get_wifi_status() -> Dict[str, Any]:
     else:
         mode = "ap"
 
+    should_activate_ap = ap_active and not ethernet_active
+
     status: Dict[str, Any] = {
         "ok": True,
         "mode": mode,
@@ -3114,7 +3116,7 @@ def _get_wifi_status() -> Dict[str, Any]:
         "ethernet_connected": ethernet_active,
         "interface": WIFI_INTERFACE,
         "active_connection": active_connection,
-        "should_activate_ap": ap_active,
+        "should_activate_ap": should_activate_ap,
         "connectivity": connectivity,
         "saved_wifi_profiles": saved_wifi_profiles,
         "internet": internet_available,

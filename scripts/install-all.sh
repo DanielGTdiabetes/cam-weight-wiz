@@ -9,19 +9,16 @@
 #
 
 set -euo pipefail
+IFS=$'\n\t'
 trap 'echo "[inst][err] línea $LINENO"; exit 1' ERR
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+log() { printf '[inst] %s\n' "$*"; }
+log_err() { printf '[inst][err] %s\n' "$*" >&2; }
+log_warn() { printf '[inst][warn] %s\n' "$*"; }
 
-log()  { printf "${BLUE}[inst]${NC} %s\n" "$*"; }
-warn() { printf "${YELLOW}[inst][warn]${NC} %s\n" "$*"; }
-err()  { printf "${RED}[inst][err]${NC} %s\n" "$*"; }
-fail() { err "$*"; exit 1; }
+warn() { log_warn "$@"; }
+err() { log_err "$@"; }
+fail() { log_err "$*"; exit 1; }
 
 disable_cloud_init() {
   local bootcfg_dir="/boot/firmware"
@@ -329,11 +326,17 @@ configure_bascula_ui_service() {
   local override_dir="${unit}.d"
   local override_file="${override_dir}/override.conf"
   local target_uid
+  local tmp_file
+  local previous_umask
 
   target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || printf '%s' '1000')"
 
   install -d -m 0755 "${override_dir}"
-  cat > "${override_file}" <<EOF
+
+  previous_umask="$(umask)"
+  umask 022
+  tmp_file="$(mktemp "${override_dir}/override.conf.tmp.XXXXXX")"
+  cat > "${tmp_file}" <<EOF
 [Unit]
 After=network-online.target bascula-miniweb.service systemd-user-sessions.service
 Wants=network-online.target bascula-miniweb.service
@@ -357,32 +360,71 @@ ExecStart=/usr/bin/startx ${BASCULA_CURRENT_LINK}/.xinitrc -- :0 vt1 -nocursor
 Restart=always
 RestartSec=3
 EOF
-  log "✓ Override de bascula-ui.service actualizado (${override_file})"
+  sed -i 's/\r$//' "${tmp_file}"
+  if [[ $(tail -c1 "${tmp_file}" 2>/dev/null || printf '\n') != $'\n' ]]; then
+    printf '\n' >> "${tmp_file}"
+  fi
+  umask "${previous_umask}"
+
+  if [[ -f "${override_file}" ]] && cmp -s "${tmp_file}" "${override_file}"; then
+    log "Override sin cambios"
+  else
+    install -m0644 "${tmp_file}" "${override_file}"
+    log "Override actualizado"
+  fi
+  rm -f "${tmp_file}"
 
   if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-    local verify_output
-    if ! verify_output="$(systemd-analyze verify "${unit}" "${override_file}" 2>&1)"; then
-      printf '%s\n' "${verify_output}" >&2
-      fail "systemd-analyze verify reportó errores para bascula-ui.service"
-    elif [[ -n "${verify_output}" ]]; then
-      printf '%s\n' "${verify_output}"
-    fi
-    log "✓ systemd-analyze verify bascula-ui.service"
-
     systemctl daemon-reload
-    if ! systemctl restart bascula-ui.service; then
-      warn "Reinicio de bascula-ui.service falló; mostrando últimos logs"
-      journalctl -u bascula-ui.service -n 50 || true
-      fail "No se pudo reiniciar bascula-ui.service"
+    if ! systemd-analyze verify bascula-ui.service; then
+      log_err "verify falló"
+      journalctl -u bascula-ui -b -n 200 || true
+      exit 1
     fi
-    if ! systemctl enable bascula-ui.service; then
-      warn "No se pudo habilitar bascula-ui.service"
-    else
-      log "✓ bascula-ui.service habilitado"
+    log "systemd-analyze verify bascula-ui.service ok"
+
+    if ! systemctl enable --now bascula-miniweb.service; then
+      log_err "No se pudo habilitar bascula-miniweb.service"
+      systemctl status bascula-miniweb.service --no-pager || true
+      exit 1
     fi
 
-    log "─ systemctl cat bascula-ui.service"
-    systemctl cat bascula-ui.service || warn "No se pudo mostrar systemctl cat bascula-ui.service"
+    local backend_ready=0
+    if command -v curl >/dev/null 2>&1; then
+      for _ in {1..15}; do
+        if curl -sf http://127.0.0.1:8080/health >/dev/null; then
+          backend_ready=1
+          break
+        fi
+        sleep 1
+      done
+      if (( backend_ready == 1 )); then
+        log "Backend miniweb saludable"
+      else
+        log_warn "Backend miniweb no respondió en http://127.0.0.1:8080/health"
+      fi
+    else
+      log_warn "curl no disponible para verificar miniweb"
+    fi
+
+    if ! systemctl enable bascula-ui.service; then
+      log_err "No se pudo habilitar bascula-ui.service"
+      systemctl status bascula-ui.service --no-pager || true
+      exit 1
+    fi
+
+    if ! systemctl restart bascula-ui.service; then
+      log_err "No se pudo reiniciar bascula-ui.service"
+      journalctl -u bascula-ui.service -n 50 || true
+      exit 1
+    fi
+
+    if ! systemctl is-active --quiet bascula-ui.service; then
+      log_err "bascula-ui no activo"
+      systemctl status bascula-ui --no-pager -l || true
+      exit 1
+    fi
+    log "UI activa"
   else
     warn "systemd no disponible o ALLOW_SYSTEMD!=1; se omitió verificación/reinicio de bascula-ui.service"
   fi
@@ -1855,37 +1897,30 @@ fi
 
 # Final message
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-echo ""
 log "============================================"
 log "  ¡Instalación Completada!"
 log "============================================"
-echo ""
-echo -e "${GREEN}Sistema instalado con éxito:${NC}"
-echo "  ✅ Estructura OTA en: ${BASCULA_CURRENT_LINK}"
-echo "  ✅ Config en: ${CFG_PATH}"
-echo "  ✅ Audio I2S + Piper TTS"
-echo "  ✅ Camera Module 3 + OCR"
-echo "  ✅ Nginx + Mini-web + UI kiosk"
-echo ""
-echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-echo -e "${YELLOW}  ⚠ REINICIO REQUERIDO${NC}"
-echo -e "${YELLOW}═══════════════════════════════════════════${NC}"
-echo ""
-echo "  sudo reboot"
-echo ""
-echo "Después del reinicio, acceder a:"
-echo "  http://${IP:-<IP>} o http://localhost"
-echo "  Mini-Web: visita http://${IP:-<IP>}:8080 · PIN: consulta /api/miniweb/pin en AP o mira la pantalla"
-echo ""
-echo "Comandos útiles:"
-echo "  journalctl -u bascula-miniweb.service -f"
-echo "  journalctl -u bascula-ui.service -f"
-echo "  journalctl -u ocr-service.service -f"
-echo "  journalctl -u x735-fan.service -f    # monitorear ventilador"
-echo "  libcamera-hello  # probar cámara"
-echo "  say.sh 'Hola'    # probar voz"
-echo "  x735off          # apagar el sistema de forma segura"
-echo ""
+log "Sistema instalado con éxito:"
+log "  ✅ Estructura OTA en: ${BASCULA_CURRENT_LINK}"
+log "  ✅ Config en: ${CFG_PATH}"
+log "  ✅ Audio I2S + Piper TTS"
+log "  ✅ Camera Module 3 + OCR"
+log "  ✅ Nginx + Mini-web + UI kiosk"
+log_warn "═══════════════════════════════════════════"
+log_warn "  ⚠ REINICIO REQUERIDO"
+log_warn "═══════════════════════════════════════════"
+log "  sudo reboot"
+log "Después del reinicio, acceder a:"
+log "  http://${IP:-<IP>} o http://localhost"
+log "  Mini-Web: visita http://${IP:-<IP>}:8080 · PIN: consulta /api/miniweb/pin en AP o mira la pantalla"
+log "Comandos útiles:"
+log "  journalctl -u bascula-miniweb.service -f"
+log "  journalctl -u bascula-ui.service -f"
+log "  journalctl -u ocr-service.service -f"
+log "  journalctl -u x735-fan.service -f    # monitorear ventilador"
+log "  libcamera-hello  # probar cámara"
+log "  say.sh 'Hola'    # probar voz"
+log "  x735off          # apagar el sistema de forma segura"
 log "Instalación finalizada"
 log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
 systemctl_safe status bascula-miniweb --no-pager -l
