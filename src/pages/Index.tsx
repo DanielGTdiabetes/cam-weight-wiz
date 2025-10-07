@@ -102,7 +102,7 @@ const Index = () => {
 
       const previous = previousNetworkStatus.current;
 
-      if (status.offlineModeEnabled && !status.hasInternet && status.effectiveMode === "offline") {
+      if (status.effectiveMode === "offline") {
         setNetworkNotice({
           message: "Modo offline: sin conexión a Internet",
           type: "warning",
@@ -528,7 +528,7 @@ const Index = () => {
         </div>
       )}
 
-      {networkStatusState?.offlineModeEnabled && !networkStatusState?.hasInternet && (
+      {networkStatusState?.effectiveMode === "offline" && (
         <div className="pointer-events-none fixed right-4 top-4 z-40">
           <div className="flex items-center gap-2 rounded-full border border-amber-400/70 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-200 shadow-lg backdrop-blur">
             <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
