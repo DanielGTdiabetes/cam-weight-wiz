@@ -3054,6 +3054,24 @@ def _resolve_offline_mode(config: Optional[Dict[str, Any]] | None = None) -> boo
     return False
 
 
+def _determine_effective_mode(
+    *,
+    ethernet_connected: bool,
+    wifi_connected: bool,
+    offline_mode_enabled: bool,
+    internet_available: bool,
+) -> str:
+    if ethernet_connected or wifi_connected:
+        if offline_mode_enabled and not internet_available:
+            return "offline"
+        return "kiosk"
+
+    if offline_mode_enabled:
+        return "offline"
+
+    return "ap"
+
+
 def _get_wifi_status(config: Optional[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     ap_active = _nm_active_ap()
     connectivity = _nm_connectivity()
@@ -3150,18 +3168,17 @@ def _get_wifi_status(config: Optional[Dict[str, Any]] | None = None) -> Dict[str
 
     offline_mode_enabled = _resolve_offline_mode(config)
 
-    has_network_connectivity = bool(wifi_ip or ethernet_has_ip)
-
-    if has_network_connectivity:
-        effective_mode = "kiosk"
-    elif offline_mode_enabled:
-        effective_mode = "offline"
-    else:
-        effective_mode = "ap"
+    effective_mode = _determine_effective_mode(
+        ethernet_connected=bool(ethernet_active),
+        wifi_connected=bool(wifi_connected),
+        offline_mode_enabled=offline_mode_enabled,
+        internet_available=internet_available,
+    )
 
     mode = effective_mode
 
-    should_activate_ap = ap_active and not ethernet_active
+    has_lan_connectivity = bool(ethernet_has_ip or wifi_connected or wifi_ip)
+    should_activate_ap = bool(ap_active and not has_lan_connectivity and not ethernet_active)
 
     status: Dict[str, Any] = {
         "ok": True,

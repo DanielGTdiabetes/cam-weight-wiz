@@ -1031,7 +1031,7 @@ export const MiniWebConfig = () => {
     if (!networkStatus) {
       return "Desconocido";
     }
-    if (networkStatus.effectiveMode === "offline" || (networkStatus.offlineMode && !networkStatus.hasInternet)) {
+    if (networkStatus.effectiveMode === "offline") {
       return "Modo offline";
     }
     if (networkStatus.apActive) {
