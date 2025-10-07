@@ -39,7 +39,7 @@ class SettingsSchema(BaseModel):
         hyper_alarm: float = 180.0
     
     class UiSettings(BaseModel):
-        sound_enabled: bool = False
+        sound_enabled: bool = True
         flags: Dict[str, bool] = Field(default_factory=dict)
     
     class ScaleSettings(BaseModel):

@@ -111,3 +111,26 @@ def test_get_masks_secret_values(settings_service):
     assert payload.get("network", {}).get("openai_api_key") == _SECRET_PLACEHOLDER
     assert payload.get("diabetes", {}).get("nightscout_url") == _SECRET_PLACEHOLDER
     assert payload.get("diabetes", {}).get("nightscout_token") == _SECRET_PLACEHOLDER
+
+
+def test_default_sound_enabled_is_true(settings_service):
+    service, _ = settings_service
+
+    settings = service.load()
+
+    assert settings.ui.sound_enabled is True
+
+
+def test_sound_enabled_respects_saved_value(settings_service):
+    service, _ = settings_service
+
+    apply_updates(
+        service,
+        {
+            "ui": {"sound_enabled": False},
+        },
+    )
+
+    settings = service.load()
+
+    assert settings.ui.sound_enabled is False
