@@ -363,7 +363,7 @@ class ApiService {
     }
 
     return apiWrapper.request<BackendSettingsPayload>('/api/settings', {
-      method: 'PUT',
+      method: 'POST',
       body: rest,
       headers,
     });
