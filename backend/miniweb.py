@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple, TYPE_CHECKING
+from copy import deepcopy
 from urllib.parse import urlparse
 
 from contextlib import asynccontextmanager
@@ -28,7 +29,7 @@ from pathlib import Path
 
 import httpx
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -416,19 +417,35 @@ def _extract_nightscout_credentials(config: Optional[Dict[str, Any]]) -> Tuple[s
 
 
 def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+    service = get_settings_service(CONFIG_PATH)
+    base_payload = service.get_for_client(include_secrets=False)
+    payload: Dict[str, Any]
+    if isinstance(base_payload, dict):
+        payload = deepcopy(base_payload)
+    else:
+        payload = {}
+
     openai_key = _extract_openai_api_key(config)
     nightscout_url, nightscout_token = _extract_nightscout_credentials(config)
 
-    ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
-    raw_flags = ui_cfg.get("flags") if isinstance(ui_cfg, dict) else {}
+    raw_ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+    raw_flags = raw_ui_cfg.get("flags") if isinstance(raw_ui_cfg, dict) else {}
     flags: Dict[str, Any] = {}
     if isinstance(raw_flags, dict):
         for key, value in raw_flags.items():
             flags[str(key)] = bool(value)
     offline_mode = _resolve_offline_mode(config)
 
+    ui_cfg = payload.get("ui") if isinstance(payload.get("ui"), dict) else {}
+    ui_cfg["flags"] = flags
+    ui_cfg["offline_mode"] = offline_mode
+    payload["ui"] = ui_cfg
+
     tts_cfg = config.get("tts") if isinstance(config.get("tts"), dict) else {}
+    payload["tts"] = tts_cfg
+
     scale_cfg = config.get("scale") if isinstance(config.get("scale"), dict) else {}
+    payload["scale"] = scale_cfg
 
     serial_device = config.get("serial_device", DEFAULT_SERIAL_DEVICE)
     serial_baud = config.get("serial_baud", DEFAULT_SERIAL_BAUD)
@@ -436,6 +453,7 @@ def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         serial_baud_int = int(serial_baud)
     except (TypeError, ValueError):
         serial_baud_int = DEFAULT_SERIAL_BAUD
+    payload["serial"] = {"device": serial_device, "baud": serial_baud_int}
 
     try:
         network_status = _get_wifi_status(config)
@@ -443,29 +461,24 @@ def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         LOG_NETWORK.debug("No se pudo obtener estado de red: %s", exc)
         network_status = None
 
-    integrations_cfg = config.get("integrations")
-    if isinstance(integrations_cfg, dict):
-        integrations = {
-            key: value
-            for key, value in integrations_cfg.items()
-            if key not in {"openai_api_key", "chatgpt_api_key", "nightscout_token"}
-        }
-    else:
-        integrations = {}
+    network_cfg = payload.get("network") if isinstance(payload.get("network"), dict) else {}
+    network_cfg["status"] = network_status
+    network_cfg.setdefault("ap", {"ssid": AP_DEFAULT_SSID, "ip": AP_DEFAULT_IP})
+    payload["network"] = network_cfg
 
-    return {
-        "ui": {"flags": flags, "offline_mode": offline_mode},
-        "tts": tts_cfg,
-        "scale": scale_cfg,
-        "serial": {"device": serial_device, "baud": serial_baud_int},
-        "network": {
-            "status": network_status,
-            "ap": {"ssid": AP_DEFAULT_SSID, "ip": AP_DEFAULT_IP},
-        },
-        "openai": {"hasKey": bool(openai_key)},
-        "nightscout": {"url": nightscout_url, "hasToken": bool(nightscout_token)},
-        "integrations": integrations,
+    payload["openai"] = {"hasKey": bool(openai_key)}
+
+    payload["nightscout"] = {"url": nightscout_url, "hasToken": bool(nightscout_token)}
+
+    integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
+    integrations = {
+        key: value
+        for key, value in integrations_cfg.items()
+        if key not in {"openai_api_key", "chatgpt_api_key", "nightscout_token"}
     }
+    payload["integrations"] = integrations
+
+    return payload
 
 
 def _response_error_payload(response: httpx.Response) -> Any:
@@ -3061,16 +3074,16 @@ def _determine_effective_mode(
     offline_mode_enabled: bool,
     internet_available: bool,
 ) -> str:
-    if internet_available:
-        return "kiosk"
-
     if offline_mode_enabled:
         return "offline"
 
-    if ethernet_connected or wifi_connected:
+    if not ethernet_connected and not wifi_connected:
+        return "ap"
+
+    if not internet_available:
         return "offline"
 
-    return "ap"
+    return "kiosk"
 
 
 def _get_wifi_status(config: Optional[Dict[str, Any]] | None = None) -> Dict[str, Any]:
@@ -3666,6 +3679,9 @@ class SettingsUpdatePayload(BaseModel):
     serial: Optional[Dict[str, Any]] = None
     integrations: Optional[Dict[str, Any]] = None
     network: Optional[Dict[str, Any]] = None
+    openai_api_key: Optional[str] = None
+    nightscout_url: Optional[str] = None
+    nightscout_token: Optional[str] = None
 
 
 # ---------- PIN persistente ----------
@@ -3701,6 +3717,10 @@ def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str])
         return
 
     pin = (provided_pin or "").strip()
+    if not pin:
+        auth_header = request.headers.get("Authorization", "") if hasattr(request, "headers") else ""
+        if isinstance(auth_header, str) and auth_header.lower().startswith("basculapin "):
+            pin = auth_header.split(" ", 1)[1].strip()
     if not pin:
         raise HTTPException(
             status_code=403,
@@ -3748,8 +3768,20 @@ async def verify_pin(data: PinVerification, request: Request):
 @app.get("/api/settings")
 async def get_settings():
     """Get current settings without secrets"""
-    service = get_settings_service(CONFIG_PATH)
-    return service.get_for_client(include_secrets=False)
+    config = _load_config()
+    return _build_settings_payload(config)
+
+
+@app.options("/api/settings")
+async def options_settings() -> Response:
+    allowed = "GET, POST, OPTIONS"
+    response = Response(status_code=204)
+    response.headers["Allow"] = allowed
+    response.headers["Access-Control-Allow-Methods"] = allowed
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.post("/api/settings")
@@ -3757,10 +3789,26 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
     """Update settings and broadcast changes via WebSocket"""
     client_host = _extract_client_host(request)
     trusted_client = _is_trusted_client(client_host)
+    try:
+        raw_payload = payload.dict(exclude_unset=True)  # type: ignore[attr-defined]
+    except Exception:
+        raw_payload = payload.dict() if hasattr(payload, "dict") else {}
+
     requires_pin = any(
         getattr(payload, field) is not None
         for field in ("openai", "nightscout", "ui", "tts", "scale", "serial", "integrations", "network")
     )
+    if not requires_pin:
+        network_payload = raw_payload.get("network") if isinstance(raw_payload, dict) else None
+        diabetes_payload = raw_payload.get("diabetes") if isinstance(raw_payload, dict) else None
+        if (
+            "openai_api_key" in raw_payload
+            or (isinstance(network_payload, dict) and "openai_api_key" in network_payload)
+            or "nightscout_url" in raw_payload
+            or "nightscout_token" in raw_payload
+            or (isinstance(diabetes_payload, dict) and any(key in diabetes_payload for key in ("nightscout_url", "nightscout_token")))
+        ):
+            requires_pin = True
     if requires_pin or (payload.pin is not None and not trusted_client):
         _ensure_pin_valid_for_request(request, payload.pin)
 
@@ -3769,6 +3817,25 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
         for field in ("openai", "nightscout", "ui", "tts", "scale", "serial", "integrations", "network")
         if getattr(payload, field) is not None
     ]
+    if "openai_api_key" in raw_payload or (
+        isinstance(raw_payload.get("network"), dict) and "openai_api_key" in raw_payload["network"]
+    ):
+        if "openai" not in requested_fields:
+            requested_fields.append("openai")
+    if (
+        "nightscout_url" in raw_payload
+        or "nightscout_token" in raw_payload
+        or (
+            isinstance(raw_payload.get("diabetes"), dict)
+            and any(key in raw_payload["diabetes"] for key in ("nightscout_url", "nightscout_token"))
+        )
+        or (
+            isinstance(raw_payload.get("nightscout"), dict)
+            and ("url" in raw_payload["nightscout"] or "token" in raw_payload["nightscout"])
+        )
+    ):
+        if "nightscout" not in requested_fields:
+            requested_fields.append("nightscout")
     if requested_fields:
         _log_settings_event(
             "settings.request",
@@ -3786,54 +3853,111 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
     previous_offline_mode = _resolve_offline_mode(config)
     offline_mode_changed = False
 
-    if payload.openai is not None:
-        api_key = (payload.openai.apiKey or "").strip()
+    OPENAI_SENTINEL = object()
+    openai_candidate = OPENAI_SENTINEL
+    openai_section = raw_payload.get("openai")
+    if isinstance(openai_section, dict) and "apiKey" in openai_section:
+        openai_candidate = openai_section.get("apiKey")
+    elif isinstance(raw_payload.get("network"), dict) and "openai_api_key" in raw_payload["network"]:
+        openai_candidate = raw_payload["network"].get("openai_api_key")
+    elif "openai_api_key" in raw_payload:
+        openai_candidate = raw_payload.get("openai_api_key")
+
+    if openai_candidate is not OPENAI_SENTINEL:
+        if openai_candidate == "__stored__":
+            api_key = _extract_openai_api_key(config)
+        elif openai_candidate is None:
+            api_key = ""
+        else:
+            api_key = str(openai_candidate).strip()
+
         current_key = _extract_openai_api_key(config)
         if current_key != api_key:
             changed_sections.add("openai")
             change_metadata["openai_has_key"] = bool(api_key)
             changed = True
 
-        # Update in new structure
-        if "network" not in updates:
-            updates["network"] = config.get("network", {})
-        updates["network"]["openai_api_key"] = api_key
-        
-        # Legacy compatibility
+        network_cfg = config.get("network")
+        if not isinstance(network_cfg, dict):
+            network_cfg = {}
+        network_cfg["openai_api_key"] = api_key
+        config["network"] = network_cfg
+
+        network_updates = updates.get("network")
+        if not isinstance(network_updates, dict):
+            network_updates = {}
+        network_updates["openai_api_key"] = api_key
+        updates["network"] = network_updates
+
         config["openai_api_key"] = api_key
-        integrations = config.get("integrations", {})
+        integrations = config.get("integrations")
         if not isinstance(integrations, dict):
             integrations = {}
         integrations["openai_api_key"] = api_key
         integrations["chatgpt_api_key"] = api_key
         config["integrations"] = integrations
 
-    if payload.nightscout is not None:
+    NS_SENTINEL = object()
+    nightscout_url_candidate = NS_SENTINEL
+    nightscout_token_candidate = NS_SENTINEL
+
+    nightscout_section = raw_payload.get("nightscout")
+    if isinstance(nightscout_section, dict):
+        if "url" in nightscout_section:
+            nightscout_url_candidate = nightscout_section.get("url")
+        if "token" in nightscout_section:
+            nightscout_token_candidate = nightscout_section.get("token")
+
+    diabetes_section = raw_payload.get("diabetes")
+    if isinstance(diabetes_section, dict):
+        if nightscout_url_candidate is NS_SENTINEL and "nightscout_url" in diabetes_section:
+            nightscout_url_candidate = diabetes_section.get("nightscout_url")
+        if nightscout_token_candidate is NS_SENTINEL and "nightscout_token" in diabetes_section:
+            nightscout_token_candidate = diabetes_section.get("nightscout_token")
+
+    if nightscout_url_candidate is NS_SENTINEL and "nightscout_url" in raw_payload:
+        nightscout_url_candidate = raw_payload.get("nightscout_url")
+    if nightscout_token_candidate is NS_SENTINEL and "nightscout_token" in raw_payload:
+        nightscout_token_candidate = raw_payload.get("nightscout_token")
+
+    nightscout_provided = (
+        nightscout_url_candidate is not NS_SENTINEL or nightscout_token_candidate is not NS_SENTINEL
+    )
+
+    if nightscout_provided:
         current_url, current_token = _extract_nightscout_credentials(config)
-        if payload.nightscout.url is None:
-            url = current_url
-        else:
-            candidate_url = str(payload.nightscout.url or "").strip()
-            if candidate_url:
-                try:
-                    url = _normalize_http_url(candidate_url)
-                except ValueError:
-                    _log_settings_event(
-                        "settings.validation_failed",
-                        field="nightscout.url",
-                        reason="invalid_http_url",
-                        attempted_value=candidate_url,
-                    )
-                    raise HTTPException(
-                        status_code=422,
-                        detail={"code": "invalid_url", "field": "nightscout.url"},
-                    )
+        url = current_url
+        token = current_token
+
+        if nightscout_url_candidate is not NS_SENTINEL:
+            if nightscout_url_candidate == "__stored__":
+                url = current_url
             else:
-                url = ""
-        if payload.nightscout.token is None:
-            token = current_token
-        else:
-            token = str(payload.nightscout.token or "").strip()
+                candidate_url = str(nightscout_url_candidate or "").strip()
+                if candidate_url:
+                    try:
+                        url = _normalize_http_url(candidate_url)
+                    except ValueError:
+                        _log_settings_event(
+                            "settings.validation_failed",
+                            field="nightscout.url",
+                            reason="invalid_http_url",
+                            attempted_value=candidate_url,
+                        )
+                        raise HTTPException(
+                            status_code=422,
+                            detail={"code": "invalid_url", "field": "nightscout.url"},
+                        )
+                else:
+                    url = ""
+
+        if nightscout_token_candidate is not NS_SENTINEL:
+            if nightscout_token_candidate == "__stored__":
+                token = current_token
+            elif nightscout_token_candidate is None:
+                token = ""
+            else:
+                token = str(nightscout_token_candidate).strip()
 
         if url != current_url or token != current_token:
             changed_sections.add("nightscout")
@@ -3841,39 +3965,38 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
             change_metadata["nightscout_has_token"] = bool(token)
             changed = True
 
-        # Update in new structure
-        if "diabetes" not in updates:
-            updates["diabetes"] = config.get("diabetes", {})
-        if not isinstance(updates["diabetes"], dict):
-            updates["diabetes"] = {}
-        updates["diabetes"]["nightscout_url"] = url
-        updates["diabetes"]["nightscout_token"] = token
-        updates["diabetes"]["diabetes_enabled"] = bool(url)
+        diabetes_updates = updates.get("diabetes")
+        if not isinstance(diabetes_updates, dict):
+            diabetes_updates = {}
+        diabetes_updates["nightscout_url"] = url
+        diabetes_updates["nightscout_token"] = token
+        diabetes_updates["diabetes_enabled"] = bool(url)
+        updates["diabetes"] = diabetes_updates
 
-        # Legacy compatibility
         config["nightscout_url"] = url
         config["nightscout_token"] = token
-        nightscout_cfg = config.get("nightscout", {})
+
+        nightscout_cfg = config.get("nightscout")
         if not isinstance(nightscout_cfg, dict):
             nightscout_cfg = {}
         nightscout_cfg["url"] = url
         nightscout_cfg["token"] = token
         config["nightscout"] = nightscout_cfg
-        
-        diabetes = config.get("diabetes", {})
-        if not isinstance(diabetes, dict):
-            diabetes = {}
-        diabetes["ns_url"] = url
-        diabetes["ns_token"] = token
-        diabetes["diabetes_enabled"] = bool(url)
-        config["diabetes"] = diabetes
-        
-        integrations = config.get("integrations", {})
-        if not isinstance(integrations, dict):
-            integrations = {}
-        integrations["nightscout_url"] = url
-        integrations["nightscout_token"] = token
-        config["integrations"] = integrations
+
+        diabetes_cfg = config.get("diabetes")
+        if not isinstance(diabetes_cfg, dict):
+            diabetes_cfg = {}
+        diabetes_cfg["ns_url"] = url
+        diabetes_cfg["ns_token"] = token
+        diabetes_cfg["diabetes_enabled"] = bool(url)
+        config["diabetes"] = diabetes_cfg
+
+        integrations_cfg = config.get("integrations")
+        if not isinstance(integrations_cfg, dict):
+            integrations_cfg = {}
+        integrations_cfg["nightscout_url"] = url
+        integrations_cfg["nightscout_token"] = token
+        config["integrations"] = integrations_cfg
 
     if payload.ui:
         ui_cfg = config.get("ui", {})
@@ -4002,6 +4125,45 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
         )
 
     return _build_settings_payload(config)
+
+
+@app.get("/api/settings/health")
+async def settings_health():
+    service = get_settings_service(CONFIG_PATH)
+    try:
+        settings = service.load()
+        meta = getattr(settings, "meta", None)
+        version = int(getattr(meta, "version", 0)) if meta is not None else 0
+        updated_at = getattr(meta, "updated_at", None) if meta is not None else None
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "message": str(exc)})
+
+    config_path = CONFIG_PATH
+    config_dir = config_path.parent
+    dir_exists = config_dir.exists()
+    file_exists = config_path.exists()
+
+    can_read = False
+    can_write = False
+
+    try:
+        if file_exists:
+            can_read = os.access(config_path, os.R_OK)
+            can_write = os.access(config_path, os.W_OK)
+        else:
+            can_read = dir_exists and os.access(config_dir, os.R_OK)
+            can_write = dir_exists and os.access(config_dir, os.W_OK)
+    except Exception:
+        can_read = False
+        can_write = False
+
+    return {
+        "ok": True,
+        "version": version,
+        "updated_at": updated_at,
+        "can_read": bool(can_read),
+        "can_write": bool(can_write),
+    }
 
 
 async def _broadcast_settings_change(changed_fields: Set[str], metadata: Dict[str, Any]) -> None:

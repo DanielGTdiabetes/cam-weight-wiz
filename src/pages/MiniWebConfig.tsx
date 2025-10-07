@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FocusEvent } from "react";
 import {
   Activity,
   AlertCircle,
@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { useToast } from "@/hooks/use-toast";
 import { useSettingsSync } from "@/hooks/useSettingsSync";
 import { isLocalClient } from "@/lib/network";
@@ -63,6 +64,16 @@ interface MiniwebStatus {
   offlineMode: boolean;
   ethernetConnected: boolean;
   hasInternet: boolean;
+}
+
+type KeyboardField = "selectedNetwork" | "networkPassword" | "openaiInput" | "nightscoutUrl" | "nightscoutToken";
+
+interface KeyboardConfigState {
+  field: KeyboardField;
+  title: string;
+  type: "text" | "password" | "url" | "apikey";
+  allowEmpty?: boolean;
+  maxLength?: number;
 }
 
 const parseMiniwebStatus = (raw: Record<string, unknown> | null | undefined): MiniwebStatus | null => {
@@ -228,6 +239,14 @@ export const MiniWebConfig = () => {
   const [showNightscoutToken, setShowNightscoutToken] = useState(false);
 
   const [savingIntegrations, setSavingIntegrations] = useState(false);
+
+  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const [keyboardValue, setKeyboardValue] = useState("");
+  const [keyboardConfig, setKeyboardConfig] = useState<KeyboardConfigState>({
+    field: "selectedNetwork",
+    title: "",
+    type: "text",
+  });
   const [openaiTest, setOpenaiTest] = useState<IntegrationTestState>({ status: "idle" });
   const [nightscoutTest, setNightscoutTest] = useState<IntegrationTestState>({ status: "idle" });
   const [testingOpenAI, setTestingOpenAI] = useState(false);
@@ -236,6 +255,60 @@ export const MiniWebConfig = () => {
 
   const [healthStatus, setHealthStatus] = useState<HealthState>({ ok: false, message: "Sin comprobar", timestamp: null });
   const redirectTimerRef = useRef<number | null>(null);
+
+  const openKeyboardDialog = useCallback(
+    (config: KeyboardConfigState, initialValue: string) => {
+      if (!localClient) {
+        return;
+      }
+
+      setKeyboardConfig(config);
+      setKeyboardValue(initialValue);
+      setKeyboardOpen(true);
+    },
+    [localClient],
+  );
+
+  const closeKeyboardDialog = useCallback(() => {
+    setKeyboardOpen(false);
+    setKeyboardValue("");
+  }, []);
+
+  const handleKeyboardConfirm = useCallback(() => {
+    const value = keyboardValue;
+
+    switch (keyboardConfig.field) {
+      case "selectedNetwork": {
+        setSelectedNetwork(value);
+        setNetworkSelectionLocked(true);
+        break;
+      }
+      case "networkPassword": {
+        setNetworkPassword(value);
+        setNetworkSelectionLocked(true);
+        break;
+      }
+      case "openaiInput": {
+        setOpenaiInput(value);
+        setOpenaiDirty(true);
+        setOpenaiHasKey(Boolean(value.trim()));
+        break;
+      }
+      case "nightscoutUrl": {
+        setNightscoutUrl(value);
+        setNightscoutUrlDirty(true);
+        break;
+      }
+      case "nightscoutToken": {
+        setNightscoutToken(value);
+        setNightscoutTokenDirty(true);
+        setNightscoutHasToken(Boolean(value.trim()));
+        break;
+      }
+      default:
+        break;
+    }
+  }, [keyboardConfig.field, keyboardValue, setNetworkPassword, setNetworkSelectionLocked, setNightscoutHasToken, setNightscoutToken, setNightscoutTokenDirty, setNightscoutUrl, setNightscoutUrlDirty, setOpenaiDirty, setOpenaiHasKey, setOpenaiInput, setSelectedNetwork]);
 
   const ensurePin = useCallback(
     (context: string): { allowed: boolean; pin?: string } => {
@@ -591,7 +664,7 @@ export const MiniWebConfig = () => {
       }
       closeSource();
     };
-  }, [refreshStatus, toast]);
+  }, [networkSelectionLocked, refreshStatus, toast]);
   const handleVerifyPin = async () => {
     if (localClient) {
       setPinVerified(true);
@@ -1300,6 +1373,23 @@ export const MiniWebConfig = () => {
                     }}
                     placeholder="MiRed"
                     autoComplete="off"
+                    readOnly={localClient}
+                    onFocus={(event: FocusEvent<HTMLInputElement>) => {
+                      if (!localClient) {
+                        return;
+                      }
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                      openKeyboardDialog(
+                        {
+                          field: "selectedNetwork",
+                          title: "Nombre de la red (SSID)",
+                          type: "text",
+                          maxLength: 64,
+                        },
+                        selectedNetwork,
+                      );
+                    }}
                   />
                 </div>
                 <div className="space-y-2">
@@ -1314,6 +1404,24 @@ export const MiniWebConfig = () => {
                     type="password"
                     autoComplete="off"
                     disabled={!selectedSecured}
+                    readOnly={localClient}
+                    onFocus={(event: FocusEvent<HTMLInputElement>) => {
+                      if (!localClient || !selectedSecured) {
+                        return;
+                      }
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                      openKeyboardDialog(
+                        {
+                          field: "networkPassword",
+                          title: selectedNetwork ? `Contraseña de "${selectedNetwork}"` : "Contraseña Wi-Fi",
+                          type: "password",
+                          allowEmpty: true,
+                          maxLength: 63,
+                        },
+                        networkPassword,
+                      );
+                    }}
                   />
                   <div className="flex items-center gap-2">
                     <Switch
@@ -1428,12 +1536,32 @@ export const MiniWebConfig = () => {
                       type={showOpenAiKey ? 'text' : 'password'}
                       value={openaiInput}
                       onChange={(event) => {
-                        setOpenaiInput(event.target.value);
+                        const value = event.target.value;
+                        setOpenaiInput(value);
                         setOpenaiDirty(true);
+                        setOpenaiHasKey(Boolean(value.trim()));
                       }}
                       placeholder={openaiHasKey ? "••••••••" : "sk-..."}
                       autoComplete="off"
                       disabled={remoteLocked}
+                      readOnly={localClient}
+                      onFocus={(event: FocusEvent<HTMLInputElement>) => {
+                        if (!localClient || remoteLocked) {
+                          return;
+                        }
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                        openKeyboardDialog(
+                          {
+                            field: "openaiInput",
+                            title: "OpenAI API Key",
+                            type: "apikey",
+                            allowEmpty: true,
+                            maxLength: 128,
+                          },
+                          openaiInput,
+                        );
+                      }}
                     />
                     <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
                       <Button
@@ -1456,6 +1584,7 @@ export const MiniWebConfig = () => {
                           void handlePaste((value) => {
                             setOpenaiInput(value);
                             setOpenaiDirty(true);
+                            setOpenaiHasKey(Boolean(value.trim()));
                           })
                         }
                         disabled={remoteLocked}
@@ -1515,6 +1644,24 @@ export const MiniWebConfig = () => {
                       placeholder="https://midominio.herokuapp.com"
                       autoComplete="url"
                       disabled={remoteLocked}
+                      readOnly={localClient}
+                      onFocus={(event: FocusEvent<HTMLInputElement>) => {
+                        if (!localClient || remoteLocked) {
+                          return;
+                        }
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                        openKeyboardDialog(
+                          {
+                            field: "nightscoutUrl",
+                            title: "Nightscout URL",
+                            type: "url",
+                            allowEmpty: true,
+                            maxLength: 255,
+                          },
+                          nightscoutUrl,
+                        );
+                      }}
                     />
                     <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
                       <Button
@@ -1542,12 +1689,32 @@ export const MiniWebConfig = () => {
                       type={showNightscoutToken ? 'text' : 'password'}
                       value={nightscoutToken}
                       onChange={(event) => {
-                        setNightscoutToken(event.target.value);
+                        const value = event.target.value;
+                        setNightscoutToken(value);
                         setNightscoutTokenDirty(true);
+                        setNightscoutHasToken(Boolean(value.trim()));
                       }}
                       placeholder={nightscoutHasToken ? "••••••" : "token"}
                       autoComplete="new-password"
                       disabled={remoteLocked}
+                      readOnly={localClient}
+                      onFocus={(event: FocusEvent<HTMLInputElement>) => {
+                        if (!localClient || remoteLocked) {
+                          return;
+                        }
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                        openKeyboardDialog(
+                          {
+                            field: "nightscoutToken",
+                            title: "Nightscout Token",
+                            type: "apikey",
+                            allowEmpty: true,
+                            maxLength: 128,
+                          },
+                          nightscoutToken,
+                        );
+                      }}
                     />
                     <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
                       <Button
@@ -1570,6 +1737,7 @@ export const MiniWebConfig = () => {
                           void handlePaste((value) => {
                             setNightscoutToken(value);
                             setNightscoutTokenDirty(true);
+                            setNightscoutHasToken(Boolean(value.trim()));
                           })
                         }
                         disabled={remoteLocked}
@@ -1665,6 +1833,17 @@ export const MiniWebConfig = () => {
           Versión mini-web {MINIWEB_VERSION}
         </p>
       </div>
+      <KeyboardDialog
+        open={keyboardOpen && localClient}
+        onClose={closeKeyboardDialog}
+        value={keyboardValue}
+        onChange={setKeyboardValue}
+        onConfirm={handleKeyboardConfirm}
+        title={keyboardConfig.title}
+        type={keyboardConfig.type}
+        allowEmpty={keyboardConfig.allowEmpty}
+        maxLength={keyboardConfig.maxLength}
+      />
     </div>
   );
 };
