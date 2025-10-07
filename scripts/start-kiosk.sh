@@ -85,6 +85,7 @@ def wait_for_health(timeout: float = 15.0) -> bool:
 
 def choose_target(timeout: float = 5.0) -> str:
     deadline = time.monotonic() + timeout
+    last_ethernet = False
     while time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(STATUS_URL, timeout=2) as response:
@@ -101,11 +102,14 @@ def choose_target(timeout: float = 5.0) -> str:
         wifi_connected = bool(wifi.get("connected"))
         wifi_ip = wifi.get("ip") or data.get("ip") or data.get("ip_address")
         ethernet_connected = bool(data.get("ethernet_connected"))
+        last_ethernet = ethernet_connected
 
         if mode == "kiosk" or (wifi_connected and wifi_ip) or ethernet_connected:
             return "http://localhost/"
         if mode == "ap":
             return "http://localhost/config"
+    if last_ethernet:
+        return "http://localhost/"
     return "http://localhost/config"
 
 if wait_for_health():
