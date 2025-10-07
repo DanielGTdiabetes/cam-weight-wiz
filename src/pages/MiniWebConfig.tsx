@@ -821,7 +821,7 @@ export const MiniWebConfig = () => {
         headers.Authorization = `BasculaPin ${pin}`;
       }
       const response = await fetch("/api/settings", {
-        method: "PUT",
+        method: "POST",
         headers,
         body: JSON.stringify({ ui: { offline_mode: nextValue } }),
       });
@@ -875,7 +875,7 @@ export const MiniWebConfig = () => {
         headers.Authorization = `BasculaPin ${pin}`;
       }
       const response = await fetch("/api/settings", {
-        method: "PUT",
+        method: "POST",
         headers,
         body: JSON.stringify(payload),
       });

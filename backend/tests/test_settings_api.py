@@ -21,7 +21,10 @@ if "serial" not in sys.modules:
     sys.modules["serial"] = serial_module
 
 from backend.app.services.settings_service import SettingsService
+from fastapi.testclient import TestClient
+
 from backend.main import (
+    app,
     _deep_merge_dict,
     _normalize_settings_payload,
     _synchronize_secret_aliases,
@@ -34,6 +37,18 @@ def settings_service(tmp_path: Path):
     config_path = tmp_path / "config.json"
     service = SettingsService(config_path)
     return service, config_path
+
+
+@pytest.fixture()
+def api_client(monkeypatch):
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("backend.main.init_scale", _noop)
+    monkeypatch.setattr("backend.main.close_scale", _noop)
+
+    with TestClient(app) as client:
+        yield client
 
 
 def read_config(path: Path) -> dict:
@@ -134,3 +149,20 @@ def test_sound_enabled_respects_saved_value(settings_service):
     settings = service.load()
 
     assert settings.ui.sound_enabled is False
+
+
+def test_options_settings_lists_expected_methods(api_client):
+    response = api_client.options("/api/settings")
+
+    assert response.status_code == 204
+    assert response.headers.get("allow") == "GET, POST, OPTIONS"
+    assert response.headers.get("access-control-allow-methods") == "GET, POST, OPTIONS"
+
+
+def test_put_settings_is_not_allowed(api_client):
+    response = api_client.put("/api/settings")
+
+    assert response.status_code == 405
+    allow = response.headers.get("allow", "")
+    assert "POST" in allow
+    assert "PUT" not in allow

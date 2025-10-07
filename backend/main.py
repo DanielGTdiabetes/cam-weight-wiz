@@ -10,6 +10,7 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
+    Response,
     WebSocket,
     WebSocketDisconnect,
     UploadFile,
@@ -1687,15 +1688,37 @@ async def get_settings():
     return _settings_service.get_for_client(include_secrets=False)
 
 
+@app.options("/api/settings")
+async def options_settings() -> Response:
+    """Handle preflight requests for settings endpoint."""
+    allowed = "GET, POST, OPTIONS"
+    response = Response(status_code=204)
+    response.headers["Allow"] = allowed
+    response.headers["Access-Control-Allow-Methods"] = allowed
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Vary"] = "Origin"
+    return response
+
+
 @app.put("/api/settings")
-async def update_settings(settings: Dict[str, Any], _: None = Depends(require_pin)):
-    """Update settings"""
-    return await _handle_settings_update(settings)
+async def put_settings_not_allowed() -> JSONResponse:
+    """Explicitly reject PUT requests with clear guidance."""
+    allowed = "GET, POST, OPTIONS"
+    response = JSONResponse(
+        status_code=405,
+        content={"detail": "Method not allowed. Use POST /api/settings."},
+    )
+    response.headers["Allow"] = allowed
+    response.headers["Access-Control-Allow-Methods"] = allowed
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Vary"] = "Origin"
+    return response
 
 
 @app.post("/api/settings")
-async def create_settings(settings: Dict[str, Any], _: None = Depends(require_pin)):
-    """Alias temporal para compatibilidad con clientes antiguos"""
+async def update_settings(settings: Dict[str, Any], _: None = Depends(require_pin)):
+    """Update settings"""
     return await _handle_settings_update(settings)
 
 

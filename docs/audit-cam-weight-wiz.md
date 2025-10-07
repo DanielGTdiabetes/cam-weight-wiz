@@ -7,10 +7,12 @@
 4. **Sin health-check de configuración:** La miniweb invoca `GET /api/settings/health` para validar permisos y mostrar feedback, pero el servicio FastAPI no implementa ese endpoint, produciendo errores persistentes en la interfaz. 【F:src/pages/MiniWebConfig.tsx†L349-L371】
 5. **Sin versionado/permiso seguro del archivo:** El backend guarda `~/.bascula/config.json` con `_save_json`, que no aplica `chmod 600`, `chown pi:pi` ni incrementa `meta.version`; en consecuencia el websocket siempre emite versión `0` y se rompe la sincronización fina y los requisitos de seguridad. 【F:backend/miniweb.py†L231-L240】【F:backend/miniweb.py†L3896-L3911】【F:backend/app/services/settings_service.py†L118-L145】
 
+> **Actualización (2024):** La API publica ahora `Allow: GET, POST, OPTIONS` para `/api/settings` y únicamente acepta `POST` para persistir cambios; la miniweb y el SDK cliente ya emiten `POST` con la cabecera `BasculaPin` cuando corresponda. 【F:backend/main.py†L1706-L1721】【F:src/services/api.ts†L355-L370】【F:src/pages/MiniWebConfig.tsx†L818-L835】
+
 ## Matriz de riesgos y acciones propuestas
 | Prioridad | Hallazgo | Acción recomendada |
 | --- | --- | --- |
-| P0 | API de settings incompatible con la miniweb y uso incorrecto del PIN | Exponer `PUT /api/settings` aceptando tanto cabecera `Authorization: BasculaPin …` como campo `pin`, y mantener `POST` como alias temporal. Validar PIN antes de procesar. |
+| P0 | API de settings incompatible con la miniweb y uso incorrecto del PIN | Migrar todos los clientes a `POST /api/settings`, anunciar `Allow: GET, POST, OPTIONS` y validar siempre la cabecera `Authorization: BasculaPin …` en peticiones remotas. |
 | P0 | Variable `changed` sin inicializar provoca 500 | Inicializar `changed = False` al inicio y marcarla en cada sección que modifica config antes de evaluar `if changed`. |
 | P0 | Ignora `network.openai_api_key` (nuevo esquema) | Normalizar payloads heredados y modernos: mapear `payload.network.openai_api_key` hacia la estructura `settings.network.openai_api_key` antes de guardar. |
 | P1 | Falta health-check real / pruebas de escritura | Implementar `GET /api/settings/health` reutilizando `SettingsService` para comprobar lectura, escritura (tmp + fsync + rename) y permisos correctos. |
@@ -22,7 +24,7 @@
 ## Hallazgos detallados
 
 ### A. Backend (FastAPI)
-1. **Método HTTP incorrecto y PIN solo en el cuerpo (P0).** El backend declara `@app.post("/api/settings")` y llama a `_ensure_pin_valid_for_request` con `payload.pin`, ignorando la cabecera `Authorization`. 【F:backend/miniweb.py†L3669-L3680】 La miniweb utiliza `PUT /api/settings` y únicamente la cabecera `BasculaPin`. 【F:src/services/api.ts†L349-L365】【F:src/pages/MiniWebConfig.tsx†L744-L787】 Resultado: las peticiones devuelven 403/405. **Fix:** admitir ambos métodos (`PUT`/`POST`) durante la transición y leer el PIN desde la cabecera (`request.headers.get("Authorization")`) con prefijo `BasculaPin `. Aplicar normalización a un único flujo que reusa `SettingsService.save()`.
+1. **Método HTTP incorrecto y PIN solo en el cuerpo (P0).** El backend declara `@app.post("/api/settings")` y llama a `_ensure_pin_valid_for_request` con `payload.pin`, ignorando la cabecera `Authorization`. 【F:backend/miniweb.py†L3669-L3680】 La miniweb utiliza `PUT /api/settings` y únicamente la cabecera `BasculaPin`. 【F:src/services/api.ts†L349-L365】【F:src/pages/MiniWebConfig.tsx†L744-L787】 Resultado: las peticiones devuelven 403/405. **Fix:** consolidar en `POST /api/settings`, rechazar `PUT` con 405 y validar siempre la cabecera `BasculaPin` para peticiones remotas, reutilizando `SettingsService.save()`.
 
 2. **Variable `changed` sin inicializar (P0).** Tras procesar las secciones, la función evalúa `if changed:` pero nunca definió `changed = False`. 【F:backend/miniweb.py†L3788-L3893】 Python lanza `UnboundLocalError`, por lo que ningún cambio llega a disco. **Fix:** inicializar `changed = False` antes de las ramas y marcarla en todas las secciones (`openai`, `nightscout`, `ui`, etc.) cuando haya modificaciones.
 
@@ -87,10 +89,10 @@ Para cada hallazgo P0/P1:
 ## Guía de pruebas rápida (después de aplicar fixes)
 1. `curl -s http://localhost:8080/api/settings/health | jq .`
 2. `curl -s http://localhost:8080/api/settings | jq .`
-3. `curl -s -X PUT http://localhost:8080/api/settings \
+3. `curl -s -X POST http://localhost:8080/api/settings \
    -H 'Content-Type: application/json' \
    -d '{"ui":{"sound_enabled":true},"network":{"openai_api_key":"sk-TEST"},"diabetes":{"nightscout_url":"https://ns.example","nightscout_token":"NS-TEST"}}' | jq .`
-4. `curl -s -X PUT http://<IP>:8080/api/settings \
+4. `curl -s -X POST http://<IP>:8080/api/settings \
    -H 'Content-Type: application/json' \
    -H 'Authorization: BasculaPin <PIN>' \
    -d '{"ui":{"sound_enabled":false}}' | jq .`
