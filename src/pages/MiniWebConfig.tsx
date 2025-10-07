@@ -59,7 +59,47 @@ interface MiniwebStatus {
   ip: string | null;
   connectivity: string | null;
   apActive: boolean;
+  effectiveMode: "ap" | "kiosk" | "offline" | null;
+  offlineMode: boolean;
+  ethernetConnected: boolean;
+  hasInternet: boolean;
 }
+
+const parseMiniwebStatus = (raw: Record<string, unknown> | null | undefined): MiniwebStatus | null => {
+  if (!raw) {
+    return null;
+  }
+
+  const ssid = typeof raw.ssid === "string" && raw.ssid.trim() ? raw.ssid.trim() : null;
+  const ipCandidate =
+    typeof raw.ip === "string" && raw.ip.trim()
+      ? raw.ip.trim()
+      : typeof raw.ip_address === "string" && raw.ip_address.trim()
+        ? raw.ip_address.trim()
+        : null;
+  const connectivity = typeof raw.connectivity === "string" ? raw.connectivity.trim() : null;
+  const apActive = raw.ap_active === true;
+  const effectiveModeRaw =
+    typeof raw.effective_mode === "string" ? raw.effective_mode.trim().toLowerCase() : null;
+  const effectiveMode =
+    effectiveModeRaw === "ap" || effectiveModeRaw === "kiosk" || effectiveModeRaw === "offline"
+      ? effectiveModeRaw
+      : null;
+  const offlineMode = raw.offline_mode === true;
+  const ethernetConnected = Boolean(raw.ethernet_connected);
+  const hasInternet = raw.internet === true || connectivity?.toLowerCase() === "full";
+
+  return {
+    ssid,
+    ip: ipCandidate,
+    connectivity,
+    apActive,
+    effectiveMode,
+    offlineMode,
+    ethernetConnected,
+    hasInternet,
+  };
+};
 
 interface IntegrationTestState {
   status: "idle" | "running" | "success" | "error";
@@ -171,6 +211,8 @@ export const MiniWebConfig = () => {
   } | null>(null);
   const [connectingWifi, setConnectingWifi] = useState(false);
   const [networkSelectionLocked, setNetworkSelectionLocked] = useState(false);
+  const [offlineModeEnabled, setOfflineModeEnabled] = useState(false);
+  const [savingOfflineMode, setSavingOfflineMode] = useState(false);
 
   const [openaiInput, setOpenaiInput] = useState("");
   const [openaiHasKey, setOpenaiHasKey] = useState(false);
@@ -229,20 +271,12 @@ export const MiniWebConfig = () => {
         throw new Error(`HTTP ${response.status}`);
       }
       const data = (await response.json()) as Record<string, unknown>;
-      const ssid = typeof data.ssid === "string" && data.ssid.trim() ? data.ssid.trim() : null;
-      const ipCandidate =
-        typeof data.ip === "string" && data.ip.trim()
-          ? data.ip.trim()
-          : typeof data.ip_address === "string" && data.ip_address.trim()
-            ? data.ip_address.trim()
-            : null;
-      const connectivity = typeof data.connectivity === "string" ? data.connectivity.trim() : null;
-      const apActive = Boolean(data.ap_active);
+      const status = parseMiniwebStatus(data);
 
-      setNetworkStatus({ ssid, ip: ipCandidate, connectivity, apActive });
+      setNetworkStatus(status);
 
-      if (!networkSelectionLocked && ssid) {
-        setSelectedNetwork(ssid);
+      if (status?.ssid && !networkSelectionLocked) {
+        setSelectedNetwork(status.ssid);
       }
     } catch (error) {
       logger.debug("No se pudo obtener el estado de red", { error });
@@ -316,24 +350,28 @@ export const MiniWebConfig = () => {
       setNightscoutUrlDirty(false);
       setNightscoutTokenDirty(false);
 
+      const uiData = data.ui as { offline_mode?: unknown } | undefined;
+      if (uiData) {
+        const rawOffline = uiData.offline_mode;
+        let normalizedOffline = false;
+        if (typeof rawOffline === "boolean") {
+          normalizedOffline = rawOffline;
+        } else if (typeof rawOffline === "number") {
+          normalizedOffline = rawOffline !== 0;
+        } else if (typeof rawOffline === "string") {
+          normalizedOffline = ["1", "true", "yes", "on"].includes(rawOffline.trim().toLowerCase());
+        }
+        setOfflineModeEnabled(normalizedOffline);
+      }
+
       const networkStatusData = networkData?.status;
       if (networkStatusData) {
-        const ssid = typeof networkStatusData.ssid === "string" && networkStatusData.ssid.trim()
-          ? networkStatusData.ssid.trim()
-          : null;
-        const ipCandidate =
-          typeof networkStatusData.ip === "string" && networkStatusData.ip.trim()
-            ? networkStatusData.ip.trim()
-            : typeof networkStatusData.ip_address === "string" && networkStatusData.ip_address.trim()
-              ? networkStatusData.ip_address.trim()
-              : null;
-        const connectivity = typeof networkStatusData.connectivity === "string"
-          ? networkStatusData.connectivity.trim()
-          : null;
-        const apActive = Boolean(networkStatusData.ap_active);
-        setNetworkStatus({ ssid, ip: ipCandidate, connectivity, apActive });
-        if (!networkSelectionLocked && ssid) {
-          setSelectedNetwork(ssid);
+        const parsedStatus = parseMiniwebStatus(networkStatusData as Record<string, unknown>);
+        if (parsedStatus) {
+          setNetworkStatus(parsedStatus);
+          if (!networkSelectionLocked && parsedStatus.ssid) {
+            setSelectedNetwork(parsedStatus.ssid);
+          }
         }
       }
     } catch (error) {
@@ -503,10 +541,33 @@ export const MiniWebConfig = () => {
       void refreshStatus();
     };
 
+    const handleStatusEvent = (event: MessageEvent<string>) => {
+      if (unsubscribed) {
+        return;
+      }
+
+      let payload: Record<string, unknown> | null = null;
+      try {
+        payload = event.data ? (JSON.parse(event.data) as Record<string, unknown>) : null;
+      } catch (error) {
+        logger.debug("No se pudo parsear network status", { error, raw: event.data });
+      }
+
+      const status = parseMiniwebStatus(payload ?? undefined);
+      if (status) {
+        setNetworkStatus(status);
+        if (!networkSelectionLocked && status.ssid) {
+          setSelectedNetwork(status.ssid);
+        }
+        setOfflineModeEnabled(status.offlineMode);
+      }
+    };
+
     const closeSource = () => {
       if (source) {
         source.removeEventListener("wifi_connected", handleWifiConnected as EventListener);
         source.removeEventListener("wifi_failed", handleWifiFailed as EventListener);
+        source.removeEventListener("status", handleStatusEvent as EventListener);
         source.close();
         source = null;
       }
@@ -516,6 +577,7 @@ export const MiniWebConfig = () => {
       source = new EventSource("/api/net/events");
       source.addEventListener("wifi_connected", handleWifiConnected as EventListener);
       source.addEventListener("wifi_failed", handleWifiFailed as EventListener);
+      source.addEventListener("status", handleStatusEvent as EventListener);
     } catch (error) {
       logger.debug("No se pudo abrir el stream de eventos de red", { error });
       return () => undefined;
@@ -736,6 +798,53 @@ export const MiniWebConfig = () => {
     }
   };
 
+  const handleToggleOfflineMode = async (nextValue: boolean) => {
+    if (nextValue === offlineModeEnabled || savingOfflineMode) {
+      return;
+    }
+
+    const previous = offlineModeEnabled;
+    setOfflineModeEnabled(nextValue);
+
+    const { allowed, pin } = ensurePin(
+      nextValue ? "activar el modo offline" : "desactivar el modo offline",
+    );
+    if (!allowed) {
+      setOfflineModeEnabled(previous);
+      return;
+    }
+
+    setSavingOfflineMode(true);
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (pin) {
+        headers.Authorization = `BasculaPin ${pin}`;
+      }
+      const response = await fetch("/api/settings", {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ ui: { offline_mode: nextValue } }),
+      });
+      if (!response.ok) {
+        const message = await parseErrorResponse(response);
+        throw new Error(message);
+      }
+      toast({
+        title: "Modo offline actualizado",
+        description: nextValue
+          ? "La báscula usará el modo offline cuando no haya Internet."
+          : "La báscula volverá a mostrar la pantalla de punto de acceso sin conexión.",
+      });
+      await refreshStatus();
+    } catch (error) {
+      const description = error instanceof Error ? error.message : "No se pudo actualizar el modo offline.";
+      toast({ title: "Error al guardar", description, variant: "destructive" });
+      setOfflineModeEnabled(previous);
+    } finally {
+      setSavingOfflineMode(false);
+    }
+  };
+
   const hasIntegrationChanges = openaiDirty || nightscoutUrlDirty || nightscoutTokenDirty;
 
   const handleSaveIntegrations = async () => {
@@ -922,6 +1031,9 @@ export const MiniWebConfig = () => {
     if (!networkStatus) {
       return "Desconocido";
     }
+    if (networkStatus.effectiveMode === "offline" || (networkStatus.offlineMode && !networkStatus.hasInternet)) {
+      return "Modo offline";
+    }
     if (networkStatus.apActive) {
       return "Modo AP activo";
     }
@@ -1041,6 +1153,14 @@ export const MiniWebConfig = () => {
                   Selecciona la red Wi-Fi de tu hogar o introduce manualmente los datos. Tras conectar, la báscula volverá a su
                   modo normal automáticamente.
                 </p>
+                <div className="rounded-md border border-primary/30 bg-primary/10 p-3 text-sm text-primary-foreground/90">
+                  También puedes configurar todo desde otro dispositivo entrando en
+                  {" "}
+                  <span className="font-semibold">
+                    http://{(networkStatus?.ip && networkStatus.ip.trim()) || DEFAULT_AP_IP}/config
+                  </span>
+                  .
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -1092,6 +1212,31 @@ export const MiniWebConfig = () => {
                     <span>
                       {DEFAULT_AP_SSID} ({DEFAULT_AP_IP})
                     </span>
+                  </div>
+                </div>
+                <div className="flex items-center justify-between rounded-lg border border-border/60 bg-background/60 p-3">
+                  <div className="pr-4">
+                    <p className="text-sm font-semibold">Modo offline</p>
+                    <p className="text-xs text-muted-foreground">
+                      Permite usar la báscula sin Internet. IA y Nightscout se desactivan automáticamente.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {savingOfflineMode ? (
+                      <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />
+                    ) : null}
+                    <Switch
+                      checked={offlineModeEnabled}
+                      onCheckedChange={(checked) => {
+                        void handleToggleOfflineMode(checked);
+                      }}
+                      disabled={savingOfflineMode || (!localClient && !pinVerified)}
+                      title={
+                        !localClient && !pinVerified
+                          ? "Verifica el PIN antes de cambiar esta opción"
+                          : undefined
+                      }
+                    />
                   </div>
                 </div>
               </div>

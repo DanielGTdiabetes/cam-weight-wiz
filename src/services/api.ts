@@ -99,7 +99,7 @@ export interface BackendNetworkStatus {
 }
 
 export interface BackendSettingsPayload {
-  ui?: { flags?: Record<string, boolean> };
+  ui?: { flags?: Record<string, boolean>; offline_mode?: boolean };
   tts?: Record<string, unknown>;
   scale?: Record<string, unknown>;
   serial?: { device?: string; baud?: number };
@@ -119,7 +119,7 @@ export interface BackendSettingsUpdate {
   pin?: string;
   network?: { openai_api_key?: string | null } & Record<string, unknown>;
   diabetes?: { nightscout_url?: string | null; nightscout_token?: string | null } & Record<string, unknown>;
-  ui?: Record<string, unknown>;
+  ui?: ({ flags?: Record<string, boolean>; offline_mode?: boolean | number | string } & Record<string, unknown>) | undefined;
   tts?: Record<string, unknown>;
   scale?: Record<string, unknown>;
   serial?: Record<string, unknown>;
@@ -166,7 +166,9 @@ export interface WakeEvent {
 
 export type MiniwebStatus = {
   ok: boolean;
-  mode: "ap" | "kiosk";
+  mode: "ap" | "kiosk" | "offline";
+  effective_mode?: "ap" | "kiosk" | "offline";
+  offline_mode?: boolean;
   wifi: {
     connected: boolean;
     ssid?: string | null;
@@ -177,6 +179,8 @@ export type MiniwebStatus = {
   ssid?: string | null;
   ip?: string | null;
   ip_address?: string | null;
+  ethernet_connected?: boolean;
+  internet?: boolean;
 } & Record<string, unknown>;
 
 class ApiService {

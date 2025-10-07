@@ -5,10 +5,14 @@ import { logger } from './logger';
 export interface NetworkStatus {
   isOnline: boolean;
   isWifiConnected: boolean;
+  ethernetConnected: boolean;
   apActive: boolean;
   connectivity: 'full' | 'limited' | 'portal' | 'none' | 'unknown';
   savedWifiProfiles: boolean;
   showAPScreen: boolean;
+  offlineModeEnabled: boolean;
+  effectiveMode: 'ap' | 'kiosk' | 'offline' | 'unknown';
+  hasInternet: boolean;
   ssid?: string;
   ip?: string;
 }
@@ -19,11 +23,16 @@ class NetworkDetector {
   private currentStatus: NetworkStatus = {
     isOnline: navigator.onLine,
     isWifiConnected: false,
+    ethernetConnected: false,
     apActive: false,
     connectivity: 'unknown',
     savedWifiProfiles: false,
     showAPScreen: false,
+    offlineModeEnabled: false,
+    effectiveMode: 'unknown',
+    hasInternet: false,
   };
+  private eventSource: EventSource | null = null;
 
   constructor() {
     this.setupListeners();
@@ -42,6 +51,34 @@ class NetworkDetector {
     });
   }
 
+  private setupEventStream() {
+    if (this.eventSource || typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const source = new EventSource('/api/net/events');
+      source.addEventListener('status', () => {
+        void this.checkNetworkStatus();
+      });
+      source.addEventListener('wifi_connected', () => {
+        void this.checkNetworkStatus();
+      });
+      source.addEventListener('wifi_failed', () => {
+        void this.checkNetworkStatus();
+      });
+      source.onerror = (event) => {
+        logger.debug('NetworkDetector SSE reported an error', { event });
+        source.close();
+        this.eventSource = null;
+        setTimeout(() => this.setupEventStream(), 5000);
+      };
+      this.eventSource = source;
+    } catch (error) {
+      logger.warn('Unable to open network status stream', { error });
+    }
+  }
+
   private async checkNetworkStatus(): Promise<NetworkStatus> {
     const isOnline = navigator.onLine;
 
@@ -53,6 +90,10 @@ class NetworkDetector {
     let connectivity: NetworkStatus['connectivity'] = this.currentStatus.connectivity;
     let savedWifiProfiles = this.currentStatus.savedWifiProfiles;
     let showAPScreen = this.currentStatus.showAPScreen;
+    let ethernetConnected = this.currentStatus.ethernetConnected;
+    let offlineModeEnabled = this.currentStatus.offlineModeEnabled;
+    let effectiveMode = this.currentStatus.effectiveMode;
+    let hasInternet = this.currentStatus.hasInternet;
 
     if (isOnline) {
       try {
@@ -64,8 +105,12 @@ class NetworkDetector {
 
         if (response.ok) {
           const data = await response.json();
-          ssid = typeof data.ssid === 'string' ? data.ssid : undefined;
-          ip = typeof data.ip === 'string' ? data.ip : undefined;
+          ssid = typeof data.ssid === 'string' && data.ssid ? data.ssid : undefined;
+          if (typeof data.ip === 'string' && data.ip) {
+            ip = data.ip;
+          } else if (typeof data.ip_address === 'string' && data.ip_address) {
+            ip = data.ip_address;
+          }
 
           const connectivityValue = typeof data.connectivity === 'string' ? data.connectivity.toLowerCase() : 'unknown';
           if (connectivityValue === 'full' || connectivityValue === 'limited' || connectivityValue === 'portal' || connectivityValue === 'none') {
@@ -76,7 +121,28 @@ class NetworkDetector {
           savedWifiProfiles = data.saved_wifi_profiles === true;
           const connectedField = typeof data.connected === 'boolean' ? data.connected : undefined;
           isWifiConnected = connectedField ?? connectivity === 'full';
-          showAPScreen = apActive;
+
+          if (data.wifi && typeof data.wifi === 'object') {
+            const wifiData = data.wifi as Record<string, unknown>;
+            if (typeof wifiData.connected === 'boolean') {
+              isWifiConnected = wifiData.connected;
+            }
+            if (!ip && typeof wifiData.ip === 'string' && wifiData.ip.trim()) {
+              ip = wifiData.ip.trim();
+            }
+          }
+
+          offlineModeEnabled = data.offline_mode === true;
+          ethernetConnected = data.ethernet_connected === true;
+          const effectiveModeRaw =
+            typeof data.effective_mode === 'string' ? data.effective_mode.trim().toLowerCase() : '';
+          if (effectiveModeRaw === 'ap' || effectiveModeRaw === 'kiosk' || effectiveModeRaw === 'offline') {
+            effectiveMode = effectiveModeRaw;
+          } else {
+            effectiveMode = 'unknown';
+          }
+          hasInternet = data.internet === true || connectivity === 'full';
+          showAPScreen = effectiveMode === 'ap';
 
           logger.info('Network status fetched', {
             connectivity,
@@ -85,6 +151,9 @@ class NetworkDetector {
             isWifiConnected,
             ssid,
             ip,
+            ethernetConnected,
+            offlineModeEnabled,
+            effectiveMode,
           });
         }
       } catch (error) {
@@ -92,15 +161,20 @@ class NetworkDetector {
       }
     } else {
       showAPScreen = apActive;
+      hasInternet = false;
     }
 
     const status: NetworkStatus = {
       isOnline,
       isWifiConnected,
+      ethernetConnected,
       apActive,
       connectivity,
       savedWifiProfiles,
       showAPScreen,
+      offlineModeEnabled,
+      effectiveMode,
+      hasInternet,
       ssid,
       ip,
     };
@@ -131,7 +205,9 @@ class NetworkDetector {
     }
 
     logger.info('Starting network monitoring', { intervalMs });
-    
+
+    this.setupEventStream();
+
     // Check immediately
     this.checkNetworkStatus();
 
@@ -146,6 +222,10 @@ class NetworkDetector {
       clearInterval(this.checkInterval);
       this.checkInterval = null;
       logger.info('Network monitoring stopped');
+    }
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
     }
   }
 
