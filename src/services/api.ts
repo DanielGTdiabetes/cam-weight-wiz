@@ -347,34 +347,54 @@ class ApiService {
   }
 
   async updateBackendSettings(payload: BackendSettingsUpdate): Promise<BackendSettingsPayload> {
-    return apiWrapper.post<BackendSettingsPayload>('/api/settings', payload);
+    const { pin, ...rest } = payload;
+    const headers: Record<string, string> = {};
+    if (pin) {
+      headers.Authorization = `BasculaPin ${pin}`;
+    }
+
+    return apiWrapper.request<BackendSettingsPayload>('/api/settings', {
+      method: 'PUT',
+      body: rest,
+      headers,
+    });
   }
 
   async testOpenAI(apiKey?: string, pin?: string): Promise<IntegrationTestResponse> {
     const body: Record<string, string> = {};
     if (apiKey) {
-      body.apiKey = apiKey;
+      body.openai_api_key = apiKey;
     }
+    const headers: Record<string, string> = {};
     if (pin) {
-      body.pin = pin;
+      headers.Authorization = `BasculaPin ${pin}`;
     }
-    return apiWrapper.post<IntegrationTestResponse>('/api/settings/test/openai', body);
+
+    return apiWrapper.request<IntegrationTestResponse>('/api/settings/test/openai', {
+      method: 'POST',
+      body,
+      headers,
+    });
   }
 
   async testNightscout(url?: string, token?: string, pin?: string): Promise<IntegrationTestResponse> {
-    const params = new URLSearchParams();
+    const body: Record<string, string> = {};
     if (url) {
-      params.set('url', url);
+      body.nightscout_url = url;
     }
     if (token) {
-      params.set('token', token);
+      body.nightscout_token = token;
     }
+    const headers: Record<string, string> = {};
     if (pin) {
-      params.set('pin', pin);
+      headers.Authorization = `BasculaPin ${pin}`;
     }
-    const query = params.toString();
-    const endpoint = query ? `/api/nightscout/test?${query}` : '/api/nightscout/test';
-    return apiWrapper.get<IntegrationTestResponse>(endpoint);
+
+    return apiWrapper.request<IntegrationTestResponse>('/api/settings/test/nightscout', {
+      method: 'POST',
+      body,
+      headers,
+    });
   }
 
   // OTA Updates
