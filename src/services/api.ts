@@ -125,6 +125,8 @@ export interface IntegrationTestResponse {
   ok: boolean;
   reason?: string;
   details?: unknown;
+  message?: string;
+  status?: number;
 }
 
 export interface WakeIntent {
@@ -360,17 +362,19 @@ class ApiService {
   }
 
   async testNightscout(url?: string, token?: string, pin?: string): Promise<IntegrationTestResponse> {
-    const payload: Record<string, string> = {};
+    const params = new URLSearchParams();
     if (url) {
-      payload.url = url;
+      params.set('url', url);
     }
     if (token) {
-      payload.token = token;
+      params.set('token', token);
     }
     if (pin) {
-      payload.pin = pin;
+      params.set('pin', pin);
     }
-    return apiWrapper.post<IntegrationTestResponse>('/api/settings/test/nightscout', payload);
+    const query = params.toString();
+    const endpoint = query ? `/api/nightscout/test?${query}` : '/api/nightscout/test';
+    return apiWrapper.get<IntegrationTestResponse>(endpoint);
   }
 
   // OTA Updates

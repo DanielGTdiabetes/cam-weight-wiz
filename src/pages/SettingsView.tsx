@@ -109,6 +109,11 @@ type OtaStatus = {
 
 const MAX_OTA_LOG_LINES = 400;
 
+const APP_VERSION =
+  typeof __APP_VERSION__ === "string" && __APP_VERSION__.trim()
+    ? __APP_VERSION__.trim()
+    : "0.0.0";
+
 const trimLogLines = (content: string, maxLines = MAX_OTA_LOG_LINES): string => {
   if (!content) {
     return "";
@@ -180,7 +185,8 @@ export const SettingsView = () => {
   const [isTestingAudio, setIsTestingAudio] = useState(false);
   const [isTestingOpenAI, setIsTestingOpenAI] = useState(false);
   const [isTestingNightscout, setIsTestingNightscout] = useState(false);
-  const [isSavingIntegrations, setIsSavingIntegrations] = useState(false);
+  const [isSavingNightscout, setIsSavingNightscout] = useState(false);
+  const [isSavingOpenAI, setIsSavingOpenAI] = useState(false);
   const [backendHasOpenAIKey, setBackendHasOpenAIKey] = useState(false);
   const [backendNightscoutUrl, setBackendNightscoutUrl] = useState<string | null>(null);
   const [backendNightscoutHasToken, setBackendNightscoutHasToken] = useState(false);
@@ -1415,6 +1421,9 @@ export const SettingsView = () => {
         });
       } else {
         const pieces: string[] = [];
+        if (response.message) {
+          pieces.push(response.message);
+        }
         if (response.reason) {
           pieces.push(`Razón: ${response.reason}`);
         }
@@ -1446,21 +1455,17 @@ export const SettingsView = () => {
     }
   };
 
-  const handleSaveIntegrations = async () => {
+  const handleSaveOpenAI = async () => {
     const trimmedKey = chatGptKey.trim();
-    const trimmedUrl = nightscoutUrl.trim();
-    const trimmedToken = nightscoutToken.trim();
-
-    const { allowed, pin } = getPinForAction('guardar las integraciones');
+    const { allowed, pin } = getPinForAction('guardar la clave de OpenAI');
     if (!allowed) {
       return;
     }
 
-    setIsSavingIntegrations(true);
+    setIsSavingOpenAI(true);
     try {
       const payload: BackendSettingsUpdate & { pin?: string } = {
         openai: { apiKey: trimmedKey || null },
-        nightscout: { url: trimmedUrl || null, token: trimmedToken || null },
       };
       if (pin) {
         payload.pin = pin;
@@ -1469,6 +1474,42 @@ export const SettingsView = () => {
 
       const persistedKey = Boolean(response.openai?.hasKey || trimmedKey);
       setBackendHasOpenAIKey(persistedKey);
+      setChatGptKey(trimmedKey);
+      storage.saveSettings({ chatGptKey: trimmedKey });
+
+      toast({
+        title: "OpenAI guardado",
+        description: "La clave se sincronizó con el backend.",
+      });
+    } catch (error) {
+      let description = "No se pudo guardar la clave de OpenAI.";
+      if (error instanceof ApiError && error.message) {
+        description = error.message;
+      }
+      toast({ title: "Error", description, variant: "destructive" });
+    } finally {
+      setIsSavingOpenAI(false);
+    }
+  };
+
+  const handleSaveNightscout = async () => {
+    const trimmedUrl = nightscoutUrl.trim();
+    const trimmedToken = nightscoutToken.trim();
+
+    const { allowed, pin } = getPinForAction('guardar la configuración de Nightscout');
+    if (!allowed) {
+      return;
+    }
+
+    setIsSavingNightscout(true);
+    try {
+      const payload: BackendSettingsUpdate & { pin?: string } = {
+        nightscout: { url: trimmedUrl || null, token: trimmedToken || null },
+      };
+      if (pin) {
+        payload.pin = pin;
+      }
+      const response = await api.updateBackendSettings(payload);
 
       const backendUrl =
         typeof response.nightscout?.url === "string" && response.nightscout.url.trim()
@@ -1478,28 +1519,26 @@ export const SettingsView = () => {
       const persistedToken = Boolean(response.nightscout?.hasToken || trimmedToken);
       setBackendNightscoutHasToken(persistedToken);
 
-      setChatGptKey(trimmedKey);
       setNightscoutUrl(trimmedUrl);
       setNightscoutToken(trimmedToken);
 
       storage.saveSettings({
-        chatGptKey: trimmedKey,
         nightscoutUrl: trimmedUrl,
         nightscoutToken: trimmedToken,
       });
 
       toast({
-        title: "Integraciones guardadas",
+        title: "Nightscout guardado",
         description: "Los cambios se sincronizaron con el backend.",
       });
     } catch (error) {
-      let description = "No se pudieron guardar las integraciones.";
+      let description = "No se pudo guardar la configuración de Nightscout.";
       if (error instanceof ApiError && error.message) {
         description = error.message;
       }
       toast({ title: "Error", description, variant: "destructive" });
     } finally {
-      setIsSavingIntegrations(false);
+      setIsSavingNightscout(false);
     }
   };
 
@@ -2328,10 +2367,102 @@ export const SettingsView = () => {
                 </div>
               </div>
             </div>
-          </Card>
-        </TabsContent>
+        </Card>
 
-        {/* Diabetes Tab */}
+        <Card className="p-6 space-y-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="text-2xl font-bold">OpenAI API Key</h3>
+              <p className="text-sm text-muted-foreground">
+                Configura la clave usada por el asistente inteligente y los servicios de IA.
+              </p>
+            </div>
+            <Button
+              type="button"
+              variant="glow"
+              size="lg"
+              className="w-full justify-center sm:w-auto"
+              onClick={() => void handleSaveOpenAI()}
+              disabled={isSavingOpenAI || (!localClient && !pinVerified)}
+              title={!localClient && !pinVerified ? 'Verifica el PIN antes de guardar' : undefined}
+            >
+              {isSavingOpenAI ? (
+                <>
+                  <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Guardando…
+                </>
+              ) : (
+                <>
+                  <Save className="mr-2 h-5 w-5" /> Guardar clave
+                </>
+              )}
+            </Button>
+          </div>
+
+          <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-4">
+            <div className="space-y-2">
+              <Label className="text-lg font-medium">OpenAI API Key</Label>
+              <div className="relative">
+                <Input
+                  type="password"
+                  value={chatGptKey}
+                  autoComplete="off"
+                  readOnly={internalKeyboardEnabled}
+                  onClick={() => {
+                    if (!internalKeyboardEnabled) {
+                      return;
+                    }
+                    openKeyboard('OpenAI API Key', 'apikey', 'chatGptKey', false, undefined, undefined, true);
+                  }}
+                  onChange={(event) => setChatGptKey(event.target.value)}
+                  placeholder={backendHasOpenAIKey ? '••••••••••' : 'sk-...'}
+                  className={cn('text-lg pr-12', internalKeyboardEnabled && 'cursor-pointer')}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                  onClick={() => void handlePasteToField(setChatGptKey)}
+                >
+                  <ClipboardPaste className="h-4 w-4" />
+                  <span className="sr-only">Pegar API Key</span>
+                </Button>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Estado:{' '}
+                {backendHasOpenAIKey ? (
+                  <span className="font-medium text-success">Clave almacenada en el backend</span>
+                ) : (
+                  <span className="font-medium text-warning">Sin configurar</span>
+                )}
+              </p>
+            </div>
+
+            <Button
+              variant="outline"
+              size="lg"
+              className="w-full justify-start"
+              onClick={handleTestOpenAI}
+              disabled={
+                isTestingOpenAI || (!chatGptKey.trim() && !backendHasOpenAIKey) || (!localClient && !pinVerified)
+              }
+              title={!localClient && !pinVerified ? 'Verifica el PIN antes de probar' : undefined}
+            >
+              {isTestingOpenAI ? (
+                <>
+                  <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión OpenAI
+                </>
+              )}
+            </Button>
+          </div>
+        </Card>
+      </TabsContent>
+
+      {/* Diabetes Tab */}
         <TabsContent value="diabetes" className="space-y-4">
           <Card className="p-6">
             <h3 className="mb-4 text-2xl font-bold">Configuración Diabetes</h3>
@@ -2440,9 +2571,9 @@ export const SettingsView = () => {
           <Card className="p-6 space-y-6">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <h3 className="text-2xl font-bold">Integraciones</h3>
+                <h3 className="text-2xl font-bold">Nightscout</h3>
                 <p className="text-sm text-muted-foreground">
-                  Configura credenciales para Nightscout y OpenAI.
+                  Configura la URL y el token de tu instancia Nightscout.
                 </p>
               </div>
               <Button
@@ -2450,16 +2581,17 @@ export const SettingsView = () => {
                 variant="glow"
                 size="lg"
                 className="w-full justify-center sm:w-auto"
-                onClick={() => void handleSaveIntegrations()}
-                disabled={isSavingIntegrations || (!localClient && !pinVerified)}
+                onClick={() => void handleSaveNightscout()}
+                disabled={isSavingNightscout || (!localClient && !pinVerified)}
+                title={!localClient && !pinVerified ? 'Verifica el PIN antes de guardar' : undefined}
               >
-                {isSavingIntegrations ? (
+                {isSavingNightscout ? (
                   <>
                     <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Guardando…
                   </>
                 ) : (
                   <>
-                    <Save className="mr-2 h-5 w-5" /> Guardar integraciones
+                    <Save className="mr-2 h-5 w-5" /> Guardar Nightscout
                   </>
                 )}
               </Button>
@@ -2481,157 +2613,96 @@ export const SettingsView = () => {
               />
             </div>
 
-            <div className="grid gap-6 lg:grid-cols-2">
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label className="text-lg font-medium">OpenAI API Key</Label>
-                  <div className="relative">
-                    <Input
-                      type="password"
-                      value={chatGptKey}
-                      autoComplete="off"
-                      readOnly={internalKeyboardEnabled}
-                      onClick={() => {
-                        if (!internalKeyboardEnabled) {
-                          return;
-                        }
-                        openKeyboard("OpenAI API Key", "apikey", "chatGptKey", false, undefined, undefined, true);
-                      }}
-                      onChange={(event) => setChatGptKey(event.target.value)}
-                      placeholder={backendHasOpenAIKey ? "••••••••••" : "sk-..."}
-                      className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                      onClick={() => void handlePasteToField(setChatGptKey)}
-                    >
-                      <ClipboardPaste className="h-4 w-4" />
-                      <span className="sr-only">Pegar API Key</span>
-                    </Button>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Estado: {backendHasOpenAIKey ? (
-                      <span className="font-medium text-success">Clave almacenada en el backend</span>
-                    ) : (
-                      <span className="font-medium text-warning">Sin configurar</span>
-                    )}
-                  </p>
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label className="text-lg font-medium">Nightscout URL</Label>
+                <div className="relative">
+                  <Input
+                    type="url"
+                    value={nightscoutUrl}
+                    autoComplete="url"
+                    readOnly={internalKeyboardEnabled}
+                    onClick={() => {
+                      if (!internalKeyboardEnabled) {
+                        return;
+                      }
+                      openKeyboard("Nightscout URL", "url", "nightscoutUrl", false, undefined, undefined, false, 200);
+                    }}
+                    onChange={(event) => setNightscoutUrl(event.target.value)}
+                    placeholder="https://mi-nightscout.com"
+                    className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                    onClick={() => void handlePasteToField(setNightscoutUrl)}
+                  >
+                    <ClipboardPaste className="h-4 w-4" />
+                    <span className="sr-only">Pegar URL Nightscout</span>
+                  </Button>
                 </div>
 
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="w-full justify-start"
-                  onClick={handleTestOpenAI}
-                  disabled={
-                    isTestingOpenAI || (!chatGptKey.trim() && !backendHasOpenAIKey) || (!localClient && !pinVerified)
-                  }
-                >
-                  {isTestingOpenAI ? (
-                    <>
-                      <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión OpenAI
-                    </>
-                  )}
-                </Button>
-              </div>
-
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label className="text-lg font-medium">Nightscout URL</Label>
-                  <div className="relative">
-                    <Input
-                      type="url"
-                      value={nightscoutUrl}
-                      autoComplete="url"
-                      readOnly={internalKeyboardEnabled}
-                      onClick={() => {
-                        if (!internalKeyboardEnabled) {
-                          return;
-                        }
-                        openKeyboard("Nightscout URL", "url", "nightscoutUrl", false, undefined, undefined, false, 200);
-                      }}
-                      onChange={(event) => setNightscoutUrl(event.target.value)}
-                      placeholder="https://mi-nightscout.com"
-                      className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                      onClick={() => void handlePasteToField(setNightscoutUrl)}
-                    >
-                      <ClipboardPaste className="h-4 w-4" />
-                      <span className="sr-only">Pegar URL Nightscout</span>
-                    </Button>
-                  </div>
-
-                  <Label className="text-lg font-medium">Nightscout Token</Label>
-                  <div className="relative">
-                    <Input
-                      type="password"
-                      value={nightscoutToken}
-                      autoComplete="new-password"
-                      readOnly={internalKeyboardEnabled}
-                      onClick={() => {
-                        if (!internalKeyboardEnabled) {
-                          return;
-                        }
-                        openKeyboard("Nightscout Token", "apikey", "nightscoutToken", false, undefined, undefined, true);
-                      }}
-                      onChange={(event) => setNightscoutToken(event.target.value)}
-                      placeholder={backendNightscoutHasToken ? "••••••••" : "token"}
-                      className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
-                    />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                      onClick={() => void handlePasteToField(setNightscoutToken)}
-                    >
-                      <ClipboardPaste className="h-4 w-4" />
-                      <span className="sr-only">Pegar token Nightscout</span>
-                    </Button>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Estado: {backendNightscoutUrl ? (
-                      <span className="font-medium text-success">
-                        {backendNightscoutUrl} {backendNightscoutHasToken ? "· Token almacenado" : ""}
-                      </span>
-                    ) : (
-                      <span className="font-medium text-warning">Sin configurar</span>
-                    )}
-                  </p>
+                <Label className="text-lg font-medium">Nightscout Token</Label>
+                <div className="relative">
+                  <Input
+                    type="password"
+                    value={nightscoutToken}
+                    autoComplete="new-password"
+                    readOnly={internalKeyboardEnabled}
+                    onClick={() => {
+                      if (!internalKeyboardEnabled) {
+                        return;
+                      }
+                      openKeyboard("Nightscout Token", "apikey", "nightscoutToken", false, undefined, undefined, true);
+                    }}
+                    onChange={(event) => setNightscoutToken(event.target.value)}
+                    placeholder={backendNightscoutHasToken ? "••••••••" : "token"}
+                    className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="absolute inset-y-0 right-1 my-auto h-8 w-8"
+                    onClick={() => void handlePasteToField(setNightscoutToken)}
+                  >
+                    <ClipboardPaste className="h-4 w-4" />
+                    <span className="sr-only">Pegar token Nightscout</span>
+                  </Button>
                 </div>
-
-                <Button
-                  variant="outline"
-                  size="lg"
-                  className="w-full justify-start"
-                  onClick={handleTestNightscout}
-                  disabled={
-                    isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl) || (!localClient && !pinVerified)
-                  }
-                >
-                  {isTestingNightscout ? (
-                    <>
-                      <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
-                    </>
+                <p className="text-sm text-muted-foreground">
+                  Estado: {backendNightscoutUrl ? (
+                    <span className="font-medium text-success">
+                      {backendNightscoutUrl} {backendNightscoutHasToken ? "· Token almacenado" : ""}
+                    </span>
                   ) : (
-                    <>
-                      <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión Nightscout
-                    </>
+                    <span className="font-medium text-warning">Sin configurar</span>
                   )}
-                </Button>
+                </p>
               </div>
+
+              <Button
+                variant="outline"
+                size="lg"
+                className="w-full justify-start"
+                onClick={handleTestNightscout}
+                disabled={
+                  isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl) || (!localClient && !pinVerified)
+                }
+                title={!localClient && !pinVerified ? 'Verifica el PIN antes de probar' : undefined}
+              >
+                {isTestingNightscout ? (
+                  <>
+                    <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Probando…
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="mr-2 h-5 w-5" /> Probar conexión Nightscout
+                  </>
+                )}
+              </Button>
             </div>
           </Card>
         </TabsContent>
@@ -3085,6 +3156,10 @@ sudo systemctl restart bascula-miniweb bascula-ui`}
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <div className="mt-8 text-center text-xs text-muted-foreground">
+        Versión de la interfaz {APP_VERSION}
+      </div>
 
       <KeyboardDialog
         open={keyboardOpen}

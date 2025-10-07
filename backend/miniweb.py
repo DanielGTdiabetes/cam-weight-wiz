@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple, TYPE_CHECKING
+from urllib.parse import urlparse
 
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -83,6 +84,46 @@ DEFAULT_SERIAL_BAUD = 115200
 LOG_SCALE = logging.getLogger("bascula.scale")
 LOG_NETWORK = logging.getLogger("bascula.network")
 LOG_OTA = logging.getLogger("bascula.ota")
+LOG_MINIWEB = logging.getLogger("bascula.miniweb")
+LOG_APP = logging.getLogger("bascula.app")
+
+LOG_DIR = Path("/var/log/bascula")
+MINIWEB_LOG_PATH = LOG_DIR / "miniweb.log"
+APP_LOG_PATH = LOG_DIR / "app.log"
+SETTINGS_RELOAD_SERVICE = "bascula-backend.service"
+
+
+def _ensure_log_dir() -> None:
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        LOG_MINIWEB.debug("No se pudo preparar el directorio de logs", exc_info=True)
+
+
+def _write_log_line(path: Path, message: str) -> None:
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(message + "\n")
+    except Exception:
+        LOG_MINIWEB.warning("No se pudo escribir en %s", path, exc_info=True)
+
+
+def _log_settings_event(event: str, **context: Any) -> None:
+    payload: Dict[str, Any] = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+    }
+    if context:
+        payload.update(context)
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False, default=str)
+    except Exception:
+        serialized = str(payload)
+    LOG_MINIWEB.info(serialized)
+    _ensure_log_dir()
+    _write_log_line(MINIWEB_LOG_PATH, serialized)
+    _write_log_line(APP_LOG_PATH, serialized)
+
 
 OTA_RELEASES_DIR = Path("/opt/bascula/releases")
 OTA_CURRENT_LINK = Path("/opt/bascula/current")
@@ -180,7 +221,74 @@ def _load_json(path: Path) -> Optional[Dict[str, Any]]:
 
 def _save_json(path: Path, data: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            LOG_MINIWEB.debug("No se pudo eliminar el temporal %s", tmp_path, exc_info=True)
+
+
+def _normalize_http_url(raw: str) -> str:
+    candidate = raw.strip()
+    if not candidate:
+        return ""
+    parsed = urlparse(candidate)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(candidate)
+    return candidate.rstrip("/")
+
+
+def _reload_backend_service() -> Tuple[bool, Optional[str]]:
+    commands = [
+        ["sudo", "systemctl", "reload", SETTINGS_RELOAD_SERVICE],
+        ["systemctl", "reload", SETTINGS_RELOAD_SERVICE],
+    ]
+    last_error: Optional[str] = None
+    for command in commands:
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=20,
+            )
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        if result.returncode == 0:
+            return True, None
+        last_error = result.stderr.strip() or result.stdout.strip() or f"returncode={result.returncode}"
+    return False, last_error or "command_unavailable"
+
+
+def _apply_settings_changes(changed_fields: Sequence[str], **metadata: Any) -> None:
+    if not changed_fields:
+        return
+    payload: Dict[str, Any] = {"fields": sorted(set(changed_fields))}
+    if metadata:
+        payload.update(metadata)
+    _log_settings_event("settings.updated", **payload)
+    success, error = _reload_backend_service()
+    if success:
+        _log_settings_event("settings.reload", status="success", service=SETTINGS_RELOAD_SERVICE)
+    else:
+        _log_settings_event(
+            "settings.reload",
+            status="error",
+            service=SETTINGS_RELOAD_SERVICE,
+            error=error,
+        )
 
 
 def _nm_escape_value(value: str) -> str:
@@ -3552,18 +3660,39 @@ async def get_settings():
 @app.post("/api/settings")
 async def update_settings(payload: SettingsUpdatePayload, request: Request):
     client_host = _extract_client_host(request)
+    trusted_client = _is_trusted_client(client_host)
     requires_pin = any(
         getattr(payload, field) is not None
         for field in ("openai", "nightscout", "ui", "tts", "scale", "serial", "integrations", "network")
     )
-    if requires_pin or (payload.pin is not None and not _is_trusted_client(client_host)):
+    if requires_pin or (payload.pin is not None and not trusted_client):
         _ensure_pin_valid_for_request(request, payload.pin)
+
+    requested_fields = [
+        field
+        for field in ("openai", "nightscout", "ui", "tts", "scale", "serial", "integrations", "network")
+        if getattr(payload, field) is not None
+    ]
+    if requested_fields:
+        _log_settings_event(
+            "settings.request",
+            fields=requested_fields,
+            client=client_host,
+            trusted=trusted_client,
+        )
 
     config = _load_config()
     changed = False
+    changed_sections: Set[str] = set()
+    change_metadata: Dict[str, Any] = {}
 
     if payload.openai is not None:
         api_key = (payload.openai.apiKey or "").strip()
+        current_key = _extract_openai_api_key(config)
+        if current_key != api_key:
+            changed = True
+            changed_sections.add("openai")
+            change_metadata["openai_has_key"] = bool(api_key)
         config["openai_api_key"] = api_key
         integrations = config.get("integrations")
         if not isinstance(integrations, dict):
@@ -3571,18 +3700,39 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
         integrations["openai_api_key"] = api_key
         integrations["chatgpt_api_key"] = api_key
         config["integrations"] = integrations
-        changed = True
 
     if payload.nightscout is not None:
         current_url, current_token = _extract_nightscout_credentials(config)
         if payload.nightscout.url is None:
             url = current_url
         else:
-            url = str(payload.nightscout.url).strip()
+            candidate_url = str(payload.nightscout.url or "").strip()
+            if candidate_url:
+                try:
+                    url = _normalize_http_url(candidate_url)
+                except ValueError:
+                    _log_settings_event(
+                        "settings.validation_failed",
+                        field="nightscout.url",
+                        reason="invalid_http_url",
+                        attempted_value=candidate_url,
+                    )
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"code": "invalid_url", "field": "nightscout.url"},
+                    )
+            else:
+                url = ""
         if payload.nightscout.token is None:
             token = current_token
         else:
-            token = str(payload.nightscout.token).strip()
+            token = str(payload.nightscout.token or "").strip()
+
+        if url != current_url or token != current_token:
+            changed = True
+            changed_sections.add("nightscout")
+            change_metadata["nightscout_url"] = url
+            change_metadata["nightscout_has_token"] = bool(token)
 
         config["nightscout_url"] = url
         config["nightscout_token"] = token
@@ -3590,80 +3740,125 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
         nightscout_cfg = config.get("nightscout") if isinstance(config.get("nightscout"), dict) else {}
         if nightscout_cfg.get("url") != url:
             nightscout_cfg["url"] = url
-            changed = True
         if nightscout_cfg.get("token") != token:
             nightscout_cfg["token"] = token
-            changed = True
         config["nightscout"] = nightscout_cfg
 
         diabetes = config.get("diabetes")
         if not isinstance(diabetes, dict):
             diabetes = {}
-        diabetes["ns_url"] = url
-        diabetes["ns_token"] = token
-        diabetes["diabetes_enabled"] = bool(url)
+        if diabetes.get("ns_url") != url:
+            diabetes["ns_url"] = url
+        if diabetes.get("ns_token") != token:
+            diabetes["ns_token"] = token
+        enabled = bool(url)
+        if diabetes.get("diabetes_enabled") != enabled:
+            diabetes["diabetes_enabled"] = enabled
         config["diabetes"] = diabetes
 
         integrations = config.get("integrations")
         if not isinstance(integrations, dict):
             integrations = {}
-        integrations["nightscout_url"] = url
-        integrations["nightscout_token"] = token
+        if integrations.get("nightscout_url") != url:
+            integrations["nightscout_url"] = url
+        if integrations.get("nightscout_token") != token:
+            integrations["nightscout_token"] = token
         config["integrations"] = integrations
-        changed = True
 
     if payload.ui:
         ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+        section_changed = False
         flags_updates = payload.ui.get("flags") if isinstance(payload.ui, dict) else None
         if isinstance(flags_updates, dict):
             existing_flags = ui_cfg.get("flags") if isinstance(ui_cfg.get("flags"), dict) else {}
             for key, value in flags_updates.items():
-                existing_flags[str(key)] = bool(value)
+                key_str = str(key)
+                normalized = bool(value)
+                if existing_flags.get(key_str) != normalized:
+                    section_changed = True
+                existing_flags[key_str] = normalized
             ui_cfg["flags"] = existing_flags
-            changed = True
         if isinstance(payload.ui, dict):
             for key, value in payload.ui.items():
                 if key == "flags":
                     continue
+                if ui_cfg.get(key) != value:
+                    section_changed = True
                 ui_cfg[key] = value
-                changed = True
+        if section_changed:
+            changed = True
+            changed_sections.add("ui")
         config["ui"] = ui_cfg
 
     if payload.tts and isinstance(payload.tts, dict):
         existing_tts = config.get("tts") if isinstance(config.get("tts"), dict) else {}
-        existing_tts.update(payload.tts)
+        section_changed = False
+        for key, value in payload.tts.items():
+            if existing_tts.get(key) != value:
+                section_changed = True
+            existing_tts[key] = value
+        if section_changed:
+            changed = True
+            changed_sections.add("tts")
         config["tts"] = existing_tts
-        changed = True
 
     if payload.scale and isinstance(payload.scale, dict):
         existing_scale = config.get("scale") if isinstance(config.get("scale"), dict) else {}
-        existing_scale.update(payload.scale)
+        section_changed = False
+        for key, value in payload.scale.items():
+            if existing_scale.get(key) != value:
+                section_changed = True
+            existing_scale[key] = value
+        if section_changed:
+            changed = True
+            changed_sections.add("scale")
         config["scale"] = existing_scale
-        changed = True
 
     if payload.serial and isinstance(payload.serial, dict):
+        section_changed = False
         device = payload.serial.get("device")
-        if isinstance(device, str) and device.strip():
-            config["serial_device"] = device.strip()
-            changed = True
+        if isinstance(device, str):
+            new_device = device.strip()
+            if new_device and new_device != config.get("serial_device"):
+                config["serial_device"] = new_device
+                section_changed = True
         baud = payload.serial.get("baud")
         if baud is not None:
             try:
-                config["serial_baud"] = int(baud)
-                changed = True
+                new_baud = int(baud)
+                if new_baud != config.get("serial_baud"):
+                    config["serial_baud"] = new_baud
+                    section_changed = True
             except (TypeError, ValueError):
                 pass
+        if section_changed:
+            changed = True
+            changed_sections.add("serial")
 
     if payload.integrations and isinstance(payload.integrations, dict):
         current_integrations = config.get("integrations")
         if not isinstance(current_integrations, dict):
             current_integrations = {}
-        current_integrations.update(payload.integrations)
+        section_changed = False
+        for key, value in payload.integrations.items():
+            if current_integrations.get(key) != value:
+                section_changed = True
+            current_integrations[key] = value
+        if section_changed:
+            changed = True
+            changed_sections.add("integrations")
         config["integrations"] = current_integrations
-        changed = True
 
     if changed:
         _save_json(CONFIG_PATH, config)
+        _apply_settings_changes(changed_sections, **change_metadata)
+    elif requested_fields:
+        _log_settings_event(
+            "settings.no_change",
+            fields=requested_fields,
+            client=client_host,
+            trusted=trusted_client,
+        )
 
     return _build_settings_payload(config)
 
@@ -3712,54 +3907,81 @@ async def settings_test_openai(payload: SettingsTestOpenAI, request: Request):
     return {"ok": True, "model": first_model}
 
 
+async def _execute_nightscout_test_request(url: str, token: str) -> Tuple[int, Dict[str, Any]]:
+    if not url:
+        return 422, {"ok": False, "status": 422, "message": "missing_url"}
+
+    normalized_url = url.rstrip("/")
+    headers = {"API-SECRET": token} if token else {}
+    endpoint = f"{normalized_url}/api/v1/status.json"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            response = await client.get(endpoint, headers=headers)
+    except httpx.TimeoutException:
+        return 504, {"ok": False, "status": 504, "message": "timeout"}
+    except httpx.RequestError as exc:
+        return 502, {"ok": False, "status": 502, "message": str(exc)}
+
+    status_code = response.status_code
+    try:
+        payload = response.json()
+    except Exception:
+        payload = response.text
+
+    if response.is_success:
+        return status_code, {"ok": True, "status": status_code, "details": payload}
+
+    return status_code, {"ok": False, "status": status_code, "details": payload, "message": "http_error"}
+
+
+async def _perform_nightscout_test(
+    request: Request,
+    url: Optional[str],
+    token: Optional[str],
+    pin: Optional[str],
+    *,
+    source: str,
+) -> Any:
+    _ensure_pin_valid_for_request(request, pin)
+    config = _load_config()
+    current_url, current_token = _extract_nightscout_credentials(config)
+    target_url = (url or current_url).strip()
+    target_token = (token or current_token).strip()
+
+    status_code, content = await _execute_nightscout_test_request(target_url, target_token)
+    _log_settings_event(
+        "nightscout.test",
+        ok=content.get("ok", False),
+        status=status_code,
+        has_url=bool(target_url),
+        has_token=bool(target_token),
+        source=source,
+    )
+    if content.get("ok"):
+        return content
+    return JSONResponse(status_code=status_code, content=content)
+
+
+@app.get("/api/nightscout/test")
+async def api_nightscout_test(
+    request: Request,
+    url: Optional[str] = None,
+    token: Optional[str] = None,
+    pin: Optional[str] = None,
+):
+    return await _perform_nightscout_test(request, url, token, pin, source="get")
+
+
 @app.post("/api/settings/test/nightscout")
 async def settings_test_nightscout(payload: SettingsTestNightscout, request: Request):
-    _ensure_pin_valid_for_request(request, payload.pin)
-    config = _load_config()
-    url, token = _extract_nightscout_credentials(config)
-    candidate_url = (payload.url or "").strip()
-    candidate_token = (payload.token or "").strip()
-
-    target_url = candidate_url or url
-    target_token = candidate_token or token
-
-    if not target_url:
-        return {"ok": False, "reason": "missing_url"}
-
-    normalized_url = target_url.rstrip("/")
-    headers = {"API-SECRET": target_token} if target_token else {}
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            response = await client.get(
-                f"{normalized_url}/api/v1/entries.json",
-                params={"count": 1},
-                headers=headers,
-            )
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        payload = _response_error_payload(exc.response)
-        return JSONResponse(
-            status_code=exc.response.status_code,
-            content={"ok": False, "reason": "http_error", "details": payload},
-        )
-    except httpx.RequestError as exc:
-        return JSONResponse(
-            status_code=502,
-            content={"ok": False, "reason": "network_error", "details": str(exc)},
-        )
-    except Exception as exc:  # pragma: no cover - defensivo
-        return JSONResponse(
-            status_code=500,
-            content={"ok": False, "reason": "unexpected_error", "details": str(exc)},
-        )
-
-    try:
-        entries_payload = response.json()
-    except Exception:
-        entries_payload = response.text
-
-    return {"ok": True, "entries": entries_payload}
+    return await _perform_nightscout_test(
+        request,
+        payload.url,
+        payload.token,
+        payload.pin,
+        source="legacy_post",
+    )
 
 
 @app.get("/api/miniweb/scan-networks")

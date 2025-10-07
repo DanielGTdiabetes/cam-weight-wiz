@@ -29,6 +29,11 @@ import { logger } from "@/services/logger";
 const DEFAULT_AP_SSID = "Bascula-AP";
 const DEFAULT_AP_IP = "192.168.4.1";
 
+const MINIWEB_VERSION =
+  typeof __APP_VERSION__ === "string" && __APP_VERSION__.trim()
+    ? __APP_VERSION__.trim()
+    : "0.0.0";
+
 interface WifiNetwork {
   ssid: string;
   secured: boolean;
@@ -797,35 +802,41 @@ export const MiniWebConfig = () => {
 
   const executeNightscoutTest = useCallback(
     async (pinOverride?: string) => {
-      const payload: Record<string, unknown> = {};
       const urlTrimmed = nightscoutUrl.trim();
       const tokenTrimmed = nightscoutToken.trim();
+      const params = new URLSearchParams();
       if (urlTrimmed) {
-        payload.url = urlTrimmed;
+        params.set("url", urlTrimmed);
       }
       if (tokenTrimmed) {
-        payload.token = tokenTrimmed;
+        params.set("token", tokenTrimmed);
       }
       if (pinOverride) {
-        payload.pin = pinOverride;
+        params.set("pin", pinOverride);
       }
+      const query = params.toString();
+      const endpoint = query ? `/api/nightscout/test?${query}` : "/api/nightscout/test";
 
       setTestingNightscout(true);
       setNightscoutTest({ status: "running" });
       try {
-        const response = await fetch("/api/settings/test/nightscout", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const data = (await response.json().catch(() => ({}))) as { ok?: boolean; reason?: string; details?: unknown };
+        const response = await fetch(endpoint, { method: "GET", cache: "no-store" });
+        const data = (await response.json().catch(() => ({}))) as {
+          ok?: boolean;
+          reason?: string;
+          details?: unknown;
+          message?: string;
+          status?: number;
+        };
         if (response.ok && data?.ok) {
-          const message = "Conexión con Nightscout verificada.";
+          const message = data.message ?? "Conexión con Nightscout verificada.";
           setNightscoutTest({ status: "success", message });
           toast({ title: "Nightscout disponible", description: message });
           return true;
         }
-        const reason = data?.reason ? formatErrorMessage(data.reason) : await parseErrorResponse(response);
+        const reason =
+          data?.message?.trim() ||
+          (data?.reason ? formatErrorMessage(data.reason) : await parseErrorResponse(response));
         setNightscoutTest({ status: "error", message: reason });
         toast({ title: "Nightscout no respondió", description: reason, variant: "destructive" });
         return false;
@@ -900,12 +911,17 @@ export const MiniWebConfig = () => {
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted/40">
       <div className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-10">
         <Card className="border border-primary/20 bg-background/80 shadow-lg">
-          <div className="flex flex-col gap-3">
-            <h1 className="text-3xl font-bold tracking-tight">Configuración de la báscula</h1>
-            <p className="text-muted-foreground">
-              Gestiona la conexión Wi-Fi y las integraciones principales de la báscula desde esta mini-web segura.
-              Los cambios se aplican directamente en el dispositivo.
-            </p>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex flex-col gap-3">
+              <h1 className="text-3xl font-bold tracking-tight">Configuración de la báscula</h1>
+              <p className="text-muted-foreground">
+                Gestiona la conexión Wi-Fi y las integraciones principales de la báscula desde esta mini-web segura.
+                Los cambios se aplican directamente en el dispositivo.
+              </p>
+            </div>
+            <Badge variant="outline" className="self-start font-mono text-xs uppercase tracking-wider">
+              Mini-web {MINIWEB_VERSION}
+            </Badge>
           </div>
         </Card>
 
@@ -1211,9 +1227,7 @@ export const MiniWebConfig = () => {
                   type="button"
                   variant="glow"
                   onClick={() => void handleSaveIntegrations()}
-                  disabled={
-                    savingIntegrations || !hasIntegrationChanges || (!localClient && !pinVerified)
-                  }
+                  disabled={savingIntegrations || (!localClient && !pinVerified)}
                   title={
                     !localClient && !pinVerified ? "Verifica el PIN antes de guardar" : undefined
                   }
@@ -1438,6 +1452,9 @@ export const MiniWebConfig = () => {
             </div>
           </div>
         </Card>
+        <p className="pb-6 text-center text-xs text-muted-foreground">
+          Versión mini-web {MINIWEB_VERSION}
+        </p>
       </div>
     </div>
   );

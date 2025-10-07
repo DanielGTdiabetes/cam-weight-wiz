@@ -48,12 +48,30 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  const isConfigPath = url.pathname === '/config' || url.pathname.startsWith('/config/');
+
   if (request.mode === 'navigate') {
+    const fetchOptions = { cache: 'no-store' };
+    if (isConfigPath) {
+      fetchOptions.headers = { 'Cache-Control': 'no-store' };
+    }
     event.respondWith(
-      fetch(request, { cache: 'no-store' }).catch(() =>
+      fetch(request, fetchOptions).catch(() =>
         new Response('<h1>Offline</h1>', {
           status: 503,
           headers: { 'Content-Type': 'text/html' },
+        })
+      )
+    );
+    return;
+  }
+
+  if (isConfigPath) {
+    event.respondWith(
+      fetch(request, { cache: 'no-store', headers: { 'Cache-Control': 'no-store' } }).catch(() =>
+        new Response('Servicio de configuración no disponible sin conexión', {
+          status: 503,
+          headers: { 'Content-Type': 'text/plain' },
         })
       )
     );
