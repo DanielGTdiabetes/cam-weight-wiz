@@ -292,30 +292,45 @@ export const MiniWebConfig = () => {
         throw new Error(`HTTP ${response.status}`);
       }
       const data = (await response.json()) as Record<string, unknown>;
-      const openaiHasKeyValue = Boolean((data.openai as { hasKey?: boolean } | undefined)?.hasKey);
-      setOpenaiHasKey(openaiHasKeyValue);
-      setOpenaiInput("");
+      const networkData = data.network as { openai_api_key?: string | null; status?: Record<string, unknown> } | undefined;
+      const openaiValue = typeof networkData?.openai_api_key === "string"
+        ? networkData.openai_api_key.trim()
+        : "";
+      const openaiStored = openaiValue === "__stored__";
+      setOpenaiHasKey(openaiStored || Boolean(openaiValue));
+      setOpenaiInput(openaiStored ? "" : openaiValue);
       setOpenaiDirty(false);
 
-      const nightscoutData = data.nightscout as { url?: string; hasToken?: boolean } | undefined;
-      const urlValue = typeof nightscoutData?.url === "string" ? nightscoutData.url.trim() : "";
-      setNightscoutUrl(urlValue);
-      setNightscoutHasToken(Boolean(nightscoutData?.hasToken));
+      const diabetesData = data.diabetes as { nightscout_url?: string | null; nightscout_token?: string | null } | undefined;
+      const urlValue = typeof diabetesData?.nightscout_url === "string"
+        ? diabetesData.nightscout_url.trim()
+        : "";
+      const urlStored = urlValue === "__stored__";
+      setNightscoutUrl(urlStored ? "" : urlValue);
+      const tokenValue = typeof diabetesData?.nightscout_token === "string"
+        ? diabetesData.nightscout_token.trim()
+        : "";
+      const tokenStored = tokenValue === "__stored__";
+      setNightscoutHasToken(tokenStored || Boolean(tokenValue));
       setNightscoutToken("");
       setNightscoutUrlDirty(false);
       setNightscoutTokenDirty(false);
 
-      const networkData = (data.network as { status?: Record<string, unknown> } | undefined)?.status;
-      if (networkData) {
-        const ssid = typeof networkData.ssid === "string" && networkData.ssid.trim() ? networkData.ssid.trim() : null;
+      const networkStatusData = networkData?.status;
+      if (networkStatusData) {
+        const ssid = typeof networkStatusData.ssid === "string" && networkStatusData.ssid.trim()
+          ? networkStatusData.ssid.trim()
+          : null;
         const ipCandidate =
-          typeof networkData.ip === "string" && networkData.ip.trim()
-            ? networkData.ip.trim()
-            : typeof networkData.ip_address === "string" && networkData.ip_address.trim()
-              ? networkData.ip_address.trim()
+          typeof networkStatusData.ip === "string" && networkStatusData.ip.trim()
+            ? networkStatusData.ip.trim()
+            : typeof networkStatusData.ip_address === "string" && networkStatusData.ip_address.trim()
+              ? networkStatusData.ip_address.trim()
               : null;
-        const connectivity = typeof networkData.connectivity === "string" ? networkData.connectivity.trim() : null;
-        const apActive = Boolean(networkData.ap_active);
+        const connectivity = typeof networkStatusData.connectivity === "string"
+          ? networkStatusData.connectivity.trim()
+          : null;
+        const apActive = Boolean(networkStatusData.ap_active);
         setNetworkStatus({ ssid, ip: ipCandidate, connectivity, apActive });
         if (!networkSelectionLocked && ssid) {
           setSelectedNetwork(ssid);
@@ -736,12 +751,12 @@ export const MiniWebConfig = () => {
 
     const payload: Record<string, unknown> = {};
     if (openaiDirty) {
-      payload.openai = { apiKey: openaiInput.trim() || null };
+      payload.network = { openai_api_key: openaiInput.trim() || null };
     }
     if (nightscoutUrlDirty || nightscoutTokenDirty) {
-      payload.nightscout = {
-        url: nightscoutUrlDirty ? nightscoutUrl.trim() || null : undefined,
-        token: nightscoutTokenDirty ? nightscoutToken.trim() || null : undefined,
+      payload.diabetes = {
+        nightscout_url: nightscoutUrlDirty ? nightscoutUrl.trim() || null : undefined,
+        nightscout_token: nightscoutTokenDirty ? nightscoutToken.trim() || null : undefined,
       };
     }
     setSavingIntegrations(true);
