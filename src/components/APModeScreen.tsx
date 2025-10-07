@@ -1,14 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  Wifi,
-  QrCode,
-  Settings,
-  KeyRound,
-  CheckCircle2,
-  AlertCircle,
-  Loader2,
-  WifiOff,
-} from "lucide-react";
+import { Wifi, KeyRound, Loader2, WifiOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { api } from "@/services/api";
@@ -35,12 +26,6 @@ export const APModeScreen = () => {
   const [apInfoLoading, setApInfoLoading] = useState(true);
   const [miniWebPin, setMiniWebPin] = useState<string | null>(null);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
-  const [verifyState, setVerifyState] = useState<{
-    status: "idle" | "checking" | "success" | "error";
-    message?: string;
-    code?: string;
-    ip?: string;
-  }>({ status: "idle" });
   const [toastState, setToastState] = useState<{ type: "success" | "error"; msg: string } | null>(null);
   const [startingOffline, setStartingOffline] = useState(false);
   const redirectRef = useRef(false);
@@ -387,66 +372,15 @@ export const APModeScreen = () => {
     }
   };
 
-  const handleVerifyWifi = async () => {
-    setVerifyState({ status: "checking" });
-    const timeoutMs = 30_000;
-    const started = Date.now();
-    let lastCode: string | undefined;
-
-    while (Date.now() - started < timeoutMs) {
-      try {
-        const response = await fetch("/api/miniweb/status", { cache: "no-store" });
-        if (response.ok) {
-          const status = await response.json();
-          if (
-            status?.ap_active === false &&
-            typeof status?.effective_mode === "string" &&
-            status.effective_mode.toLowerCase() === "kiosk"
-          ) {
-            const ssid = typeof status.ssid === "string" && status.ssid ? status.ssid : "tu red WiFi";
-            const ip =
-              (typeof status.ip === "string" && status.ip) ||
-              (typeof status.ip_address === "string" && status.ip_address) ||
-              undefined;
-            setVerifyState({
-              status: "success",
-              message: `Conectado a ${ssid}. Cambia tu Wi-Fi al hogar para seguir usando la báscula.`,
-              ip,
-            });
-            return;
-          }
-          lastCode = undefined;
-        } else {
-          const body = (await response.json().catch(() => null)) as
-            | { detail?: unknown; code?: unknown }
-            | null;
-          const detail =
-            body && typeof body.detail === "object" && body.detail !== null
-              ? (body.detail as { code?: unknown })
-              : undefined;
-          const detailCode =
-            (detail && typeof detail.code === "string" && detail.code) ||
-            (typeof body?.code === "string" ? body.code : undefined);
-          if (detailCode) {
-            lastCode = detailCode;
-          }
-        }
-      } catch (error) {
-        // Ignorar errores de red momentáneos
-      }
-
-      await new Promise<void>((resolve) => {
-        window.setTimeout(() => resolve(), 1_500);
-      });
+  const handleOpenConfig = () => {
+    if (typeof window === "undefined") {
+      return;
     }
-
-    setVerifyState({
-      status: "error",
-      code: lastCode,
-      message: lastCode
-        ? `No se pudo confirmar la conexión (${lastCode}).`
-        : "No se pudo confirmar la conexión Wi-Fi.",
-    });
+    try {
+      window.location.assign("/config");
+    } catch (error) {
+      logger.warn("No se pudo abrir /config desde la pantalla AP", { error });
+    }
   };
 
   return (
@@ -489,160 +423,128 @@ export const APModeScreen = () => {
           </div>
         )}
 
-        <div className="mb-8 space-y-6">
-          {/* AP Info */}
+        <div className="space-y-8">
           <div className="rounded-lg border border-border bg-muted/30 p-6">
-            <h2 className="mb-4 text-xl font-bold">Red WiFi para configuración</h2>
-            <div className="space-y-3">
+            <h2 className="mb-4 text-xl font-bold">Datos del punto de acceso</h2>
+            <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <p className="text-sm text-muted-foreground">Nombre de Red (SSID):</p>
+                <p className="text-sm text-muted-foreground">Nombre de la red (SSID)</p>
                 <p className="text-2xl font-bold text-primary">{displaySsid}</p>
               </div>
               <div>
-                <p className="text-sm text-muted-foreground">Contraseña:</p>
+                <p className="text-sm text-muted-foreground">Contraseña</p>
                 <p className="text-2xl font-bold">{apPassword}</p>
               </div>
-              <div className="flex items-start gap-3">
-                <div className="mt-1 rounded-full bg-primary/10 p-2">
-                  <KeyRound className="h-5 w-5 text-primary" />
-                </div>
-                <div>
-                  <p className="text-sm text-muted-foreground">PIN de la mini-web:</p>
-                  <p
-                    className={`text-2xl font-bold ${
-                      miniWebPin ? "text-primary" : pinMessage ? "text-destructive" : ""
-                    }`}
-                  >
-                    {miniWebPin ?? (pinMessage ? "PIN no disponible" : "Cargando...")}
-                  </p>
-                  {pinMessage && !miniWebPin && (
-                    <p className="text-sm text-destructive">{pinMessage}</p>
-                  )}
-                </div>
+              <div>
+                <p className="text-sm text-muted-foreground">IP local de la báscula</p>
+                <p className="text-lg font-mono">{effectiveApInfo.ip}</p>
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">Miniweb de ajustes</p>
+                <a
+                  href={displayConfigUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm font-mono text-primary underline-offset-4 hover:underline"
+                >
+                  {displayConfigUrl}
+                </a>
+              </div>
+            </div>
+            <div className="mt-4 flex items-start gap-3">
+              <div className="mt-1 rounded-full bg-primary/10 p-2">
+                <KeyRound className="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <p className="text-sm text-muted-foreground">PIN de acceso</p>
+                <p
+                  className={`text-2xl font-bold ${
+                    miniWebPin ? "text-primary" : pinMessage ? "text-destructive" : ""
+                  }`}
+                >
+                  {miniWebPin ?? (pinMessage ? "PIN no disponible" : "Cargando...")}
+                </p>
+                {pinMessage && !miniWebPin && <p className="text-sm text-destructive">{pinMessage}</p>}
               </div>
             </div>
           </div>
 
-          {/* Instructions */}
-          <div className="space-y-4">
-            <h2 className="text-xl font-bold">Pasos para configurar WiFi:</h2>
+          <div className="space-y-4 rounded-lg border border-border/60 bg-muted/20 p-6">
+            <h2 className="text-xl font-bold">Cómo continuar</h2>
             <ol className="space-y-3">
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   1
                 </span>
-                <p>Conéctate a la Wi-Fi «<strong>{displaySsid}</strong>».</p>
+                <p>
+                  Conéctate a <strong>{displaySsid}</strong> desde tu móvil, tablet o PC.
+                </p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   2
                 </span>
-                <p>Usa la contraseña: <strong>{apPassword}</strong></p>
+                <p>Introduce la contraseña <strong>{apPassword}</strong>.</p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   3
                 </span>
-                <p>En tu navegador abre la mini-web de configuración (usa el enlace resaltado más abajo).</p>
+                <p>
+                  Abre la mini-web en <strong>{displayConfigUrl}</strong> (ruta <span className="font-semibold">/config</span>).
+                </p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   4
                 </span>
                 <p>
-                  Introduce el PIN <strong>{miniWebPin ?? "mostrado en esta pantalla"}</strong> y configura tu Wi-Fi desde la mini-web
+                  Introduce el PIN mostrado arriba y guarda tu red doméstica. La báscula volverá al modo normal automáticamente.
                 </p>
               </li>
             </ol>
-          </div>
-
-          {/* QR Code Section */}
-          <div className="rounded-lg border border-primary/30 bg-primary/5 p-6 text-center">
-            <QrCode className="mx-auto mb-3 h-32 w-32 text-primary" />
             <p className="text-sm text-muted-foreground">
-              Escanea para abrir la mini-web de configuración
+              También puedes abrir la misma dirección desde otro dispositivo conectado a Bascula-AP para completar la
+              configuración.
             </p>
-            <a
-              href={displayConfigUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-2 block text-xs font-mono text-primary underline-offset-4 hover:underline"
-            >
-              {displayConfigUrl}
-            </a>
           </div>
-        </div>
 
-        <div className="space-y-4">
-          <div className="rounded-lg border border-primary/40 bg-primary/5 p-4 text-left">
+          <div className="rounded-lg border border-primary/40 bg-primary/5 p-4">
             <div className="flex items-start gap-3">
               <WifiOff className="mt-1 h-5 w-5 text-primary" />
               <div className="space-y-1 text-sm">
                 <p className="font-semibold text-primary">¿Sin conexión a Internet?</p>
                 <p className="text-muted-foreground">
-                  Activa el modo offline para usar la báscula y el temporizador mientras ajustas la red. Podrás volver al modo
-                  normal automáticamente cuando haya Internet.
+                  Puedes activar el modo offline para usar la báscula y el temporizador mientras terminas de configurar la red.
                 </p>
               </div>
             </div>
           </div>
 
-          <Button
-            onClick={handleStartOffline}
-            variant="glow"
-            size="xl"
-            className="w-full text-xl"
-            disabled={startingOffline}
-          >
-            {startingOffline ? <Loader2 className="mr-2 h-6 w-6 animate-spin" /> : <WifiOff className="mr-2 h-6 w-6" />}
-            {startingOffline ? "Activando modo offline…" : "Iniciar en modo offline"}
-          </Button>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Button onClick={handleOpenConfig} variant="outline" size="xl" className="w-full text-xl">
+              Configurar red / ajustes
+            </Button>
+            <Button
+              onClick={handleStartOffline}
+              variant="glow"
+              size="xl"
+              className="w-full text-xl"
+              disabled={startingOffline}
+            >
+              {startingOffline ? (
+                <Loader2 className="mr-2 h-6 w-6 animate-spin" />
+              ) : (
+                <WifiOff className="mr-2 h-6 w-6" />
+              )}
+              {startingOffline ? "Activando modo offline…" : "Activar modo offline"}
+            </Button>
+          </div>
 
-          <Button
-            onClick={handleVerifyWifi}
-            variant="glow"
-            size="xl"
-            className="w-full text-xl"
-            disabled={verifyState.status === "checking"}
-          >
-            {verifyState.status === "checking" ? (
-              <Loader2 className="mr-2 h-6 w-6 animate-spin" />
-            ) : (
-              <Settings className="mr-2 h-6 w-6" />
-            )}
-            {verifyState.status === "checking" ? "Verificando…" : "Verificar Conexión WiFi"}
-          </Button>
-
-          {verifyState.status === "success" && (
-            <div className="flex items-start gap-3 rounded-lg border border-emerald-400/40 bg-emerald-500/10 p-4 text-left">
-              <CheckCircle2 className="mt-1 h-5 w-5 text-emerald-400" />
-              <div className="space-y-1">
-                <p className="font-semibold text-emerald-200">Conexión confirmada</p>
-                <p className="text-sm text-emerald-100/80">{verifyState.message}</p>
-                {verifyState.ip && (
-                  <p className="text-xs font-mono text-emerald-100/60">IP asignada: {verifyState.ip}</p>
-                )}
-              </div>
-            </div>
-          )}
-
-          {verifyState.status === "error" && (
-            <div className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/10 p-4 text-left">
-              <AlertCircle className="mt-1 h-5 w-5 text-destructive" />
-              <div className="space-y-1">
-                <p className="font-semibold text-destructive">Sin confirmación</p>
-                <p className="text-sm text-destructive/90">{verifyState.message}</p>
-                {verifyState.code && (
-                  <p className="text-xs uppercase tracking-wide text-destructive/80">Código: {verifyState.code}</p>
-                )}
-              </div>
-            </div>
-          )}
+          <p className="text-center text-sm text-muted-foreground">
+            La báscula comprobará periódicamente la conexión y volverá al modo normal en cuanto detecte Internet.
+          </p>
         </div>
-
-        <p className="mt-6 text-center text-sm text-muted-foreground">
-          El sistema volverá a intentar conectarse automáticamente cada 30 segundos
-        </p>
       </Card>
     </div>
   );

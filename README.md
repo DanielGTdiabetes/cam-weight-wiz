@@ -72,6 +72,32 @@ La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo
 
 > El endpoint legado `/api/miniweb/connect-wifi` permanece disponible como alias para compatibilidad.
 
+## Mini-web de ajustes y API de settings
+
+La mini-web completa está disponible en `http://<IP>:8080/config` durante el modo AP y también desde la red local habitual en
+`http://<IP>/config`. Desde cualquier navegador conectado podrás introducir el PIN mostrado en la báscula y gestionar tanto la
+conexión Wi-Fi como las integraciones (OpenAI, Nightscout, modo offline, etc.).
+
+El backend expone una API específica para estos ajustes:
+
+| Método  | Endpoint                 | Descripción |
+|---------|--------------------------|-------------|
+| GET     | `/api/settings`          | Devuelve la configuración actual normalizada, incluyendo `network.status`, `ui.offline_mode` y los indicadores de credenciales almacenadas. |
+| POST    | `/api/settings`          | Persiste cambios de configuración. **Debe usarse `POST`** (no `PUT`), enviando JSON con los campos deseados. Cuando accedes desde otro dispositivo añade `Authorization: BasculaPin <PIN>` en la cabecera para autorizar la operación. |
+| OPTIONS | `/api/settings`          | Expone `Allow: GET, POST, OPTIONS` para clientes y diagnósticos. |
+| GET     | `/api/settings/health`   | Comprueba lectura/escritura del archivo de settings y responde `{ ok, can_write, message, version, updated_at }`. |
+
+Los scripts, la UI táctil y la mini-web utilizan esta misma API. Tras ejecutar `scripts/install-all.sh` puedes validar el
+comportamiento con:
+
+```bash
+curl -s http://localhost:8080/api/settings/health | jq .
+curl -s http://localhost:8080/api/settings | jq .
+curl -s -X POST http://localhost:8080/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"ui": {"offline_mode": false}}'
+```
+
 ### Reglas de PolicyKit
 
 Las reglas instaladas permiten al usuario `pi` (o miembros de `netdev`) ejecutar `nmcli` para escanear, crear conexiones Wi-Fi y gestionar modo compartido sin `sudo`. 【F:packaging/polkit/49-nmcli.rules†L1-L13】
