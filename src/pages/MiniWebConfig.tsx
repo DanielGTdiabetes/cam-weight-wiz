@@ -7,6 +7,8 @@ import {
   Copy,
   Globe,
   Lock,
+  Eye,
+  EyeOff,
   RefreshCw,
   Save,
   Server,
@@ -173,12 +175,15 @@ export const MiniWebConfig = () => {
   const [openaiInput, setOpenaiInput] = useState("");
   const [openaiHasKey, setOpenaiHasKey] = useState(false);
   const [openaiDirty, setOpenaiDirty] = useState(false);
+  const [showOpenAiKey, setShowOpenAiKey] = useState(false);
 
   const [nightscoutUrl, setNightscoutUrl] = useState("");
   const [nightscoutToken, setNightscoutToken] = useState("");
   const [nightscoutHasToken, setNightscoutHasToken] = useState(false);
   const [nightscoutUrlDirty, setNightscoutUrlDirty] = useState(false);
   const [nightscoutTokenDirty, setNightscoutTokenDirty] = useState(false);
+  const remoteLocked = !localClient && !pinVerified;
+  const [showNightscoutToken, setShowNightscoutToken] = useState(false);
 
   const [savingIntegrations, setSavingIntegrations] = useState(false);
   const [openaiTest, setOpenaiTest] = useState<IntegrationTestState>({ status: "idle" });
@@ -328,13 +333,22 @@ export const MiniWebConfig = () => {
 
   const refreshHealth = useCallback(async () => {
     try {
-      const response = await fetch("/health", { cache: "no-store" });
+      const response = await fetch("/api/settings/health", { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const data = (await response.json()) as { ok?: boolean; status?: string } | null;
-      const ok = data?.ok === true || data?.status === "ok";
-      setHealthStatus({ ok, message: ok ? "Backend operativo" : "Estado desconocido", timestamp: new Date() });
+      const data = (await response.json()) as {
+        ok?: boolean;
+        can_write?: boolean;
+        message?: string;
+      } | null;
+      const ok = data?.ok === true && data?.can_write !== false;
+      const description = data?.message && data.message.trim().length > 0
+        ? data.message.trim()
+        : ok
+          ? "Configuración operativa"
+          : "Revisa permisos de escritura en la báscula";
+      setHealthStatus({ ok, message: description, timestamp: new Date() });
     } catch (error) {
       logger.debug("No se pudo comprobar la salud del backend", { error });
       setHealthStatus({ ok: false, message: "No se pudo contactar con el backend", timestamp: new Date() });
@@ -730,15 +744,15 @@ export const MiniWebConfig = () => {
         token: nightscoutTokenDirty ? nightscoutToken.trim() || null : undefined,
       };
     }
-    if (pin) {
-      payload.pin = pin;
-    }
-
     setSavingIntegrations(true);
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (pin) {
+        headers.Authorization = `BasculaPin ${pin}`;
+      }
       const response = await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
+        method: "PUT",
+        headers,
         body: JSON.stringify(payload),
       });
       if (!response.ok) {
@@ -763,29 +777,29 @@ export const MiniWebConfig = () => {
       const body: Record<string, unknown> = {};
       const trimmedKey = openaiInput.trim();
       if (trimmedKey) {
-        body.apiKey = trimmedKey;
-      }
-      if (pinOverride) {
-        body.pin = pinOverride;
+        body.openai_api_key = trimmedKey;
       }
 
       setTestingOpenAI(true);
       setOpenaiTest({ status: "running" });
       try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (pinOverride) {
+          headers.Authorization = `BasculaPin ${pinOverride}`;
+        }
         const response = await fetch("/api/settings/test/openai", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify(body),
         });
-        const data = (await response.json().catch(() => ({}))) as { ok?: boolean; reason?: string; details?: unknown; model?: string };
+        const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string };
         if (response.ok && data?.ok) {
-          const model = typeof data.model === "string" && data.model.trim() ? ` (${data.model})` : "";
-          const message = `Conexión correcta${model}.`;
+          const message = data.message ?? "Conexión correcta.";
           setOpenaiTest({ status: "success", message });
           toast({ title: "OpenAI disponible", description: message });
           return true;
         }
-        const reason = data?.reason ? formatErrorMessage(data.reason) : await parseErrorResponse(response);
+        const reason = data?.message?.trim() || (await parseErrorResponse(response));
         setOpenaiTest({ status: "error", message: reason });
         toast({ title: "OpenAI no respondió", description: reason, variant: "destructive" });
         return false;
@@ -806,29 +820,29 @@ export const MiniWebConfig = () => {
     async (pinOverride?: string) => {
       const urlTrimmed = nightscoutUrl.trim();
       const tokenTrimmed = nightscoutToken.trim();
-      const params = new URLSearchParams();
+      const body: Record<string, string> = {};
       if (urlTrimmed) {
-        params.set("url", urlTrimmed);
+        body.nightscout_url = urlTrimmed;
       }
       if (tokenTrimmed) {
-        params.set("token", tokenTrimmed);
+        body.nightscout_token = tokenTrimmed;
       }
-      if (pinOverride) {
-        params.set("pin", pinOverride);
-      }
-      const query = params.toString();
-      const endpoint = query ? `/api/nightscout/test?${query}` : "/api/nightscout/test";
 
       setTestingNightscout(true);
       setNightscoutTest({ status: "running" });
       try {
-        const response = await fetch(endpoint, { method: "GET", cache: "no-store" });
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (pinOverride) {
+          headers.Authorization = `BasculaPin ${pinOverride}`;
+        }
+        const response = await fetch("/api/settings/test/nightscout", {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+        });
         const data = (await response.json().catch(() => ({}))) as {
           ok?: boolean;
-          reason?: string;
-          details?: unknown;
           message?: string;
-          status?: number;
         };
         if (response.ok && data?.ok) {
           const message = data.message ?? "Conexión con Nightscout verificada.";
@@ -836,9 +850,7 @@ export const MiniWebConfig = () => {
           toast({ title: "Nightscout disponible", description: message });
           return true;
         }
-        const reason =
-          data?.message?.trim() ||
-          (data?.reason ? formatErrorMessage(data.reason) : await parseErrorResponse(response));
+        const reason = data?.message?.trim() || (await parseErrorResponse(response));
         setNightscoutTest({ status: "error", message: reason });
         toast({ title: "Nightscout no respondió", description: reason, variant: "destructive" });
         return false;
@@ -1253,7 +1265,7 @@ export const MiniWebConfig = () => {
                   <Label>OpenAI API Key</Label>
                   <div className="relative">
                     <Input
-                      type="password"
+                      type={showOpenAiKey ? 'text' : 'password'}
                       value={openaiInput}
                       onChange={(event) => {
                         setOpenaiInput(event.target.value);
@@ -1261,21 +1273,36 @@ export const MiniWebConfig = () => {
                       }}
                       placeholder={openaiHasKey ? "••••••••" : "sk-..."}
                       autoComplete="off"
+                      disabled={remoteLocked}
                     />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-1 top-1/2 -translate-y-1/2"
-                      onClick={() =>
-                        void handlePaste((value) => {
-                          setOpenaiInput(value);
-                          setOpenaiDirty(true);
-                        })
-                      }
-                    >
-                      <ClipboardPaste className="h-4 w-4" />
-                    </Button>
+                    <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setShowOpenAiKey((value) => !value)}
+                        disabled={remoteLocked}
+                      >
+                        {showOpenAiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        <span className="sr-only">{showOpenAiKey ? 'Ocultar' : 'Mostrar'} API Key</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() =>
+                          void handlePaste((value) => {
+                            setOpenaiInput(value);
+                            setOpenaiDirty(true);
+                          })
+                        }
+                        disabled={remoteLocked}
+                      >
+                        <ClipboardPaste className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
                   <p className="text-xs text-muted-foreground">
                     Estado: {openaiHasKey ? <span className="text-success">Clave almacenada en la báscula</span> : "Sin configurar"}
@@ -1327,28 +1354,32 @@ export const MiniWebConfig = () => {
                       }}
                       placeholder="https://midominio.herokuapp.com"
                       autoComplete="url"
+                      disabled={remoteLocked}
                     />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-1 top-1/2 -translate-y-1/2"
-                      onClick={() =>
-                        void handlePaste((value) => {
-                          setNightscoutUrl(value);
-                          setNightscoutUrlDirty(true);
-                        })
-                      }
-                    >
-                      <ClipboardPaste className="h-4 w-4" />
-                    </Button>
+                    <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() =>
+                          void handlePaste((value) => {
+                            setNightscoutUrl(value);
+                            setNightscoutUrlDirty(true);
+                          })
+                        }
+                        disabled={remoteLocked}
+                      >
+                        <ClipboardPaste className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
                 </div>
                 <div className="space-y-2">
                   <Label>Nightscout Token</Label>
                   <div className="relative">
                     <Input
-                      type="password"
+                      type={showNightscoutToken ? 'text' : 'password'}
                       value={nightscoutToken}
                       onChange={(event) => {
                         setNightscoutToken(event.target.value);
@@ -1356,21 +1387,36 @@ export const MiniWebConfig = () => {
                       }}
                       placeholder={nightscoutHasToken ? "••••••" : "token"}
                       autoComplete="new-password"
+                      disabled={remoteLocked}
                     />
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="absolute right-1 top-1/2 -translate-y-1/2"
-                      onClick={() =>
-                        void handlePaste((value) => {
-                          setNightscoutToken(value);
-                          setNightscoutTokenDirty(true);
-                        })
-                      }
-                    >
-                      <ClipboardPaste className="h-4 w-4" />
-                    </Button>
+                    <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() => setShowNightscoutToken((value) => !value)}
+                        disabled={remoteLocked}
+                      >
+                        {showNightscoutToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                        <span className="sr-only">{showNightscoutToken ? 'Ocultar' : 'Mostrar'} token Nightscout</span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8"
+                        onClick={() =>
+                          void handlePaste((value) => {
+                            setNightscoutToken(value);
+                            setNightscoutTokenDirty(true);
+                          })
+                        }
+                        disabled={remoteLocked}
+                      >
+                        <ClipboardPaste className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </div>
                   <p className="text-xs text-muted-foreground">
                     Estado: {nightscoutUrl ? nightscoutUrl : "Sin URL"} {nightscoutHasToken ? "· Token almacenado" : ""}
@@ -1434,8 +1480,9 @@ export const MiniWebConfig = () => {
                 <div>
                   <div className="text-sm font-medium text-muted-foreground">Backend</div>
                   <div className={healthStatus.ok ? "text-sm text-success" : "text-sm text-destructive"}>
-                    {healthStatus.ok ? "Operativo" : "Sin conexión"}
+                    {healthStatus.ok ? "Operativo" : "Con problemas"}
                   </div>
+                  <div className="text-xs text-muted-foreground">{healthStatus.message}</div>
                 </div>
               </div>
               <div className="flex items-center gap-3 rounded-lg border border-border/60 bg-muted/20 p-4">

@@ -9,9 +9,20 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Set
 from pydantic import BaseModel, Field
 
+try:  # Compatibilidad Pydantic v1/v2
+    from pydantic import ConfigDict  # type: ignore
+except Exception:  # pragma: no cover - ConfigDict no disponible en Pydantic v1
+    ConfigDict = None  # type: ignore
+
 
 class SettingsSchema(BaseModel):
     """Esquema de configuración completo"""
+
+    class Config:
+        extra = "allow"
+
+    if ConfigDict is not None:  # type: ignore[truthy-bool]
+        model_config = ConfigDict(extra="allow")  # type: ignore[misc]
     
     class NetworkSettings(BaseModel):
         openai_api_key: Optional[str] = None

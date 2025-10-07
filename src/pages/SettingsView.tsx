@@ -21,6 +21,8 @@ import {
   ExternalLink,
   KeyRound,
   ShieldCheck,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -174,6 +176,8 @@ export const SettingsView = () => {
   const [chatGptKey, setChatGptKey] = useState("");
   const [nightscoutUrl, setNightscoutUrl] = useState("");
   const [nightscoutToken, setNightscoutToken] = useState("");
+  const [showOpenAiKey, setShowOpenAiKey] = useState(false);
+  const [showNightscoutToken, setShowNightscoutToken] = useState(false);
   const [correctionFactor, setCorrectionFactor] = useState("30");
   const [carbRatio, setCarbRatio] = useState("10");
   const [targetGlucose, setTargetGlucose] = useState("100");
@@ -216,6 +220,10 @@ export const SettingsView = () => {
   const [isNetworkModalConnecting, setIsNetworkModalConnecting] = useState(false);
   const [miniwebPin, setMiniwebPin] = useState<string | null>(null);
   const [miniwebPinStatus, setMiniwebPinStatus] = useState<"idle" | "loading" | "error">("idle");
+
+  const remoteLocked = !localClient && !pinVerified;
+  const openAiKeyboardEnabled = internalKeyboardEnabled && !remoteLocked;
+  const nightscoutKeyboardEnabled = internalKeyboardEnabled && !remoteLocked;
   const [securityPinInput, setSecurityPinInput] = useState("");
   const [pinVerified, setPinVerified] = useState(localClient);
   const [verifyingPin, setVerifyingPin] = useState(false);
@@ -1371,23 +1379,12 @@ export const SettingsView = () => {
       if (response.ok) {
         toast({
           title: "OpenAI listo",
-          description: "Conexión con OpenAI verificada",
+          description: response.message ?? "Conexión con OpenAI verificada",
         });
       } else {
         const parts: string[] = [];
-        if (response.reason) {
-          parts.push(`Razón: ${response.reason}`);
-        }
-        if (response.details) {
-          try {
-            parts.push(
-              typeof response.details === "string"
-                ? response.details
-                : JSON.stringify(response.details)
-            );
-          } catch (error) {
-            logger.debug("No se pudo serializar detalles de OpenAI", { error, details: response.details });
-          }
+        if (response.message) {
+          parts.push(response.message);
         }
         toast({
           title: "OpenAI no disponible",
@@ -1419,26 +1416,12 @@ export const SettingsView = () => {
       if (response.ok) {
         toast({
           title: "Nightscout listo",
-          description: "Conexión con Nightscout verificada",
+          description: response.message ?? "Conexión con Nightscout verificada",
         });
       } else {
         const pieces: string[] = [];
         if (response.message) {
           pieces.push(response.message);
-        }
-        if (response.reason) {
-          pieces.push(`Razón: ${response.reason}`);
-        }
-        if (response.details) {
-          try {
-            pieces.push(
-              typeof response.details === "string"
-                ? response.details
-                : JSON.stringify(response.details)
-            );
-          } catch (error) {
-            logger.debug("No se pudieron serializar detalles de Nightscout", { error, details: response.details });
-          }
         }
         toast({
           title: "Nightscout no respondió",
@@ -2400,35 +2383,54 @@ export const SettingsView = () => {
             </Button>
           </div>
 
-          <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-4">
-            <div className="space-y-2">
-              <Label className="text-lg font-medium">OpenAI API Key</Label>
-              <div className="relative">
-                <Input
-                  type="password"
+            <div className="space-y-4 rounded-lg border border-border/70 bg-muted/20 p-4">
+              <div className="space-y-2">
+                <Label className="text-lg font-medium">OpenAI API Key</Label>
+                <div className="relative">
+                  <Input
+                  type={showOpenAiKey ? 'text' : 'password'}
                   value={chatGptKey}
                   autoComplete="off"
-                  readOnly={internalKeyboardEnabled}
+                  readOnly={openAiKeyboardEnabled}
+                  disabled={remoteLocked}
                   onClick={() => {
-                    if (!internalKeyboardEnabled) {
+                    if (!openAiKeyboardEnabled) {
                       return;
                     }
                     openKeyboard('OpenAI API Key', 'apikey', 'chatGptKey', false, undefined, undefined, true);
                   }}
                   onChange={(event) => setChatGptKey(event.target.value)}
                   placeholder={backendHasOpenAIKey ? '••••••••••' : 'sk-...'}
-                  className={cn('text-lg pr-12', internalKeyboardEnabled && 'cursor-pointer')}
+                  className={cn(
+                    'text-lg pr-24',
+                    openAiKeyboardEnabled && 'cursor-pointer',
+                    remoteLocked && 'cursor-not-allowed opacity-70'
+                  )}
                 />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                  onClick={() => void handlePasteToField(setChatGptKey)}
-                >
-                  <ClipboardPaste className="h-4 w-4" />
-                  <span className="sr-only">Pegar API Key</span>
-                </Button>
+                <div className="absolute inset-y-0 right-1 my-auto flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => setShowOpenAiKey((value) => !value)}
+                    disabled={remoteLocked}
+                  >
+                    {showOpenAiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    <span className="sr-only">{showOpenAiKey ? 'Ocultar' : 'Mostrar'} API Key</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8"
+                    onClick={() => void handlePasteToField(setChatGptKey)}
+                    disabled={remoteLocked}
+                  >
+                    <ClipboardPaste className="h-4 w-4" />
+                    <span className="sr-only">Pegar API Key</span>
+                  </Button>
+                </div>
               </div>
               <p className="text-sm text-muted-foreground">
                 Estado:{' '}
@@ -2623,56 +2625,83 @@ export const SettingsView = () => {
                     type="url"
                     value={nightscoutUrl}
                     autoComplete="url"
-                    readOnly={internalKeyboardEnabled}
+                    readOnly={nightscoutKeyboardEnabled}
+                    disabled={remoteLocked}
                     onClick={() => {
-                      if (!internalKeyboardEnabled) {
+                      if (!nightscoutKeyboardEnabled) {
                         return;
                       }
                       openKeyboard("Nightscout URL", "url", "nightscoutUrl", false, undefined, undefined, false, 200);
                     }}
                     onChange={(event) => setNightscoutUrl(event.target.value)}
                     placeholder="https://mi-nightscout.com"
-                    className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                    className={cn(
+                      "text-lg pr-24",
+                      nightscoutKeyboardEnabled && "cursor-pointer",
+                      remoteLocked && "cursor-not-allowed opacity-70"
+                    )}
                   />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                    onClick={() => void handlePasteToField(setNightscoutUrl)}
-                  >
-                    <ClipboardPaste className="h-4 w-4" />
-                    <span className="sr-only">Pegar URL Nightscout</span>
-                  </Button>
+                  <div className="absolute inset-y-0 right-1 my-auto flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => void handlePasteToField(setNightscoutUrl)}
+                      disabled={remoteLocked}
+                    >
+                      <ClipboardPaste className="h-4 w-4" />
+                      <span className="sr-only">Pegar URL Nightscout</span>
+                    </Button>
+                  </div>
                 </div>
 
                 <Label className="text-lg font-medium">Nightscout Token</Label>
                 <div className="relative">
                   <Input
-                    type="password"
+                    type={showNightscoutToken ? 'text' : 'password'}
                     value={nightscoutToken}
                     autoComplete="new-password"
-                    readOnly={internalKeyboardEnabled}
+                    readOnly={nightscoutKeyboardEnabled}
+                    disabled={remoteLocked}
                     onClick={() => {
-                      if (!internalKeyboardEnabled) {
+                      if (!nightscoutKeyboardEnabled) {
                         return;
                       }
                       openKeyboard("Nightscout Token", "apikey", "nightscoutToken", false, undefined, undefined, true);
                     }}
                     onChange={(event) => setNightscoutToken(event.target.value)}
                     placeholder={backendNightscoutHasToken ? "••••••••" : "token"}
-                    className={cn("text-lg pr-12", internalKeyboardEnabled && "cursor-pointer")}
+                    className={cn(
+                      "text-lg pr-24",
+                      nightscoutKeyboardEnabled && "cursor-pointer",
+                      remoteLocked && "cursor-not-allowed opacity-70"
+                    )}
                   />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="absolute inset-y-0 right-1 my-auto h-8 w-8"
-                    onClick={() => void handlePasteToField(setNightscoutToken)}
-                  >
-                    <ClipboardPaste className="h-4 w-4" />
-                    <span className="sr-only">Pegar token Nightscout</span>
-                  </Button>
+                  <div className="absolute inset-y-0 right-1 my-auto flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setShowNightscoutToken((value) => !value)}
+                      disabled={remoteLocked}
+                    >
+                      {showNightscoutToken ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      <span className="sr-only">{showNightscoutToken ? 'Ocultar' : 'Mostrar'} token Nightscout</span>
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => void handlePasteToField(setNightscoutToken)}
+                      disabled={remoteLocked}
+                    >
+                      <ClipboardPaste className="h-4 w-4" />
+                      <span className="sr-only">Pegar token Nightscout</span>
+                    </Button>
+                  </div>
                 </div>
                 <p className="text-sm text-muted-foreground">
                   Estado: {backendNightscoutUrl ? (

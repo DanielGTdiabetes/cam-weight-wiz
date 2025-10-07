@@ -3,7 +3,19 @@ Bascula Backend - Complete FastAPI Server
 Includes: Scale, Camera, OCR, Timer, Nightscout, TTS, Recipes, Settings, OTA
 """
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import (
+    Body,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    UploadFile,
+    File,
+    Form,
+)
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -26,9 +38,14 @@ from uuid import uuid4
 from datetime import datetime
 import httpx
 import re
+import threading
+import stat
+import pwd
+import grp
 
 from scale_service import HX711Service
 from serial_scale_service import SerialScaleService
+from app.services.settings_service import get_settings_service
 
 
 CHATGPT_MODELS = [
@@ -261,7 +278,53 @@ async def chatgpt_barcode_lookup(payload: Dict[str, Any]) -> Optional[Dict[str, 
     return parse_chatgpt_json(response)
 
 # Configuration
-CONFIG_PATH = os.path.expanduser("~/.bascula/config.json")
+CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
+CONFIG_PATH = CFG_DIR / "config.json"
+PIN_PATH = CFG_DIR / "miniweb_pin"
+_settings_service = get_settings_service(CONFIG_PATH)
+_TEST_RATE_LIMIT_SECONDS = 5.0
+_test_rate_limit: Dict[str, float] = {}
+_test_rate_lock = threading.Lock()
+PIN_AUTH_PREFIX = "BasculaPin "
+
+
+def _load_pin() -> Optional[str]:
+    try:
+        value = PIN_PATH.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+    if value.isdigit() and len(value) == 4:
+        return value
+    return None
+
+
+def _require_pin_header(authorization: Optional[str]) -> None:
+    if not authorization or not authorization.startswith(PIN_AUTH_PREFIX):
+        raise HTTPException(status_code=401, detail="PIN requerido")
+
+    provided = authorization[len(PIN_AUTH_PREFIX) :].strip()
+    expected = _load_pin()
+    if not expected:
+        raise HTTPException(status_code=401, detail="PIN no configurado")
+    if provided != expected:
+        raise HTTPException(status_code=401, detail="PIN incorrecto")
+
+
+def require_pin(authorization: Optional[str] = Header(None)) -> None:
+    _require_pin_header(authorization)
+
+
+def _enforce_test_rate_limit(ip: str) -> None:
+    now = time.monotonic()
+    with _test_rate_lock:
+        last = _test_rate_limit.get(ip)
+        if last is not None and now - last < _TEST_RATE_LIMIT_SECONDS:
+            raise HTTPException(status_code=429, detail="Demasiadas solicitudes, intenta nuevamente en unos segundos")
+        _test_rate_limit[ip] = now
+
 DEFAULT_DT_PIN = 5
 DEFAULT_SCK_PIN = 6
 DEFAULT_SAMPLE_RATE = 20.0
@@ -650,34 +713,25 @@ def _migrate_legacy_nightscout(config: Dict[str, Any]) -> bool:
 
 def load_config() -> Dict[str, Any]:
     """Load configuration ensuring required keys exist."""
-    config: Dict[str, Any] = {}
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as handle:
-                loaded = json.load(handle)
-                if isinstance(loaded, dict):
-                    config = loaded
-        except Exception as exc:
-            LOG_SCALE.warning("Error loading config: %s", exc)
+    settings = _settings_service.load()
+    config = settings.dict()
 
-    defaults = _default_config()
     changed = False
-
+    defaults = _default_config()
     for key, value in defaults.items():
-        if isinstance(value, dict):
-            current = config.get(key)
-            if not isinstance(current, dict):
+        if key not in config:
+            config[key] = json.loads(json.dumps(value)) if isinstance(value, dict) else value
+            changed = True
+        elif isinstance(value, dict):
+            current_section = config.get(key)
+            if not isinstance(current_section, dict):
                 config[key] = json.loads(json.dumps(value))
                 changed = True
             else:
                 for sub_key, sub_value in value.items():
-                    if sub_key not in current:
-                        current[sub_key] = sub_value
+                    if sub_key not in current_section:
+                        current_section[sub_key] = sub_value
                         changed = True
-        else:
-            if key not in config:
-                config[key] = value
-                changed = True
 
     if _migrate_legacy_nightscout(config):
         changed = True
@@ -689,9 +743,7 @@ def load_config() -> Dict[str, Any]:
 
 def save_config(config: Dict[str, Any]) -> None:
     """Save configuration to JSON file."""
-    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as handle:
-        json.dump(config, handle, indent=2)
+    _settings_service.save(config)
 
 # ============= SERIAL/SCALE =============
 
@@ -1362,19 +1414,247 @@ async def next_recipe_step(data: RecipeNext):
 
 # ============= SETTINGS =============
 
+class SettingsTestOpenAIRequest(BaseModel):
+    openai_api_key: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
+
+
+class SettingsTestNightscoutRequest(BaseModel):
+    nightscout_url: Optional[str] = None
+    nightscout_token: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
+
+
 @app.get("/api/settings")
 async def get_settings():
     """Get current settings"""
-    return load_config()
+    return _settings_service.get_for_client(include_secrets=False)
+
 
 @app.put("/api/settings")
-async def update_settings(settings: dict):
+async def update_settings(settings: dict, _: None = Depends(require_pin)):
     """Update settings"""
+    existing = load_config()
+    network_payload = settings.get("network")
+    if isinstance(network_payload, dict):
+        if network_payload.get("openai_api_key") == "__stored__":
+            network_payload["openai_api_key"] = existing.get("network", {}).get("openai_api_key", "")
+    diabetes_payload = settings.get("diabetes")
+    if isinstance(diabetes_payload, dict):
+        if diabetes_payload.get("nightscout_token") == "__stored__":
+            diabetes_payload["nightscout_token"] = existing.get("diabetes", {}).get("nightscout_token", "")
+    legacy_openai = settings.get("openai_api_key")
+    if legacy_openai == "__stored__":
+        settings["openai_api_key"] = existing.get("openai_api_key", "")
+    legacy_nightscout = settings.get("nightscout_token")
+    if legacy_nightscout == "__stored__":
+        settings["nightscout_token"] = existing.get("nightscout_token", "")
+
     try:
         save_config(settings)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/settings/test/openai")
+async def settings_test_openai(
+    request: Request,
+    payload: SettingsTestOpenAIRequest = Body(default_factory=SettingsTestOpenAIRequest),
+    _: None = Depends(require_pin),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        _enforce_test_rate_limit(client_ip)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"ok": False, "message": str(exc.detail)})
+
+    candidate_key = (payload.openai_api_key or "").strip() if payload else ""
+    if not candidate_key:
+        resolved = get_chatgpt_api_key()
+        candidate_key = (resolved or "").strip()
+
+    if not candidate_key:
+        return JSONResponse(status_code=400, content={"ok": False, "message": "No hay una API key configurada."})
+
+    headers = {"Authorization": f"Bearer {candidate_key}"}
+    models_url = os.getenv("OPENAI_MODELS_URL", "https://api.openai.com/v1/models")
+    response: Optional[httpx.Response] = None
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(models_url, headers=headers, params={"limit": 1})
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        message = f"OpenAI respondió con {exc.response.status_code}"
+        try:
+            error_data = exc.response.json()
+            if isinstance(error_data, dict):
+                error_info = error_data.get("error")
+                if isinstance(error_info, dict):
+                    error_message = error_info.get("message")
+                    if error_message:
+                        message = str(error_message)
+        except Exception:
+            pass
+        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "message": message})
+    except httpx.TimeoutException:
+        return JSONResponse(status_code=504, content={"ok": False, "message": "Tiempo de espera agotado al contactar OpenAI."})
+    except httpx.RequestError as exc:
+        return JSONResponse(status_code=502, content={"ok": False, "message": f"No se pudo conectar a OpenAI: {exc}"})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "message": f"Error inesperado: {exc}"})
+
+    message = "Conexión con OpenAI verificada."
+    if response is not None:
+        try:
+            data = response.json()
+            if isinstance(data, dict):
+                models = data.get("data")
+                if isinstance(models, list) and models:
+                    first = models[0]
+                    if isinstance(first, dict):
+                        model_id = first.get("id")
+                        if isinstance(model_id, str) and model_id:
+                            message = f"OpenAI disponible (ej. modelo {model_id})"
+        except Exception:
+            pass
+
+    return {"ok": True, "message": message}
+
+
+@app.post("/api/settings/test/nightscout")
+async def settings_test_nightscout(
+    request: Request,
+    payload: SettingsTestNightscoutRequest = Body(default_factory=SettingsTestNightscoutRequest),
+    _: None = Depends(require_pin),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        _enforce_test_rate_limit(client_ip)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"ok": False, "message": str(exc.detail)})
+
+    config = load_config()
+    current_url, current_token = _get_nightscout_credentials(config)
+    target_url = (payload.nightscout_url or current_url or "").strip()
+    target_token = (payload.nightscout_token or current_token or "").strip()
+
+    if not target_url:
+        return JSONResponse(status_code=400, content={"ok": False, "message": "Nightscout no está configurado."})
+
+    normalized_url = target_url.rstrip("/")
+    endpoint = f"{normalized_url}/api/v1/status.json"
+    headers = {"API-SECRET": target_token} if target_token else {}
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            response = await client.get(endpoint, headers=headers)
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        message = f"Nightscout respondió con {exc.response.status_code}"
+        try:
+            payload = exc.response.json()
+            if isinstance(payload, dict):
+                msg = payload.get("message") or payload.get("status")
+                if isinstance(msg, str) and msg:
+                    message = msg
+        except Exception:
+            pass
+        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "message": message})
+    except httpx.TimeoutException:
+        return JSONResponse(status_code=504, content={"ok": False, "message": "Nightscout no respondió a tiempo."})
+    except httpx.RequestError as exc:
+        return JSONResponse(status_code=502, content={"ok": False, "message": f"No se pudo conectar a Nightscout: {exc}"})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "message": f"Error inesperado: {exc}"})
+
+    message = "Nightscout respondió correctamente."
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            status = data.get("status") or data.get("name") or data.get("version")
+            if isinstance(status, str) and status:
+                message = f"Nightscout operativo ({status})"
+    except Exception:
+        pass
+
+    return {"ok": True, "message": message}
+
+
+@app.get("/api/settings/health")
+async def settings_health():
+    path = CONFIG_PATH
+    path_str = str(path)
+    can_read = False
+    can_write = False
+    message_parts: List[str] = []
+
+    owner = "desconocido"
+    mode = "---"
+
+    try:
+        stat_result = path.stat()
+        mode = f"{stat.S_IMODE(stat_result.st_mode):03o}"
+        try:
+            user = pwd.getpwuid(stat_result.st_uid).pw_name
+        except KeyError:
+            user = str(stat_result.st_uid)
+        try:
+            group = grp.getgrgid(stat_result.st_gid).gr_name
+        except KeyError:
+            group = str(stat_result.st_gid)
+        owner = f"{user}:{group}"
+    except FileNotFoundError:
+        message_parts.append("El archivo de configuración no existe.")
+    except Exception as exc:
+        message_parts.append(f"No se pudo obtener metadatos: {exc}")
+    else:
+        try:
+            with path.open("r", encoding="utf-8"):
+                pass
+            can_read = True
+        except Exception as exc:
+            message_parts.append(f"No se pudo leer: {exc}")
+
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        rename_path = path.with_name(f"{path.name}.tmp.check")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                handle.write("{}")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, rename_path)
+            os.remove(rename_path)
+            can_write = True
+        except Exception as exc:
+            message_parts.append(f"No se pudo escribir: {exc}")
+        finally:
+            for leftover in (tmp_path, rename_path):
+                try:
+                    if leftover.exists():
+                        leftover.unlink()
+                except Exception:
+                    pass
+
+    ok = can_read and can_write
+    message = " ".join(message_parts).strip() or "OK"
+
+    return {
+        "ok": ok,
+        "can_read": can_read,
+        "can_write": can_write,
+        "path": path_str,
+        "owner": owner,
+        "mode": mode,
+        "message": message,
+    }
+
 
 # ============= NETWORK MANAGEMENT =============
 
