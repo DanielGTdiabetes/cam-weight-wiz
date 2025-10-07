@@ -12,13 +12,14 @@ from backend.miniweb import _determine_effective_mode
 @pytest.mark.parametrize(
     "ethernet_connected,wifi_connected,internet_available,offline_mode_enabled,expected",
     [
-        (True, False, False, True, "offline"),
         (True, False, True, True, "kiosk"),
         (True, False, True, False, "kiosk"),
-        (False, True, False, True, "offline"),
-        (False, True, False, False, "kiosk"),
+        (True, False, False, True, "offline"),
+        (True, False, False, False, "offline"),
         (False, True, True, True, "kiosk"),
         (False, True, True, False, "kiosk"),
+        (False, True, False, True, "offline"),
+        (False, True, False, False, "offline"),
         (False, False, False, True, "offline"),
         (False, False, False, False, "ap"),
     ],

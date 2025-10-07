@@ -198,6 +198,9 @@ export const SettingsView = () => {
   const [backendNightscoutHasToken, setBackendNightscoutHasToken] = useState(false);
   const [otaStatus, setOtaStatus] = useState<OtaStatus | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+
+  const effectiveNetworkIp = networkIP2 && networkIP2 !== "—" ? networkIP2 : networkIP;
+  const configUrlHint = effectiveNetworkIp ? `http://${effectiveNetworkIp}/config` : "http://<IP_de_la_báscula>/config";
   const [otaJobState, setOtaJobState] = useState<OtaJobState | null>(null);
   const [otaLogs, setOtaLogs] = useState("");
   const [otaPanelOpen, setOtaPanelOpen] = useState(false);
@@ -2262,6 +2265,13 @@ export const SettingsView = () => {
                   <p className="text-lg font-medium">{networkSSID}</p>
                   <p className="text-sm text-muted-foreground">{networkIP2}</p>
                 </div>
+              </div>
+
+              <div className="rounded-lg border border-primary/40 bg-primary/5 p-4">
+                <p className="text-sm text-muted-foreground">
+                  También puedes configurar Wi-Fi y claves desde otro dispositivo navegando a{' '}
+                  <span className="font-mono font-semibold text-primary">{configUrlHint}</span>.
+                </p>
               </div>
 
               {isApRecoveryMode && (

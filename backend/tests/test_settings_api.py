@@ -2,6 +2,7 @@ import json
 import sys
 from copy import deepcopy
 from pathlib import Path
+from typing import Tuple
 
 import pytest
 
@@ -64,6 +65,16 @@ def apply_updates(service: SettingsService, payload: dict) -> None:
     _deep_merge_dict(merged, normalized)
     _synchronize_secret_aliases(merged)
     service._save_atomic(merged)
+
+
+def _prepare_api_state(tmp_path: Path, monkeypatch) -> Tuple[SettingsService, Path]:
+    config_path = tmp_path / "config.json"
+    service = SettingsService(config_path)
+    monkeypatch.setattr("backend.main.CONFIG_PATH", config_path)
+    monkeypatch.setattr("backend.main._settings_service", service)
+    pin_path = tmp_path / "miniweb_pin"
+    monkeypatch.setattr("backend.main.PIN_PATH", pin_path)
+    return service, pin_path
 
 
 def test_legacy_payload_is_normalized(settings_service):
@@ -166,3 +177,30 @@ def test_put_settings_is_not_allowed(api_client):
     allow = response.headers.get("allow", "")
     assert "POST" in allow
     assert "PUT" not in allow
+
+
+def test_post_settings_requires_pin_for_remote(api_client, tmp_path: Path, monkeypatch):
+    _prepare_api_state(tmp_path, monkeypatch)
+
+    response = api_client.post("/api/settings", json={"ui": {"offline_mode": True}})
+
+    assert response.status_code == 401
+    assert response.json().get("detail") == "PIN requerido"
+
+
+def test_post_settings_accepts_valid_pin(api_client, tmp_path: Path, monkeypatch):
+    service, pin_path = _prepare_api_state(tmp_path, monkeypatch)
+    pin_path.write_text("1234", encoding="utf-8")
+
+    response = api_client.post(
+        "/api/settings",
+        json={"ui": {"offline_mode": True}},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload.get("ui", {}).get("offline_mode") is True
+
+    stored = service.load()
+    assert stored.ui.offline_mode is True
