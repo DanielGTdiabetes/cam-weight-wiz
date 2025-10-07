@@ -425,6 +425,7 @@ def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(raw_flags, dict):
         for key, value in raw_flags.items():
             flags[str(key)] = bool(value)
+    offline_mode = _resolve_offline_mode(config)
 
     tts_cfg = config.get("tts") if isinstance(config.get("tts"), dict) else {}
     scale_cfg = config.get("scale") if isinstance(config.get("scale"), dict) else {}
@@ -437,7 +438,7 @@ def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         serial_baud_int = DEFAULT_SERIAL_BAUD
 
     try:
-        network_status = _get_wifi_status()
+        network_status = _get_wifi_status(config)
     except Exception as exc:
         LOG_NETWORK.debug("No se pudo obtener estado de red: %s", exc)
         network_status = None
@@ -453,7 +454,7 @@ def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
         integrations = {}
 
     return {
-        "ui": {"flags": flags},
+        "ui": {"flags": flags, "offline_mode": offline_mode},
         "tts": tts_cfg,
         "scale": scale_cfg,
         "serial": {"device": serial_device, "baud": serial_baud_int},
@@ -497,6 +498,11 @@ def _default_config() -> Dict[str, Any]:
         "diabetes": {
             "ns_url": "",
             "ns_token": "",
+        },
+        "ui": {
+            "flags": {},
+            "offline_mode": False,
+            "sound_enabled": True,
         },
     }
 
@@ -1450,6 +1456,18 @@ def _emit_net_event(event_type: str, payload: Dict[str, Any] | None = None) -> N
         except RuntimeError:
             with _net_event_lock:
                 _net_event_subscribers.pop(key, None)
+
+
+def _emit_network_status_update(config: Optional[Dict[str, Any]] | None = None) -> None:
+    try:
+        status = _get_wifi_status(config)
+    except PermissionError:
+        return
+    except Exception as exc:
+        LOG_NETWORK.debug("No se pudo obtener el estado de red para SSE: %s", exc)
+        return
+
+    _emit_net_event("status", status)
 
 
 async def _run_command_ignore_errors(*cmd: str, timeout: float | None = None) -> None:
@@ -2997,7 +3015,46 @@ def _current_wifi_ssid() -> Optional[str]:
     return None
 
 
-def _get_wifi_status() -> Dict[str, Any]:
+def _resolve_offline_mode(config: Optional[Dict[str, Any]] | None = None) -> bool:
+    source: Dict[str, Any] = {}
+    if isinstance(config, dict):
+        source = config
+    else:
+        try:
+            source = _load_config()
+        except Exception:
+            source = {}
+
+    ui_cfg = source.get("ui")
+    if isinstance(ui_cfg, dict):
+        offline_value = ui_cfg.get("offline_mode")
+        if isinstance(offline_value, bool):
+            return offline_value
+        if isinstance(offline_value, (int, float)):
+            return bool(offline_value)
+        if isinstance(offline_value, str):
+            normalized = offline_value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+
+    legacy_value = source.get("offline_mode")
+    if isinstance(legacy_value, bool):
+        return legacy_value
+    if isinstance(legacy_value, (int, float)):
+        return bool(legacy_value)
+    if isinstance(legacy_value, str):
+        normalized = legacy_value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+
+    return False
+
+
+def _get_wifi_status(config: Optional[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     ap_active = _nm_active_ap()
     connectivity = _nm_connectivity()
     saved_wifi_profiles = _nm_has_saved_wifi_profiles()
@@ -3091,18 +3148,25 @@ def _get_wifi_status() -> Dict[str, Any]:
     internet_available = connectivity == "full"
     ethernet_has_ip = bool(eth_ip and ethernet_active)
 
-    if ap_service_active:
-        mode = "ap"
-    elif wifi_ip or ethernet_has_ip:
-        mode = "kiosk"
+    offline_mode_enabled = _resolve_offline_mode(config)
+
+    has_network_connectivity = bool(wifi_ip or ethernet_has_ip)
+
+    if has_network_connectivity:
+        effective_mode = "kiosk"
+    elif offline_mode_enabled:
+        effective_mode = "offline"
     else:
-        mode = "ap"
+        effective_mode = "ap"
+
+    mode = effective_mode
 
     should_activate_ap = ap_active and not ethernet_active
 
     status: Dict[str, Any] = {
         "ok": True,
         "mode": mode,
+        "effective_mode": effective_mode,
         "wifi": {
             "connected": wifi_connected,
             "ssid": ssid,
@@ -3121,6 +3185,7 @@ def _get_wifi_status() -> Dict[str, Any]:
         "saved_wifi_profiles": saved_wifi_profiles,
         "internet": internet_available,
         "online": bool(internet_available or wifi_connected or ethernet_has_ip),
+        "offline_mode": offline_mode_enabled,
     }
 
     if ap_service_active is not None:
@@ -3699,6 +3764,9 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
     updates: Dict[str, Any] = {}
     changed_sections: Set[str] = set()
     change_metadata: Dict[str, Any] = {}
+    changed = False
+    previous_offline_mode = _resolve_offline_mode(config)
+    offline_mode_changed = False
 
     if payload.openai is not None:
         api_key = (payload.openai.apiKey or "").strip()
@@ -3706,7 +3774,8 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
         if current_key != api_key:
             changed_sections.add("openai")
             change_metadata["openai_has_key"] = bool(api_key)
-        
+            changed = True
+
         # Update in new structure
         if "network" not in updates:
             updates["network"] = config.get("network", {})
@@ -3752,6 +3821,7 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
             changed_sections.add("nightscout")
             change_metadata["nightscout_url"] = url
             change_metadata["nightscout_has_token"] = bool(token)
+            changed = True
 
         # Update in new structure
         if "diabetes" not in updates:
@@ -3810,13 +3880,32 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
             for key, value in payload.ui.items():
                 if key == "flags":
                     continue
+                if key == "offline_mode":
+                    if isinstance(value, bool):
+                        normalized_offline = value
+                    elif isinstance(value, (int, float)):
+                        normalized_offline = bool(value)
+                    elif isinstance(value, str):
+                        normalized_offline = value.strip().lower() in {"1", "true", "yes", "on"}
+                    else:
+                        normalized_offline = False
+                    if ui_cfg.get("offline_mode") != normalized_offline:
+                        section_changed = True
+                        if normalized_offline != previous_offline_mode:
+                            change_metadata["offline_mode"] = normalized_offline
+                        offline_mode_changed = offline_mode_changed or (
+                            normalized_offline != previous_offline_mode
+                        )
+                    ui_cfg["offline_mode"] = normalized_offline
+                    continue
                 if ui_cfg.get(key) != value:
                     section_changed = True
                 ui_cfg[key] = value
-        
+
         if section_changed:
             changed_sections.add("ui")
             updates["ui"] = ui_cfg
+            changed = True
         config["ui"] = ui_cfg
 
     if payload.tts and isinstance(payload.tts, dict):
@@ -3880,6 +3969,8 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
 
     if changed:
         _save_json(CONFIG_PATH, config)
+        if offline_mode_changed:
+            _emit_network_status_update(config)
         _apply_settings_changes(list(changed_sections), **change_metadata)
         
         # Broadcast cambios via WebSocket (fire and forget)
@@ -4359,6 +4450,7 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
         raise
     finally:
         _LAST_WIFI_CONNECT_REQUEST = None
+        _emit_network_status_update()
 
 
 @app.post("/api/miniweb/connect")

@@ -41,6 +41,7 @@ class SettingsSchema(BaseModel):
     class UiSettings(BaseModel):
         sound_enabled: bool = True
         flags: Dict[str, bool] = Field(default_factory=dict)
+        offline_mode: bool = False
     
     class ScaleSettings(BaseModel):
         calibration_factor: float = 1.0

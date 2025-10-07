@@ -281,24 +281,25 @@ export const APModeScreen = () => {
       };
 
       try {
-        const networkStatus = await api.getNetworkStatus();
-        if (!cancelled) {
-          const wifiConnected = Boolean(networkStatus?.wifi_client?.connected && networkStatus?.wifi_client?.ip);
-          const ethernetConnected = Boolean(networkStatus?.ethernet?.carrier && networkStatus?.ethernet?.ip);
-          const onlineFlag = typeof networkStatus?.online === "boolean" ? networkStatus.online : false;
-          if ((wifiConnected || ethernetConnected || onlineFlag) && !redirectRef.current) {
+        const status = await api.miniwebStatus();
+        const rawMode =
+          typeof status?.effective_mode === "string"
+            ? status.effective_mode.trim().toLowerCase()
+            : typeof status?.mode === "string"
+              ? status.mode.trim().toLowerCase()
+              : null;
+        if (!cancelled && !redirectRef.current) {
+          if (rawMode === "kiosk") {
             handleOnlineRedirect();
             return;
           }
-        }
-      } catch (error) {
-        logger.debug("Fallo al consultar estado de red", { error });
-      }
-
-      try {
-        const status = await api.miniwebStatus();
-        if (!cancelled && status?.mode === "kiosk" && !redirectRef.current) {
-          handleOnlineRedirect();
+          if (rawMode === "offline") {
+            redirectRef.current = true;
+            const base = resolveAppBaseUrl().replace(/\/+$/, "");
+            const target = `${base}/offline`;
+            window.location.replace(target);
+            return;
+          }
         }
       } catch (error) {
         logger.debug("Fallo al consultar miniweb status durante polling", { error });
@@ -358,8 +359,8 @@ export const APModeScreen = () => {
           const status = await response.json();
           if (
             status?.ap_active === false &&
-            typeof status?.connectivity === "string" &&
-            status.connectivity.toLowerCase() === "full"
+            typeof status?.effective_mode === "string" &&
+            status.effective_mode.toLowerCase() === "kiosk"
           ) {
             const ssid = typeof status.ssid === "string" && status.ssid ? status.ssid : "tu red WiFi";
             const ip =
@@ -416,16 +417,16 @@ export const APModeScreen = () => {
               <Wifi className="h-20 w-20 text-primary" />
             </div>
           </div>
-          <h1 className="mb-4 text-4xl font-bold">Modo Punto de Acceso</h1>
-          <div className="space-y-1 text-muted-foreground">
-            <p className="text-xl">
-              Conéctate a la Wi-Fi «<strong>{displaySsid}</strong>».
+          <h1 className="mb-4 text-4xl font-bold">Conéctate a «{displaySsid}»</h1>
+          <div className="space-y-2 text-muted-foreground">
+            <p className="text-lg">
+              Usa tu móvil, tablet o PC para conectarte a la red Wi-Fi creada por la báscula.
             </p>
             <p className="text-lg">
-              Abre: <strong>{displayConfigUrl}</strong>
+              Después abre <strong>{displayConfigUrl}</strong> y escribe el PIN mostrado en esta pantalla.
             </p>
             <p className="text-sm">
-              Nota: {displayBaseUrl} abre la app; para configurar usa /config.
+              Consejo: la app principal se abre en {displayBaseUrl}; la configuración siempre está en /config.
             </p>
           </div>
         </div>
@@ -500,7 +501,7 @@ export const APModeScreen = () => {
                   3
                 </span>
                 <p>
-                  Abre: <strong>{displayConfigUrl}</strong>
+                  En tu navegador visita <strong>{displayConfigUrl}</strong>
                 </p>
               </li>
               <li className="flex gap-3">
@@ -508,8 +509,7 @@ export const APModeScreen = () => {
                   4
                 </span>
                 <p>
-                  Introduce el PIN <strong>{miniWebPin ?? "mostrado en esta pantalla"}</strong> y
-                  configura tu red WiFi desde la mini-web de configuración
+                  Introduce el PIN <strong>{miniWebPin ?? "mostrado en esta pantalla"}</strong> y configura tu Wi-Fi desde la mini-web
                 </p>
               </li>
             </ol>
@@ -543,7 +543,7 @@ export const APModeScreen = () => {
           <div className="grid gap-3 sm:grid-cols-2">
             <Button onClick={handleOpenMiniWeb} variant="glow" size="xl" className="w-full text-xl">
               <ExternalLink className="mr-2 h-6 w-6" />
-              Abrir Mini-Web de Configuración
+              Ir a Configuración
             </Button>
             <Button onClick={handleReturnToApp} variant="outline" size="xl" className="w-full text-xl">
               <Home className="mr-2 h-6 w-6" />
