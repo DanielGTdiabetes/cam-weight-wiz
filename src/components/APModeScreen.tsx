@@ -7,8 +7,7 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
-  ExternalLink,
-  Home,
+  WifiOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -43,6 +42,7 @@ export const APModeScreen = () => {
     ip?: string;
   }>({ status: "idle" });
   const [toastState, setToastState] = useState<{ type: "success" | "error"; msg: string } | null>(null);
+  const [startingOffline, setStartingOffline] = useState(false);
   const redirectRef = useRef(false);
 
   const resolveAppBaseUrl = useCallback(() => {
@@ -318,19 +318,6 @@ export const APModeScreen = () => {
     };
   }, [redirectRef, resolveAppBaseUrl]);
 
-  const handleOpenMiniWeb = () => {
-    window.location.href = "/config";
-  };
-
-  const handleReturnToApp = () => {
-    if (window.history.length > 1) {
-      window.history.back();
-      return;
-    }
-
-    window.location.href = "/";
-  };
-
   const effectiveApInfo = apInfo ?? DEFAULT_AP_INFO;
   const configPathRaw =
     typeof effectiveApInfo.configPath === "string" && effectiveApInfo.configPath.trim()
@@ -343,8 +330,62 @@ export const APModeScreen = () => {
   const configUrl = `${baseUrl}${normalizedConfigPath}`;
   const displaySsid = apInfoLoading ? "Cargando…" : effectiveApInfo.ssid;
   const defaultBaseUrl = `http://${DEFAULT_AP_INFO.ip}:${DEFAULT_AP_INFO.httpPort}`;
-  const displayBaseUrl = apInfoLoading ? defaultBaseUrl : baseUrl;
   const displayConfigUrl = apInfoLoading ? `${defaultBaseUrl}${normalizedConfigPath}` : configUrl;
+
+  const parseResponseMessage = async (response: Response): Promise<string> => {
+    try {
+      const data = (await response.json()) as {
+        detail?: unknown;
+        message?: unknown;
+      };
+      if (typeof data?.detail === "string" && data.detail.trim()) {
+        return data.detail.trim();
+      }
+      if (typeof data?.message === "string" && data.message.trim()) {
+        return data.message.trim();
+      }
+    } catch (error) {
+      logger.debug("No se pudo interpretar la respuesta del backend", { error });
+    }
+    return `Error ${response.status}`;
+  };
+
+  const handleStartOffline = async () => {
+    if (startingOffline) {
+      return;
+    }
+    setStartingOffline(true);
+    setToastState(null);
+    try {
+      const response = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ui: { offline_mode: true } }),
+      });
+      if (!response.ok) {
+        const message = await parseResponseMessage(response);
+        throw new Error(message);
+      }
+
+      setToastState({
+        type: "success",
+        msg: "Modo offline activado. Abriendo la app sin conexión…",
+      });
+
+      redirectRef.current = true;
+      const base = resolveAppBaseUrl().replace(/\/+$/, "");
+      window.location.replace(`${base}/offline`);
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message
+          ? error.message
+          : "No se pudo activar el modo offline.";
+      logger.error("No se pudo activar el modo offline desde la pantalla AP", { error });
+      setToastState({ type: "error", msg: message });
+    } finally {
+      setStartingOffline(false);
+    }
+  };
 
   const handleVerifyWifi = async () => {
     setVerifyState({ status: "checking" });
@@ -423,10 +464,12 @@ export const APModeScreen = () => {
               Usa tu móvil, tablet o PC para conectarte a la red Wi-Fi creada por la báscula.
             </p>
             <p className="text-lg">
-              Después abre <strong>{displayConfigUrl}</strong> y escribe el PIN mostrado en esta pantalla.
+              Después abre la mini-web de configuración usando el enlace destacado más abajo e introduce el PIN mostrado en esta
+              pantalla.
             </p>
             <p className="text-sm">
-              Consejo: la app principal se abre en {displayBaseUrl}; la configuración siempre está en /config.
+              Consejo: la app principal se abre en la dirección principal de la báscula; la configuración siempre está en la ruta{' '}
+              <span className="font-semibold">/config</span>.
             </p>
           </div>
         </div>
@@ -500,9 +543,7 @@ export const APModeScreen = () => {
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   3
                 </span>
-                <p>
-                  En tu navegador visita <strong>{displayConfigUrl}</strong>
-                </p>
+                <p>En tu navegador abre la mini-web de configuración (usa el enlace resaltado más abajo).</p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
@@ -521,35 +562,41 @@ export const APModeScreen = () => {
             <p className="text-sm text-muted-foreground">
               Escanea para abrir la mini-web de configuración
             </p>
-            <p className="mt-2 text-xs font-mono text-muted-foreground">
+            <a
+              href={displayConfigUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-2 block text-xs font-mono text-primary underline-offset-4 hover:underline"
+            >
               {displayConfigUrl}
-            </p>
+            </a>
           </div>
         </div>
 
         <div className="space-y-4">
-          <div className="rounded-lg border border-warning/40 bg-warning/10 p-4 text-left">
+          <div className="rounded-lg border border-primary/40 bg-primary/5 p-4 text-left">
             <div className="flex items-start gap-3">
-              <AlertCircle className="mt-1 h-5 w-5 text-warning" />
+              <WifiOff className="mt-1 h-5 w-5 text-primary" />
               <div className="space-y-1 text-sm">
-                <p className="font-semibold text-warning-foreground">Recuerda:</p>
-                <p className="text-warning-foreground/80">
-                  {displayBaseUrl} abre la app principal (esta pantalla). Para configurar la red usa siempre {displayConfigUrl}.
+                <p className="font-semibold text-primary">¿Sin conexión a Internet?</p>
+                <p className="text-muted-foreground">
+                  Activa el modo offline para usar la báscula y el temporizador mientras ajustas la red. Podrás volver al modo
+                  normal automáticamente cuando haya Internet.
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Button onClick={handleOpenMiniWeb} variant="glow" size="xl" className="w-full text-xl">
-              <ExternalLink className="mr-2 h-6 w-6" />
-              Ir a Configuración
-            </Button>
-            <Button onClick={handleReturnToApp} variant="outline" size="xl" className="w-full text-xl">
-              <Home className="mr-2 h-6 w-6" />
-              Salir / Volver a la app
-            </Button>
-          </div>
+          <Button
+            onClick={handleStartOffline}
+            variant="glow"
+            size="xl"
+            className="w-full text-xl"
+            disabled={startingOffline}
+          >
+            {startingOffline ? <Loader2 className="mr-2 h-6 w-6 animate-spin" /> : <WifiOff className="mr-2 h-6 w-6" />}
+            {startingOffline ? "Activando modo offline…" : "Iniciar en modo offline"}
+          </Button>
 
           <Button
             onClick={handleVerifyWifi}

@@ -3061,12 +3061,13 @@ def _determine_effective_mode(
     offline_mode_enabled: bool,
     internet_available: bool,
 ) -> str:
-    if ethernet_connected or wifi_connected:
-        if offline_mode_enabled and not internet_available:
-            return "offline"
+    if internet_available:
         return "kiosk"
 
     if offline_mode_enabled:
+        return "offline"
+
+    if ethernet_connected or wifi_connected:
         return "offline"
 
     return "ap"
