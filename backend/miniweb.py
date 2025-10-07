@@ -34,6 +34,11 @@ from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+# Settings service
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from backend.app.services.settings_service import get_settings_service
+
 HX711_IMPORT_ERROR: Optional[Exception] = None
 try:
     from backend.scale_service import HX711Service as _HX711Service  # type: ignore
@@ -73,6 +78,10 @@ DIST_DIR = BASE_DIR / "dist"
 CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
 PIN_PATH = CFG_DIR / "miniweb_pin"
 CONFIG_PATH = CFG_DIR / "config.json"
+
+# WebSocket connections for real-time sync
+_settings_ws_connections: Set[WebSocket] = set()
+_settings_ws_lock = threading.Lock()
 DEFAULT_DT_PIN = 5
 DEFAULT_SCK_PIN = 6
 DEFAULT_SAMPLE_RATE = 20.0
@@ -3653,12 +3662,14 @@ async def verify_pin(data: PinVerification, request: Request):
 
 @app.get("/api/settings")
 async def get_settings():
-    config = _load_config()
-    return _build_settings_payload(config)
+    """Get current settings without secrets"""
+    service = get_settings_service(CONFIG_PATH)
+    return service.get_for_client(include_secrets=False)
 
 
 @app.post("/api/settings")
 async def update_settings(payload: SettingsUpdatePayload, request: Request):
+    """Update settings and broadcast changes via WebSocket"""
     client_host = _extract_client_host(request)
     trusted_client = _is_trusted_client(client_host)
     requires_pin = any(
@@ -3681,8 +3692,9 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
             trusted=trusted_client,
         )
 
+    service = get_settings_service(CONFIG_PATH)
     config = _load_config()
-    changed = False
+    updates: Dict[str, Any] = {}
     changed_sections: Set[str] = set()
     change_metadata: Dict[str, Any] = {}
 
@@ -3690,11 +3702,17 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
         api_key = (payload.openai.apiKey or "").strip()
         current_key = _extract_openai_api_key(config)
         if current_key != api_key:
-            changed = True
             changed_sections.add("openai")
             change_metadata["openai_has_key"] = bool(api_key)
+        
+        # Update in new structure
+        if "network" not in updates:
+            updates["network"] = config.get("network", {})
+        updates["network"]["openai_api_key"] = api_key
+        
+        # Legacy compatibility
         config["openai_api_key"] = api_key
-        integrations = config.get("integrations")
+        integrations = config.get("integrations", {})
         if not isinstance(integrations, dict):
             integrations = {}
         integrations["openai_api_key"] = api_key
@@ -3729,48 +3747,55 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
             token = str(payload.nightscout.token or "").strip()
 
         if url != current_url or token != current_token:
-            changed = True
             changed_sections.add("nightscout")
             change_metadata["nightscout_url"] = url
             change_metadata["nightscout_has_token"] = bool(token)
 
+        # Update in new structure
+        if "diabetes" not in updates:
+            updates["diabetes"] = config.get("diabetes", {})
+        if not isinstance(updates["diabetes"], dict):
+            updates["diabetes"] = {}
+        updates["diabetes"]["nightscout_url"] = url
+        updates["diabetes"]["nightscout_token"] = token
+        updates["diabetes"]["diabetes_enabled"] = bool(url)
+
+        # Legacy compatibility
         config["nightscout_url"] = url
         config["nightscout_token"] = token
-
-        nightscout_cfg = config.get("nightscout") if isinstance(config.get("nightscout"), dict) else {}
-        if nightscout_cfg.get("url") != url:
-            nightscout_cfg["url"] = url
-        if nightscout_cfg.get("token") != token:
-            nightscout_cfg["token"] = token
+        nightscout_cfg = config.get("nightscout", {})
+        if not isinstance(nightscout_cfg, dict):
+            nightscout_cfg = {}
+        nightscout_cfg["url"] = url
+        nightscout_cfg["token"] = token
         config["nightscout"] = nightscout_cfg
-
-        diabetes = config.get("diabetes")
+        
+        diabetes = config.get("diabetes", {})
         if not isinstance(diabetes, dict):
             diabetes = {}
-        if diabetes.get("ns_url") != url:
-            diabetes["ns_url"] = url
-        if diabetes.get("ns_token") != token:
-            diabetes["ns_token"] = token
-        enabled = bool(url)
-        if diabetes.get("diabetes_enabled") != enabled:
-            diabetes["diabetes_enabled"] = enabled
+        diabetes["ns_url"] = url
+        diabetes["ns_token"] = token
+        diabetes["diabetes_enabled"] = bool(url)
         config["diabetes"] = diabetes
-
-        integrations = config.get("integrations")
+        
+        integrations = config.get("integrations", {})
         if not isinstance(integrations, dict):
             integrations = {}
-        if integrations.get("nightscout_url") != url:
-            integrations["nightscout_url"] = url
-        if integrations.get("nightscout_token") != token:
-            integrations["nightscout_token"] = token
+        integrations["nightscout_url"] = url
+        integrations["nightscout_token"] = token
         config["integrations"] = integrations
 
     if payload.ui:
-        ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+        ui_cfg = config.get("ui", {})
+        if not isinstance(ui_cfg, dict):
+            ui_cfg = {}
+        
         section_changed = False
         flags_updates = payload.ui.get("flags") if isinstance(payload.ui, dict) else None
         if isinstance(flags_updates, dict):
-            existing_flags = ui_cfg.get("flags") if isinstance(ui_cfg.get("flags"), dict) else {}
+            existing_flags = ui_cfg.get("flags", {})
+            if not isinstance(existing_flags, dict):
+                existing_flags = {}
             for key, value in flags_updates.items():
                 key_str = str(key)
                 normalized = bool(value)
@@ -3778,6 +3803,7 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
                     section_changed = True
                 existing_flags[key_str] = normalized
             ui_cfg["flags"] = existing_flags
+        
         if isinstance(payload.ui, dict):
             for key, value in payload.ui.items():
                 if key == "flags":
@@ -3785,9 +3811,10 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
                 if ui_cfg.get(key) != value:
                     section_changed = True
                 ui_cfg[key] = value
+        
         if section_changed:
-            changed = True
             changed_sections.add("ui")
+            updates["ui"] = ui_cfg
         config["ui"] = ui_cfg
 
     if payload.tts and isinstance(payload.tts, dict):
@@ -3851,7 +3878,10 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
 
     if changed:
         _save_json(CONFIG_PATH, config)
-        _apply_settings_changes(changed_sections, **change_metadata)
+        _apply_settings_changes(list(changed_sections), **change_metadata)
+        
+        # Broadcast cambios via WebSocket (fire and forget)
+        asyncio.create_task(_broadcast_settings_change(changed_sections, change_metadata))
     elif requested_fields:
         _log_settings_event(
             "settings.no_change",
@@ -3861,6 +3891,66 @@ async def update_settings(payload: SettingsUpdatePayload, request: Request):
         )
 
     return _build_settings_payload(config)
+
+
+async def _broadcast_settings_change(changed_fields: Set[str], metadata: Dict[str, Any]) -> None:
+    """Broadcast settings changes to all connected WebSocket clients"""
+    if not _settings_ws_connections:
+        return
+    
+    config = _load_config()
+    payload_data = _build_settings_payload(config)
+    version = payload_data.get("meta", {}).get("version", 0) if isinstance(payload_data.get("meta"), dict) else 0
+    
+    message = json.dumps({
+        "type": "settings.changed",
+        "version": version,
+        "fields": list(changed_fields),
+        "metadata": metadata,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    
+    disconnected: List[WebSocket] = []
+    
+    with _settings_ws_lock:
+        for ws in list(_settings_ws_connections):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                disconnected.append(ws)
+        
+        for ws in disconnected:
+            _settings_ws_connections.discard(ws)
+
+
+@app.websocket("/ws/updates")
+async def websocket_settings_updates(websocket: WebSocket):
+    """WebSocket endpoint for real-time settings synchronization"""
+    await websocket.accept()
+    
+    with _settings_ws_lock:
+        _settings_ws_connections.add(websocket)
+    
+    try:
+        config = _load_config()
+        initial_settings = _build_settings_payload(config)
+        await websocket.send_json({
+            "type": "settings.initial",
+            "data": initial_settings,
+        })
+        
+        while True:
+            try:
+                message = await websocket.receive_text()
+                if message == "ping":
+                    await websocket.send_text("pong")
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+    finally:
+        with _settings_ws_lock:
+            _settings_ws_connections.discard(websocket)
 
 
 @app.post("/api/settings/test/openai")

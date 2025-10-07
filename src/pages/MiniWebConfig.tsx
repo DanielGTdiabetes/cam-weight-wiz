@@ -23,6 +23,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
+import { useSettingsSync } from "@/hooks/useSettingsSync";
 import { isLocalClient } from "@/lib/network";
 import { logger } from "@/services/logger";
 
@@ -136,6 +137,7 @@ const parseErrorResponse = async (response: Response): Promise<string> => {
 };
 export const MiniWebConfig = () => {
   const localClient = isLocalClient();
+  useSettingsSync(); // Enable real-time settings sync
   const { toast } = useToast();
 
   const [pinInput, setPinInput] = useState("");
