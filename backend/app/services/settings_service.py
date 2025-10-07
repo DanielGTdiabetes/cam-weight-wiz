@@ -190,7 +190,7 @@ class SettingsService:
         with self._lock:
             current_data = self._load_raw()
             changed_fields: Set[str] = set()
-            
+
             # Aplicar updates y detectar cambios
             for key, value in updates.items():
                 if key == "network":
@@ -225,12 +225,16 @@ class SettingsService:
                     if current_data.get(key) != value:
                         changed_fields.add(key)
                     current_data[key] = value
-            
+
+            if not changed_fields:
+                # Nada cambió; devolver estado actual validado sin tocar disco
+                return SettingsSchema(**current_data), changed_fields
+
             # Guardar atómicamente
             self._save_atomic(current_data)
-            
-            # Recargar y validar
-            settings = self.load()
+
+            # Validar con el nuevo estado (current_data ya contiene meta actualizada)
+            settings = SettingsSchema(**current_data)
             return settings, changed_fields
     
     def get_for_client(self, include_secrets: bool = False) -> Dict[str, Any]:

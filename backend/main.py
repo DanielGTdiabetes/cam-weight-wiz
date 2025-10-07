@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from typing import Optional, Dict, Any, List, Union
+from typing import Optional, Dict, Any, List, Union, Set
 import asyncio
 import json
 import logging
@@ -35,7 +35,7 @@ from io import BytesIO
 from pathlib import Path
 import math
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timezone
 import httpx
 import re
 import threading
@@ -353,6 +353,10 @@ scale_service: Optional[ScaleServiceType] = None
 active_websockets: list[WebSocket] = []
 timer_task: Optional[asyncio.Task] = None
 timer_state = {"running": False, "remaining": 0, "total": 0}
+
+# WebSocket connections for real-time settings sync
+settings_ws_connections: Set[WebSocket] = set()
+settings_ws_lock = asyncio.Lock()
 
 
 def _coerce_int(value: Any, default: int, label: str) -> int:
@@ -1477,6 +1481,51 @@ def _deep_merge_dict(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
             target[key] = value
 
 
+def _build_settings_diff(changed_fields: Set[str], sanitized: Dict[str, Any]) -> Dict[str, Any]:
+    diff: Dict[str, Any] = {}
+    for field in changed_fields:
+        if field in sanitized:
+            diff[field] = sanitized[field]
+        else:
+            # Campo eliminado; representarlo como None para los clientes
+            diff[field] = None
+
+    if "meta" in sanitized:
+        diff["meta"] = sanitized["meta"]
+
+    return diff
+
+
+async def _broadcast_settings_change(fields: Set[str], diff: Dict[str, Any], version: int) -> None:
+    if not fields:
+        return
+
+    message = json.dumps(
+        {
+            "type": "settings.changed",
+            "version": version,
+            "fields": sorted(fields),
+            "diff": diff,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    async with settings_ws_lock:
+        if not settings_ws_connections:
+            return
+
+        disconnected: List[WebSocket] = []
+
+        for ws in list(settings_ws_connections):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                disconnected.append(ws)
+
+        for ws in disconnected:
+            settings_ws_connections.discard(ws)
+
+
 def _normalize_settings_payload(payload: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
     normalized: Dict[str, Any] = {}
 
@@ -1596,6 +1645,42 @@ def _synchronize_secret_aliases(config: Dict[str, Any]) -> None:
         config["nightscout"] = nightscout_cfg
 
 
+async def _handle_settings_update(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        existing = load_config()
+        normalized_updates = _normalize_settings_payload(payload, existing)
+
+        merged = deepcopy(existing)
+        _deep_merge_dict(merged, normalized_updates)
+        _synchronize_secret_aliases(merged)
+
+        _, changed_fields = _settings_service.save(merged)
+        sanitized = _settings_service.get_for_client(include_secrets=False)
+
+        changed_fields_set = set(changed_fields)
+        if changed_fields_set:
+            fields_for_broadcast = set(changed_fields_set)
+            if "meta" in sanitized:
+                fields_for_broadcast.add("meta")
+
+            meta = sanitized.get("meta")
+            version = 0
+            if isinstance(meta, dict):
+                try:
+                    version = int(meta.get("version") or 0)
+                except (TypeError, ValueError):
+                    version = 0
+
+            diff = _build_settings_diff(fields_for_broadcast, sanitized)
+            asyncio.create_task(_broadcast_settings_change(fields_for_broadcast, diff, version))
+
+        return sanitized
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.get("/api/settings")
 async def get_settings():
     """Get current settings"""
@@ -1603,19 +1688,41 @@ async def get_settings():
 
 
 @app.put("/api/settings")
-async def update_settings(settings: dict, _: None = Depends(require_pin)):
+async def update_settings(settings: Dict[str, Any], _: None = Depends(require_pin)):
     """Update settings"""
-    try:
-        existing = load_config()
-        normalized_updates = _normalize_settings_payload(settings, existing)
-        merged = deepcopy(existing)
-        _deep_merge_dict(merged, normalized_updates)
-        _synchronize_secret_aliases(merged)
-        save_config(merged)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+    return await _handle_settings_update(settings)
 
-    return _settings_service.get_for_client(include_secrets=False)
+
+@app.post("/api/settings")
+async def create_settings(settings: Dict[str, Any], _: None = Depends(require_pin)):
+    """Alias temporal para compatibilidad con clientes antiguos"""
+    return await _handle_settings_update(settings)
+
+
+@app.websocket("/ws/updates")
+async def websocket_settings_updates(websocket: WebSocket):
+    """Sincronización en tiempo real de configuración"""
+    await websocket.accept()
+
+    async with settings_ws_lock:
+        settings_ws_connections.add(websocket)
+
+    try:
+        initial_payload = _settings_service.get_for_client(include_secrets=False)
+        await websocket.send_json({"type": "settings.initial", "data": initial_payload})
+
+        while True:
+            try:
+                message = await websocket.receive_text()
+                if message.strip().lower() == "ping":
+                    await websocket.send_text("pong")
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+    finally:
+        async with settings_ws_lock:
+            settings_ws_connections.discard(websocket)
 
 
 @app.post("/api/settings/test/openai")
@@ -1761,70 +1868,113 @@ async def settings_test_nightscout(
 
 @app.get("/api/settings/health")
 async def settings_health():
-    path = CONFIG_PATH
-    path_str = str(path)
+    config_path = CONFIG_PATH
+    config_dir = config_path.parent
+
+    dir_exists = False
+    dir_mode = "---"
+    dir_owner = "desconocido"
+    dir_mode_ok = False
+
+    file_exists = False
+    file_mode = "---"
+    file_owner = "desconocido"
+    file_mode_ok = False
+
     can_read = False
     can_write = False
+
     message_parts: List[str] = []
 
-    owner = "desconocido"
-    mode = "---"
+    try:
+        dir_stat = config_dir.stat()
+        dir_exists = True
+        dir_mode_val = stat.S_IMODE(dir_stat.st_mode)
+        dir_mode = f"{dir_mode_val:03o}"
+        dir_mode_ok = dir_mode_val == 0o700
+        try:
+            dir_user = pwd.getpwuid(dir_stat.st_uid).pw_name
+        except KeyError:
+            dir_user = str(dir_stat.st_uid)
+        try:
+            dir_group = grp.getgrgid(dir_stat.st_gid).gr_name
+        except KeyError:
+            dir_group = str(dir_stat.st_gid)
+        dir_owner = f"{dir_user}:{dir_group}"
+    except FileNotFoundError:
+        message_parts.append("El directorio de configuración no existe.")
+    except Exception as exc:
+        message_parts.append(f"No se pudo obtener metadatos del directorio: {exc}")
 
     try:
-        stat_result = path.stat()
-        mode = f"{stat.S_IMODE(stat_result.st_mode):03o}"
+        file_stat = config_path.stat()
+        file_exists = True
+        file_mode_val = stat.S_IMODE(file_stat.st_mode)
+        file_mode = f"{file_mode_val:03o}"
+        file_mode_ok = file_mode_val == 0o600
         try:
-            user = pwd.getpwuid(stat_result.st_uid).pw_name
+            file_user = pwd.getpwuid(file_stat.st_uid).pw_name
         except KeyError:
-            user = str(stat_result.st_uid)
+            file_user = str(file_stat.st_uid)
         try:
-            group = grp.getgrgid(stat_result.st_gid).gr_name
+            file_group = grp.getgrgid(file_stat.st_gid).gr_name
         except KeyError:
-            group = str(stat_result.st_gid)
-        owner = f"{user}:{group}"
+            file_group = str(file_stat.st_gid)
+        file_owner = f"{file_user}:{file_group}"
     except FileNotFoundError:
         message_parts.append("El archivo de configuración no existe.")
     except Exception as exc:
-        message_parts.append(f"No se pudo obtener metadatos: {exc}")
-    else:
+        message_parts.append(f"No se pudo obtener metadatos del archivo: {exc}")
+
+    if file_exists:
         try:
-            with path.open("r", encoding="utf-8"):
+            with config_path.open("r", encoding="utf-8"):
                 pass
             can_read = True
         except Exception as exc:
             message_parts.append(f"No se pudo leer: {exc}")
 
-        tmp_path = path.with_name(f"{path.name}.tmp")
-        rename_path = path.with_name(f"{path.name}.tmp.check")
+    tmp_path = config_dir / f"{config_path.name}.tmp.health"
+    probe_path = config_dir / f"{config_path.name}.tmp.health.check"
+    if dir_exists:
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             with tmp_path.open("w", encoding="utf-8") as handle:
                 handle.write("{}")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_path, rename_path)
-            os.remove(rename_path)
+            os.replace(tmp_path, probe_path)
+            os.remove(probe_path)
             can_write = True
         except Exception as exc:
             message_parts.append(f"No se pudo escribir: {exc}")
         finally:
-            for leftover in (tmp_path, rename_path):
+            for candidate in (tmp_path, probe_path):
                 try:
-                    if leftover.exists():
-                        leftover.unlink()
+                    if candidate.exists():
+                        candidate.unlink()
                 except Exception:
                     pass
+    else:
+        message_parts.append("No se pudo escribir: el directorio de configuración no existe.")
 
-    ok = can_read and can_write
     message = " ".join(message_parts).strip() or "OK"
+
+    ok = can_read and can_write and dir_mode_ok and (not file_exists or file_mode_ok)
 
     return {
         "ok": ok,
         "can_read": can_read,
         "can_write": can_write,
-        "path": path_str,
-        "owner": owner,
-        "mode": mode,
+        "config_path": str(config_path),
+        "config_exists": file_exists,
+        "config_owner": file_owner,
+        "config_mode": file_mode,
+        "config_mode_ok": file_mode_ok,
+        "config_dir": str(config_dir),
+        "config_dir_exists": dir_exists,
+        "config_dir_owner": dir_owner,
+        "config_dir_mode": dir_mode,
+        "config_dir_mode_ok": dir_mode_ok,
         "message": message,
     }
 
