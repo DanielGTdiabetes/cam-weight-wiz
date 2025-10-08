@@ -204,3 +204,56 @@ def test_post_settings_accepts_valid_pin(api_client, tmp_path: Path, monkeypatch
 
     stored = service.load()
     assert stored.ui.offline_mode is True
+
+
+def test_post_settings_accepts_legacy_diabetes_payload(api_client, tmp_path: Path, monkeypatch):
+    service, pin_path = _prepare_api_state(tmp_path, monkeypatch)
+    pin_path.write_text("1234", encoding="utf-8")
+
+    response = api_client.post(
+        "/api/settings",
+        json={
+            "diabetes": {
+                "nightscout_url": "https://legacy.example",
+                "nightscout_token": "TOK123",
+                "diabetes_enabled": True,
+            }
+        },
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 200
+
+    config = read_config(service.config_path)
+    assert config.get("nightscout_url") == "https://legacy.example"
+    assert config.get("nightscout_token") == "TOK123"
+    diabetes_cfg = config.get("diabetes", {})
+    assert diabetes_cfg.get("nightscout_url") == "https://legacy.example"
+    assert diabetes_cfg.get("nightscout_token") == "TOK123"
+    assert diabetes_cfg.get("diabetes_enabled") is True
+
+
+def test_get_settings_masks_legacy_diabetes_values(api_client, tmp_path: Path, monkeypatch):
+    service, pin_path = _prepare_api_state(tmp_path, monkeypatch)
+    pin_path.write_text("1234", encoding="utf-8")
+
+    api_client.post(
+        "/api/settings",
+        json={
+            "diabetes": {
+                "nightscout_url": "https://legacy.example",
+                "nightscout_token": "TOK123",
+            }
+        },
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    response = api_client.get("/api/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    diabetes_payload = payload.get("diabetes", {})
+    assert diabetes_payload.get("nightscout_url") == "__stored__"
+    assert diabetes_payload.get("nightscout_token") == "__stored__"
+    assert payload.get("ui", {}).get("offline_mode") is False
