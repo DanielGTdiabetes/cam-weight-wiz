@@ -532,7 +532,7 @@ export const MiniWebConfig = () => {
       };
 
       if (nightscoutTokenEditedRef.current) {
-        payload.diabetes.nightscout_token = trimmedToken || undefined;
+        payload.diabetes.nightscout_token = trimmedToken === "" ? "" : trimmedToken;
       } else if (nightscoutTokenStored) {
         payload.diabetes.nightscout_token = "__stored__";
       } else if (trimmedToken) {
