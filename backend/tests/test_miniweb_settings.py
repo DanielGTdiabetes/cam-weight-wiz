@@ -1,4 +1,5 @@
 import json
+import json
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,17 @@ def test_options_settings_allows_expected_methods(miniweb_client):
     assert allow_header == "GET, POST, OPTIONS"
 
 
+def test_post_settings_requires_pin(miniweb_client):
+    client, service, _config_path = miniweb_client
+
+    response = client.post("/api/settings", json={"openai_api_key": "sk-no-pin"})
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "pin_required"}
+    stored = service.load()
+    assert stored.network.openai_api_key is None
+
+
 def test_post_settings_accepts_authorization_header(miniweb_client):
     client, service, config_path = miniweb_client
 
@@ -92,6 +104,56 @@ def test_post_settings_updates_nightscout_from_diabetes_payload(miniweb_client):
     assert loaded.diabetes.nightscout_token == "token123"
 
 
+def test_post_settings_accepts_plain_payload(miniweb_client):
+    client, service, _config_path = miniweb_client
+
+    response = client.post(
+        "/api/settings",
+        json={"openai_api_key": "sk-plain"},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload.get("openai", {}).get("hasKey") is True
+    stored = service.load()
+    assert stored.network.openai_api_key == "sk-plain"
+    assert stored.openai_api_key == "sk-plain"
+    assert stored.integrations.get("openai_api_key") == "sk-plain"
+
+
+def test_post_settings_accepts_plain_offline_mode(miniweb_client):
+    client, service, _config_path = miniweb_client
+
+    response = client.post(
+        "/api/settings",
+        json={"offline_mode": True},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 200
+    assert response.json().get("ui", {}).get("offline_mode") is True
+    stored = service.load()
+    assert stored.ui.offline_mode is True
+
+
+def test_post_settings_rejects_invalid_offline_mode(miniweb_client):
+    client, _service, _config_path = miniweb_client
+
+    response = client.post(
+        "/api/settings",
+        json={"ui": {"offline_mode": "nope"}},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, list) and detail
+    first = detail[0]
+    assert first["loc"] == ["body", "ui", "offline_mode"]
+    assert first["type"] == "type_error.bool"
+
+
 def test_post_settings_persists_to_disk(miniweb_client):
     """Verify settings are persisted using atomic write"""
     client, service, config_path = miniweb_client
@@ -117,7 +179,7 @@ def test_post_settings_updates_version_on_save(miniweb_client):
     # First save
     response1 = client.post(
         "/api/settings",
-        json={"ui": {"sound_enabled": True}},
+        json={"ui": {"sound_enabled": False}},
         headers={"Authorization": "BasculaPin 1234"},
     )
     assert response1.status_code == 200
@@ -128,15 +190,41 @@ def test_post_settings_updates_version_on_save(miniweb_client):
     # Second save
     response2 = client.post(
         "/api/settings",
-        json={"ui": {"sound_enabled": False}},
+        json={"ui": {"sound_enabled": True}},
         headers={"Authorization": "BasculaPin 1234"},
     )
     assert response2.status_code == 200
     
     loaded2 = service.load()
     version2 = loaded2.meta.version
-    
+
     assert version2 > version1
+
+
+def test_get_settings_masks_secret_values(miniweb_client):
+    client, service, _config_path = miniweb_client
+
+    service.save(
+        {
+            "network": {"openai_api_key": "sk-secret"},
+            "diabetes": {"nightscout_url": "https://mask.me", "nightscout_token": "tok-secret"},
+        }
+    )
+
+    response = client.get("/api/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload.get("network", {}).get("openai_api_key") == "__stored__"
+    assert payload.get("openai", {}).get("apiKey") == "__stored__"
+    assert payload.get("openai", {}).get("hasKey") is True
+    assert payload.get("diabetes", {}).get("nightscout_url") == "__stored__"
+    assert payload.get("diabetes", {}).get("nightscout_token") == "__stored__"
+    assert payload.get("nightscout", {}).get("url") == "__stored__"
+    assert payload.get("nightscout", {}).get("token") == "__stored__"
+    assert payload.get("nightscout", {}).get("hasToken") is True
+    assert payload.get("nightscout_url") == "__stored__"
+    assert payload.get("nightscout_token") == "__stored__"
 
 
 def test_settings_health_reports_ok(miniweb_client):
