@@ -523,15 +523,26 @@ export const MiniWebConfig = () => {
     setNightscoutSaving(true);
     setBusy("nightscout-save", true);
     try {
+      const trimmedUrl = nightscoutUrl.trim();
+      const trimmedToken = nightscoutToken.trim();
+      const payload: { diabetes: Record<string, string | undefined> } = {
+        diabetes: {
+          nightscout_url: trimmedUrl || undefined,
+        },
+      };
+
+      if (nightscoutTokenEditedRef.current) {
+        payload.diabetes.nightscout_token = trimmedToken || undefined;
+      } else if (nightscoutTokenStored) {
+        payload.diabetes.nightscout_token = "__stored__";
+      } else if (trimmedToken) {
+        payload.diabetes.nightscout_token = trimmedToken;
+      }
+
       const response = await fetch(buildUrl("/api/settings"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          diabetes: {
-            nightscout_url: nightscoutUrl.trim(),
-            nightscout_token: nightscoutToken.trim(),
-          },
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await readJson(response);
       if (!response.ok) {
@@ -555,7 +566,15 @@ export const MiniWebConfig = () => {
       setNightscoutSaving(false);
       setBusy("nightscout-save", false);
     }
-  }, [addToast, applySettingsPayload, buildUrl, nightscoutToken, nightscoutUrl, setBusy]);
+  }, [
+    addToast,
+    applySettingsPayload,
+    buildUrl,
+    nightscoutToken,
+    nightscoutTokenStored,
+    nightscoutUrl,
+    setBusy,
+  ]);
 
   const handleTestNightscout = useCallback(async () => {
     setNightscoutTesting(true);
