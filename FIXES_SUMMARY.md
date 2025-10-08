@@ -26,6 +26,10 @@
   - Version increment on save
   - Atomic write guarantees
 
+### 4. Hotfix: LAN PIN bypass flag (backend/miniweb.py)
+- Añadida la variable de entorno `BASCULA_PIN_REQUIRED` (por defecto `true`) para permitir desactivar temporalmente la exigencia de PIN en la miniweb cuando el acceso proviene de la LAN.
+- Se registra en los logs cuando el bypass está activo para facilitar auditorías: `settings: pin bypass enabled for LAN via BASCULA_PIN_REQUIRED=false`.
+
 ## Frontend Changes
 
 ### 4. Fixed Build Errors (src/pages/SettingsView.tsx)
