@@ -29,11 +29,35 @@ class ApiWrapper {
 
   constructor() {
     const settings = storage.getSettings();
-    this.baseUrl = settings.apiUrl;
+    this.baseUrl = this.normalizeBaseUrl(settings.apiUrl);
+  }
+
+  private normalizeBaseUrl(url: string): string {
+    try {
+      // Prefer current origin when running in a browser and url is empty/localhost
+      if (typeof window !== 'undefined' && window.location?.origin) {
+        const origin = window.location.origin.replace(/\/$/, '');
+        if (!url || /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?$/i.test(url)) {
+          return origin;
+        }
+        // Validate URL; fallback to origin if invalid
+        try {
+          // Throws if invalid
+          // eslint-disable-next-line no-new
+          new URL(url);
+          return url.replace(/\/$/, '');
+        } catch {
+          return origin;
+        }
+      }
+      return url;
+    } catch {
+      return url;
+    }
   }
 
   updateBaseUrl(url: string) {
-    this.baseUrl = url;
+    this.baseUrl = this.normalizeBaseUrl(url);
   }
 
   getBaseUrl(): string {

@@ -6,7 +6,15 @@ import { storage } from '@/services/storage';
 import type { AppSettingsUpdate } from '@/services/storage';
 import { logger } from '@/services/logger';
 
-const WS_BASE_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8080";
+const WS_BASE_URL = (() => {
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    const loc = window.location;
+    const scheme = loc.protocol === 'https:' ? 'wss' : 'ws';
+    return `${scheme}://${loc.host}`;
+  }
+  return import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8080";
+})();
+
 const RECONNECT_DELAY = 3000;
 const PING_INTERVAL = 30000;
 
