@@ -1,5 +1,5 @@
 // Se sustituye en build por install-all.sh
-const CACHE_VERSION = "v0.0.1-f20afcf";
+const CACHE_VERSION = "v0.0.1-bfcc16b";
 const STATIC_CACHE = `bascula-static-${CACHE_VERSION}`;
 const PRECACHE_ASSETS = [
   '/manifest.json',
