@@ -208,6 +208,7 @@ export const MiniWebConfig = () => {
           message: "Ingresa el PIN mostrado en la pantalla de la báscula para autorizar cambios remotos.",
         },
   );
+  const [authorizedPin, setAuthorizedPin] = useState<string | null>(null);
 
   const [networks, setNetworks] = useState<WifiNetwork[]>([]);
   const [scanningNetworks, setScanningNetworks] = useState(false);
@@ -255,6 +256,48 @@ export const MiniWebConfig = () => {
 
   const [healthStatus, setHealthStatus] = useState<HealthState>({ ok: false, message: "Sin comprobar", timestamp: null });
   const redirectTimerRef = useRef<number | null>(null);
+
+  const getAuthorizationHeader = useCallback(
+    (pinOverride?: string): string | undefined => {
+      if (localClient) {
+        return undefined;
+      }
+
+      if (!pinVerified && !pinOverride) {
+        return undefined;
+      }
+
+      const candidate = (pinOverride ?? authorizedPin ?? pinInput).trim();
+      if (!candidate) {
+        return undefined;
+      }
+
+      return `BasculaPin ${candidate}`;
+    },
+    [authorizedPin, localClient, pinInput, pinVerified],
+  );
+
+  const authorizedFetch = useCallback(
+    async (input: RequestInfo | URL, init?: RequestInit, pinOverride?: string) => {
+      const headers = new Headers(init?.headers ?? {});
+      const authHeader = getAuthorizationHeader(pinOverride);
+      if (authHeader) {
+        headers.set("Authorization", authHeader);
+      }
+
+      const finalInit: RequestInit = {
+        ...init,
+        headers,
+      };
+
+      if (finalInit.cache === undefined) {
+        finalInit.cache = "no-store";
+      }
+
+      return fetch(input, finalInit);
+    },
+    [getAuthorizationHeader],
+  );
 
   const openKeyboardDialog = useCallback(
     (config: KeyboardConfigState, initialValue: string) => {
@@ -317,7 +360,10 @@ export const MiniWebConfig = () => {
       }
 
       const trimmed = pinInput.trim();
-      if (!trimmed) {
+      const stored = (authorizedPin ?? "").trim();
+      const candidate = trimmed || stored;
+
+      if (!candidate) {
         const message = `Ingresa el PIN mostrado en la báscula para ${context}.`;
         setPinFeedback({ type: "error", message });
         toast({ title: "PIN requerido", description: message, variant: "destructive" });
@@ -331,15 +377,15 @@ export const MiniWebConfig = () => {
         return { allowed: false };
       }
 
-      return { allowed: true, pin: trimmed };
+      return { allowed: true, pin: candidate };
     },
-    [localClient, pinInput, pinVerified, toast],
+    [authorizedPin, localClient, pinInput, pinVerified, toast],
   );
 
   const refreshStatus = useCallback(async () => {
     setStatusLoading(true);
     try {
-      const response = await fetch("/api/miniweb/status", { cache: "no-store" });
+      const response = await authorizedFetch("/api/miniweb/status");
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -359,12 +405,12 @@ export const MiniWebConfig = () => {
     } finally {
       setStatusLoading(false);
     }
-  }, [networkSelectionLocked, networkStatus]);
+  }, [authorizedFetch, networkSelectionLocked, networkStatus]);
 
   const refreshNetworks = useCallback(async () => {
     setScanningNetworks(true);
     try {
-      const response = await fetch("/api/miniweb/scan-networks", { cache: "no-store" });
+      const response = await authorizedFetch("/api/miniweb/scan-networks");
       if (!response.ok) {
         const message = await parseErrorResponse(response);
         throw new Error(message);
@@ -390,14 +436,16 @@ export const MiniWebConfig = () => {
     } finally {
       setScanningNetworks(false);
     }
-  }, [networkSelectionLocked, toast]);
+  }, [authorizedFetch, networkSelectionLocked, toast]);
 
-  const refreshSettings = useCallback(async () => {
-    try {
-      const response = await fetch("/api/settings", { cache: "no-store" });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+  const refreshSettings = useCallback(
+    async (pinOverride?: string) => {
+      try {
+        const response = await authorizedFetch("/api/settings", undefined, pinOverride);
+        if (!response.ok) {
+          const message = await parseErrorResponse(response);
+          throw new Error(message);
+        }
       const data = (await response.json()) as Record<string, unknown>;
       const networkData = data.network as { openai_api_key?: string | null; status?: Record<string, unknown> } | undefined;
       const openaiValue = typeof networkData?.openai_api_key === "string"
@@ -447,19 +495,42 @@ export const MiniWebConfig = () => {
           }
         }
       }
-    } catch (error) {
-      logger.debug("No se pudieron cargar los ajustes desde el backend", { error });
-      toast({
-        title: "Error al cargar ajustes",
-        description: "No se pudieron obtener las integraciones actuales.",
-        variant: "destructive",
-      });
-    }
-  }, [networkSelectionLocked, toast]);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        logger.debug("No se pudieron cargar los ajustes desde el backend", {
+          error: error instanceof Error ? error.message : error,
+        });
+
+        if (!localClient && (message === "pin_required" || message === "pin_invalid")) {
+          if (message === "pin_invalid") {
+            setPinFeedback({
+              type: "error",
+              message: "El PIN ya no es válido. Vuelve a ingresarlo para continuar.",
+            });
+            setPinVerified(false);
+            setAuthorizedPin(null);
+          } else {
+            setPinFeedback({
+              type: "info",
+              message: "Ingresa y verifica el PIN mostrado en la báscula para ver la configuración actual.",
+            });
+          }
+          return;
+        }
+
+        toast({
+          title: "Error al cargar ajustes",
+          description: "No se pudieron obtener las integraciones actuales.",
+          variant: "destructive",
+        });
+      }
+    },
+    [authorizedFetch, localClient, networkSelectionLocked, toast],
+  );
 
   const refreshHealth = useCallback(async () => {
     try {
-      const response = await fetch("/api/settings/health", { cache: "no-store" });
+      const response = await authorizedFetch("/api/settings/health");
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
       }
@@ -479,12 +550,13 @@ export const MiniWebConfig = () => {
       logger.debug("No se pudo comprobar la salud del backend", { error });
       setHealthStatus({ ok: false, message: "No se pudo contactar con el backend", timestamp: new Date() });
     }
-  }, []);
+  }, [authorizedFetch]);
 
   useEffect(() => {
     if (!localClient) {
       setDisplayPin(null);
       setPinVerified(false);
+      setAuthorizedPin(null);
       setPinFeedback({
         type: "info",
         message: "Ingresa el PIN mostrado en la pantalla de la báscula para realizar cambios remotos.",
@@ -495,6 +567,7 @@ export const MiniWebConfig = () => {
     let cancelled = false;
     setPinVerified(true);
     setPinFeedback(null);
+    setAuthorizedPin(null);
 
     const fetchPin = async () => {
       try {
@@ -690,8 +763,10 @@ export const MiniWebConfig = () => {
 
       if (response.ok) {
         setPinVerified(true);
+        setAuthorizedPin(candidate);
         setPinFeedback({ type: "success", message: "PIN verificado correctamente." });
         toast({ title: "PIN verificado", description: "Ya puedes realizar cambios remotos." });
+        void refreshSettings(candidate);
         return;
       }
 
@@ -700,6 +775,7 @@ export const MiniWebConfig = () => {
         setPinFeedback({ type: "error", message });
         toast({ title: "PIN bloqueado temporalmente", description: message, variant: "destructive" });
         setPinVerified(false);
+        setAuthorizedPin(null);
         return;
       }
 
@@ -707,12 +783,14 @@ export const MiniWebConfig = () => {
       setPinFeedback({ type: "error", message });
       toast({ title: "PIN incorrecto", description: message, variant: "destructive" });
       setPinVerified(false);
+      setAuthorizedPin(null);
     } catch (error) {
       logger.error("No se pudo verificar el PIN de la mini-web", { error });
       const message = "No se pudo verificar el PIN. Revisa la conexión.";
       setPinFeedback({ type: "error", message });
       toast({ title: "Error de conexión", description: message, variant: "destructive" });
       setPinVerified(false);
+      setAuthorizedPin(null);
     } finally {
       setVerifyingPin(false);
     }
@@ -1168,6 +1246,7 @@ export const MiniWebConfig = () => {
                       const digits = event.target.value.replace(/[^0-9]/g, "");
                       setPinInput(digits);
                       setPinVerified(false);
+                      setAuthorizedPin(null);
                       setPinFeedback(null);
                     }}
                     placeholder="PIN de la báscula"
