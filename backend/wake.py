@@ -44,11 +44,10 @@ LOG_WAKE = logging.getLogger("bascula.wake")
 
 DEFAULT_MIC_DEVICE = "hw:0,0"
 MIC_DEVICE_ENV = "BASCULA_MIC_DEVICE"
+SAMPLE_RATE_ENV = "BASCULA_SAMPLE_RATE"
 
-SAMPLE_RATE = 44_100
+DEFAULT_SAMPLE_RATE = 16_000
 FRAME_DURATION = 0.02
-FRAME_SAMPLES = max(1, int(SAMPLE_RATE * FRAME_DURATION))
-FRAME_BYTES = FRAME_SAMPLES * 2
 BUFFER_SECONDS = 8.0
 PRE_WAKE_SECONDS = 1.0
 POST_WAKE_SECONDS = 4.0
@@ -96,6 +95,46 @@ NUMBER_WORDS: Dict[str, float] = {
 _STOP_WORDS = {"y", "con", "de", "la", "el"}
 
 
+def _compute_frame_samples(sample_rate: int) -> int:
+    return max(1, int(sample_rate * FRAME_DURATION))
+
+
+def _read_configured_sample_rate() -> int:
+    value = os.getenv(SAMPLE_RATE_ENV)
+    if value is None:
+        return DEFAULT_SAMPLE_RATE
+    value = value.strip()
+    if not value:
+        return DEFAULT_SAMPLE_RATE
+    try:
+        sample_rate = int(value)
+    except ValueError:
+        LOG_WAKE.warning(
+            "[wake] Valor inválido para %s=%r; usando %d Hz",
+            SAMPLE_RATE_ENV,
+            value,
+            DEFAULT_SAMPLE_RATE,
+        )
+        return DEFAULT_SAMPLE_RATE
+    if sample_rate <= 0:
+        LOG_WAKE.warning(
+            "[wake] Valor inválido para %s=%r; usando %d Hz",
+            SAMPLE_RATE_ENV,
+            value,
+            DEFAULT_SAMPLE_RATE,
+        )
+        return DEFAULT_SAMPLE_RATE
+    return sample_rate
+
+
+def _format_sample_rate(sample_rate: int) -> str:
+    if sample_rate >= 1000:
+        if sample_rate % 1000 == 0:
+            return f"{sample_rate // 1000} kHz"
+        return f"{sample_rate / 1000:g} kHz"
+    return f"{sample_rate} Hz"
+
+
 class WakeSimulatePayload(BaseModel):
     text: str
 
@@ -127,6 +166,11 @@ class WakeListener:
         self._mic_preflight_ok: Optional[bool] = None
         self._audio_failure_reported = False
         self._last_audio_failure_reason: Optional[str] = None
+        self._configured_sample_rate = _read_configured_sample_rate()
+        self._sample_rate = DEFAULT_SAMPLE_RATE
+        self._frame_samples = _compute_frame_samples(self._sample_rate)
+        self._frame_bytes = self._frame_samples * 2
+        self._set_sample_rate(self._configured_sample_rate)
 
     # ------------------------------------------------------------------
     # Public API
@@ -167,6 +211,8 @@ class WakeListener:
         with self._state_lock:
             self.enabled = bool(value)
             if self.enabled:
+                self._configured_sample_rate = _read_configured_sample_rate()
+                self._set_sample_rate(self._configured_sample_rate)
                 self._mic_preflight_ok = None
                 self._audio_failure_reported = False
                 self._last_audio_failure_reason = None
@@ -252,7 +298,7 @@ class WakeListener:
 
             if self._recognizer is None:
                 try:
-                    self._recognizer = KaldiRecognizer(self._model, SAMPLE_RATE)
+                    self._recognizer = KaldiRecognizer(self._model, self._sample_rate)
                 except Exception as exc:  # pragma: no cover - runtime failure
                     self._record_error(f"Error inicializando reconocedor: {exc}")
                     self._recognizer = None
@@ -310,11 +356,22 @@ class WakeListener:
         self._record_error("Modelo Vosk ES no encontrado en /opt/vosk/es-small")
         return None
 
+    def _set_sample_rate(self, sample_rate: int) -> None:
+        if sample_rate <= 0:
+            sample_rate = DEFAULT_SAMPLE_RATE
+        if sample_rate == self._sample_rate:
+            return
+        self._sample_rate = sample_rate
+        self._frame_samples = _compute_frame_samples(sample_rate)
+        self._frame_bytes = self._frame_samples * 2
+        if self._recognizer is not None:
+            self._recognizer = None
+
     def _open_audio_source(self) -> Optional[_BaseAudioSource]:
         mic_device = os.getenv(MIC_DEVICE_ENV, DEFAULT_MIC_DEVICE)
         if shutil.which("arecord"):
             if self._mic_preflight_ok is None:
-                ok, message = _ARecordSource.preflight_check(mic_device)
+                ok, message, active_sample_rate = self._run_preflight_check(mic_device)
                 if not ok:
                     warning = (
                         f"arecord pre-check falló para {mic_device}: {message or 'error desconocido'}"
@@ -323,19 +380,21 @@ class WakeListener:
                     self._mic_preflight_ok = False
                     self._last_audio_failure_reason = warning
                     return None
+                self._set_sample_rate(active_sample_rate)
                 self._mic_preflight_ok = True
             if self._mic_preflight_ok is False:
                 return None
             if self._mic_preflight_ok:
                 try:
-                    source = _ARecordSource(mic_device)
+                    source = _ARecordSource(mic_device, self._sample_rate, self._frame_bytes)
                     with self._audio_lock:
                         self._active_audio_source = source
                     self._current_source_name = "arecord"
                     self._last_audio_failure_reason = None
                     LOG_WAKE.info(
-                        "[wake] Mic device: %s opened @44.1kHz mono",
+                        "[wake] Wake mic device %s @%d Hz",
                         mic_device,
+                        self._sample_rate,
                     )
                     return source
                 except Exception as exc:
@@ -348,7 +407,7 @@ class WakeListener:
 
         if sd is not None:
             try:
-                source = _SoundDeviceSource()
+                source = _SoundDeviceSource(self._sample_rate, self._frame_samples)
                 with self._audio_lock:
                     self._active_audio_source = source
                 self._current_source_name = "sounddevice"
@@ -363,6 +422,27 @@ class WakeListener:
             self._record_error("sounddevice no instalado; no hay captura de audio")
             self._last_audio_failure_reason = "sounddevice no instalado"
         return None
+
+    def _run_preflight_check(self, mic_device: str) -> Tuple[bool, Optional[str], int]:
+        configured_rate = self._configured_sample_rate
+        ok, message = _ARecordSource.preflight_check(mic_device, configured_rate)
+        if ok:
+            return True, None, configured_rate
+
+        if configured_rate != DEFAULT_SAMPLE_RATE:
+            LOG_WAKE.warning(
+                "[wake] Fallo %s, usando %s por compatibilidad",
+                _format_sample_rate(configured_rate),
+                _format_sample_rate(DEFAULT_SAMPLE_RATE),
+            )
+            fallback_ok, fallback_message = _ARecordSource.preflight_check(
+                mic_device, DEFAULT_SAMPLE_RATE
+            )
+            if fallback_ok:
+                return True, None, DEFAULT_SAMPLE_RATE
+            message = fallback_message or message
+
+        return False, message, configured_rate
 
     def _handle_audio_unavailable(self) -> None:
         if self._audio_failure_reported:
@@ -455,7 +535,7 @@ class WakeListener:
             LOG_WAKE.warning("[wake] No se capturó audio tras el wake-word")
             return
 
-        wav_audio = _pcm_to_wav(raw_audio)
+        wav_audio = _pcm_to_wav(raw_audio, self._sample_rate)
         transcript = self._transcribe_audio(raw_audio, wav_audio)
         intent = _parse_intent(transcript)
         with self._state_lock:
@@ -513,7 +593,7 @@ class WakeListener:
         if Model is None or KaldiRecognizer is None or self._model is None:
             return ""
         try:
-            recognizer = KaldiRecognizer(self._model, SAMPLE_RATE)
+            recognizer = KaldiRecognizer(self._model, self._sample_rate)
             recognizer.AcceptWaveform(pcm_audio)
             result_json = recognizer.Result()
             result = json.loads(result_json) if result_json else {}
@@ -549,8 +629,9 @@ class _BaseAudioSource:
 
 
 class _ARecordSource(_BaseAudioSource):
-    def __init__(self, device: str) -> None:
+    def __init__(self, device: str, sample_rate: int, frame_bytes: int) -> None:
         self._device = device
+        self._frame_bytes = frame_bytes
         cmd = [
             "arecord",
             "-q",
@@ -561,7 +642,7 @@ class _ARecordSource(_BaseAudioSource):
             "-f",
             "S16_LE",
             "-r",
-            str(SAMPLE_RATE),
+            str(sample_rate),
             "-c",
             "1",
             "-",
@@ -575,7 +656,7 @@ class _ARecordSource(_BaseAudioSource):
             raise RuntimeError("arecord stdout no disponible")
 
     @staticmethod
-    def preflight_check(device: str) -> Tuple[bool, Optional[str]]:
+    def preflight_check(device: str, sample_rate: int) -> Tuple[bool, Optional[str]]:
         cmd = [
             "arecord",
             "-q",
@@ -586,7 +667,7 @@ class _ARecordSource(_BaseAudioSource):
             "-f",
             "S16_LE",
             "-r",
-            str(SAMPLE_RATE),
+            str(sample_rate),
             "-c",
             "1",
             "-d",
@@ -609,7 +690,7 @@ class _ARecordSource(_BaseAudioSource):
 
     def read_chunk(self) -> bytes:
         assert self._proc.stdout is not None
-        data = self._proc.stdout.read(FRAME_BYTES)
+        data = self._proc.stdout.read(self._frame_bytes)
         if not data:
             raise RuntimeError("arecord sin datos")
         return data
@@ -624,19 +705,20 @@ class _ARecordSource(_BaseAudioSource):
 
 
 class _SoundDeviceSource(_BaseAudioSource):
-    def __init__(self) -> None:
+    def __init__(self, sample_rate: int, frame_samples: int) -> None:
         if sd is None:  # pragma: no cover - defensive
             raise RuntimeError("sounddevice no disponible")
         self._stream = sd.RawInputStream(
-            samplerate=SAMPLE_RATE,
+            samplerate=sample_rate,
             channels=1,
             dtype="int16",
-            blocksize=FRAME_SAMPLES,
+            blocksize=frame_samples,
         )
         self._stream.start()
+        self._frame_samples = frame_samples
 
     def read_chunk(self) -> bytes:
-        data, overflowed = self._stream.read(FRAME_SAMPLES)
+        data, overflowed = self._stream.read(self._frame_samples)
         if overflowed:
             LOG_WAKE.warning("[wake] overflow de audio en sounddevice")
         return bytes(data)
@@ -748,12 +830,12 @@ def _parse_intent(text: str) -> Dict[str, Any]:
     return {"kind": "smalltalk"}
 
 
-def _pcm_to_wav(pcm_audio: bytes) -> bytes:
+def _pcm_to_wav(pcm_audio: bytes, sample_rate: int) -> bytes:
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
-        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.setframerate(sample_rate)
         wav_file.writeframes(pcm_audio)
     return buffer.getvalue()
 
