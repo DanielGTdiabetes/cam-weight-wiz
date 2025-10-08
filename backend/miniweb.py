@@ -373,6 +373,10 @@ def _extract_openai_api_key(config: Optional[Dict[str, Any]]) -> str:
         config.get("openai_api_key"),
     ]
 
+    network_cfg = config.get("network")
+    if isinstance(network_cfg, dict):
+        candidates.append(network_cfg.get("openai_api_key"))
+
     integrations = config.get("integrations")
     if isinstance(integrations, dict):
         candidates.append(integrations.get("openai_api_key"))
@@ -412,8 +416,12 @@ def _extract_nightscout_credentials(config: Optional[Dict[str, Any]]) -> Tuple[s
     if isinstance(diabetes, dict):
         if not url and isinstance(diabetes.get("ns_url"), str):
             url = diabetes["ns_url"].strip()
+        if not url and isinstance(diabetes.get("nightscout_url"), str):
+            url = diabetes["nightscout_url"].strip()
         if not token and isinstance(diabetes.get("ns_token"), str):
             token = diabetes["ns_token"].strip()
+        if not token and isinstance(diabetes.get("nightscout_token"), str):
+            token = diabetes["nightscout_token"].strip()
 
     return url, token
 
@@ -535,6 +543,39 @@ def _set_diabetes_enabled(config: Dict[str, Any], value: Any) -> Tuple[bool, boo
     return changed, normalized
 
 
+def _boolean_validation_error(field_path: Sequence[str], value: Any) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail=[
+            {
+                "type": "type_error.bool",
+                "msg": "Input should be a valid boolean",
+                "loc": ["body", *field_path],
+                "input": value,
+            }
+        ],
+    )
+
+
+def _coerce_bool(value: Any, *, field_path: Sequence[str]) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+        raise _boolean_validation_error(field_path, value)
+    if value is None:
+        return False
+    if isinstance(value, (list, dict)):
+        raise _boolean_validation_error(field_path, value)
+    return bool(value)
+
+
 def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     service = get_settings_service(CONFIG_PATH)
     base_payload = service.get_for_client(include_secrets=False)
@@ -585,9 +626,18 @@ def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     network_cfg.setdefault("ap", {"ssid": AP_DEFAULT_SSID, "ip": AP_DEFAULT_IP})
     payload["network"] = network_cfg
 
-    payload["openai"] = {"hasKey": bool(openai_key)}
+    openai_masked = SECRET_PLACEHOLDER if openai_key else ""
+    payload["openai"] = {"hasKey": bool(openai_key), "apiKey": openai_masked}
 
-    payload["nightscout"] = {"url": nightscout_url, "hasToken": bool(nightscout_token)}
+    nightscout_url_masked = SECRET_PLACEHOLDER if nightscout_url else ""
+    nightscout_token_masked = SECRET_PLACEHOLDER if nightscout_token else ""
+    payload["nightscout"] = {
+        "url": nightscout_url_masked,
+        "token": nightscout_token_masked,
+        "hasToken": bool(nightscout_token),
+    }
+    payload["nightscout_url"] = nightscout_url_masked
+    payload["nightscout_token"] = nightscout_token_masked
 
     integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
     integrations = {
@@ -3810,6 +3860,7 @@ class SettingsUpdatePayload(BaseModel):
     openai_api_key: Optional[str] = None
     nightscout_url: Optional[str] = None
     nightscout_token: Optional[str] = None
+    offline_mode: Optional[Any] = None
 
 
 # ---------- PIN persistente ----------
@@ -3839,6 +3890,16 @@ def _clear_failures(ip: str):
         FAILED_ATTEMPTS.pop(ip, None)
 
 
+class PinValidationError(Exception):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__(code)
+
+
+def _pin_error_response(exc: PinValidationError) -> JSONResponse:
+    return JSONResponse(status_code=403, content={"error": exc.code})
+
+
 def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str]) -> None:
     client_host = _extract_client_host(request)
     if _is_trusted_client(client_host):
@@ -3850,19 +3911,13 @@ def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str])
         if isinstance(auth_header, str) and auth_header.lower().startswith("basculapin "):
             pin = auth_header.split(" ", 1)[1].strip()
     if not pin:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "pin_required", "message": "PIN requerido para cambios remotos"},
-        )
+        raise PinValidationError("pin_required")
 
     ip_key = client_host or "unknown"
     _check_rate_limit(ip_key)
     if pin != CURRENT_PIN:
         _register_fail(ip_key)
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "invalid_pin", "message": "PIN incorrecto"},
-        )
+        raise PinValidationError("pin_invalid")
 
     _clear_failures(ip_key)
 
@@ -3936,9 +3991,26 @@ async def update_settings(request: Request):
 
     payload = SettingsUpdatePayload.model_validate(raw_payload)
 
+    plain_offline_mode = None
+    if payload.offline_mode is not None:
+        plain_offline_mode = payload.offline_mode
+    elif "offline_mode" in raw_payload:
+        plain_offline_mode = raw_payload.get("offline_mode")
+
     requires_pin = any(
         getattr(payload, field) is not None
-        for field in ("openai", "nightscout", "ui", "tts", "scale", "serial", "integrations", "network", "diabetes")
+        for field in (
+            "openai",
+            "nightscout",
+            "ui",
+            "tts",
+            "scale",
+            "serial",
+            "integrations",
+            "network",
+            "diabetes",
+            "offline_mode",
+        )
     )
     if not requires_pin:
         network_payload = raw_payload.get("network")
@@ -3955,10 +4027,22 @@ async def update_settings(request: Request):
                     for key in ("nightscout_url", "nightscout_token", "diabetes_enabled")
                 )
             )
+            or plain_offline_mode is not None
         ):
             requires_pin = True
     if requires_pin or (payload.pin is not None and not trusted_client):
-        _ensure_pin_valid_for_request(request, payload.pin)
+        try:
+            _ensure_pin_valid_for_request(request, payload.pin)
+        except PinValidationError as exc:
+            return JSONResponse(status_code=403, content={"error": exc.code})
+
+    ui_payload: Optional[Dict[str, Any]] = None
+    if isinstance(payload.ui, dict):
+        ui_payload = dict(payload.ui)
+    if plain_offline_mode is not None:
+        if ui_payload is None:
+            ui_payload = {}
+        ui_payload["offline_mode"] = plain_offline_mode
 
     requested_fields = [
         field
@@ -3984,9 +4068,11 @@ async def update_settings(request: Request):
             isinstance(raw_payload.get("nightscout"), dict)
             and ("url" in raw_payload["nightscout"] or "token" in raw_payload["nightscout"])
         )
-    ):
+        ):
         if "nightscout" not in requested_fields:
             requested_fields.append("nightscout")
+    if ui_payload is not None and "ui" not in requested_fields:
+        requested_fields.append("ui")
     if requested_fields:
         _log_settings_event(
             "settings.request",
@@ -4041,12 +4127,20 @@ async def update_settings(request: Request):
         updates["network"] = network_updates
 
         config["openai_api_key"] = api_key
+        updates["openai_api_key"] = api_key
         integrations = config.get("integrations")
         if not isinstance(integrations, dict):
             integrations = {}
         integrations["openai_api_key"] = api_key
         integrations["chatgpt_api_key"] = api_key
         config["integrations"] = integrations
+
+        integrations_updates = updates.get("integrations")
+        if not isinstance(integrations_updates, dict):
+            integrations_updates = {}
+        integrations_updates["openai_api_key"] = api_key
+        integrations_updates["chatgpt_api_key"] = api_key
+        updates["integrations"] = integrations_updates
 
     NS_SENTINEL = object()
     nightscout_url_candidate = NS_SENTINEL
@@ -4124,9 +4218,12 @@ async def update_settings(request: Request):
         diabetes_updates["diabetes_enabled"] = enabled_value
         updates["diabetes"] = diabetes_updates
 
+        updates["nightscout_url"] = final_url
+        updates["nightscout_token"] = final_token
+
         if url_changed or token_changed:
             changed_sections.add("nightscout")
-            change_metadata["nightscout_url"] = final_url
+            change_metadata["nightscout_url"] = "****" if final_url else ""
             change_metadata["nightscout_has_token"] = bool(final_token)
             changed = True
         if enabled_changed:
@@ -4186,9 +4283,12 @@ async def update_settings(request: Request):
         diabetes_updates["diabetes_enabled"] = enabled_value
         updates["diabetes"] = diabetes_updates
 
+        updates["nightscout_url"] = final_url
+        updates["nightscout_token"] = final_token
+
         if url_changed_local or token_changed_local:
             changed_sections.add("nightscout")
-            change_metadata["nightscout_url"] = final_url
+            change_metadata["nightscout_url"] = "****" if final_url else ""
             change_metadata["nightscout_has_token"] = bool(final_token)
             changed = True
         if enabled_changed_local:
@@ -4196,13 +4296,13 @@ async def update_settings(request: Request):
             change_metadata["diabetes_enabled"] = enabled_value
             changed = True
 
-    if payload.ui:
-        ui_cfg = config.get("ui", {})
+    if ui_payload:
+        ui_cfg = config.get("ui")
         if not isinstance(ui_cfg, dict):
             ui_cfg = {}
-        
+
         section_changed = False
-        flags_updates = payload.ui.get("flags") if isinstance(payload.ui, dict) else None
+        flags_updates = ui_payload.get("flags") if isinstance(ui_payload, dict) else None
         if isinstance(flags_updates, dict):
             existing_flags = ui_cfg.get("flags", {})
             if not isinstance(existing_flags, dict):
@@ -4214,20 +4314,13 @@ async def update_settings(request: Request):
                     section_changed = True
                 existing_flags[key_str] = normalized
             ui_cfg["flags"] = existing_flags
-        
-        if isinstance(payload.ui, dict):
-            for key, value in payload.ui.items():
+
+        if isinstance(ui_payload, dict):
+            for key, value in ui_payload.items():
                 if key == "flags":
                     continue
                 if key == "offline_mode":
-                    if isinstance(value, bool):
-                        normalized_offline = value
-                    elif isinstance(value, (int, float)):
-                        normalized_offline = bool(value)
-                    elif isinstance(value, str):
-                        normalized_offline = value.strip().lower() in {"1", "true", "yes", "on"}
-                    else:
-                        normalized_offline = False
+                    normalized_offline = _coerce_bool(value, field_path=("ui", "offline_mode"))
                     if ui_cfg.get("offline_mode") != normalized_offline:
                         section_changed = True
                         if normalized_offline != previous_offline_mode:
@@ -4243,7 +4336,7 @@ async def update_settings(request: Request):
 
         if section_changed:
             changed_sections.add("ui")
-            updates["ui"] = ui_cfg
+            updates["ui"] = deepcopy(ui_cfg)
             changed = True
         config["ui"] = ui_cfg
 
@@ -4257,6 +4350,7 @@ async def update_settings(request: Request):
         if section_changed:
             changed = True
             changed_sections.add("tts")
+            updates["tts"] = deepcopy(existing_tts)
         config["tts"] = existing_tts
 
     if payload.scale and isinstance(payload.scale, dict):
@@ -4269,6 +4363,7 @@ async def update_settings(request: Request):
         if section_changed:
             changed = True
             changed_sections.add("scale")
+            updates["scale"] = deepcopy(existing_scale)
         config["scale"] = existing_scale
 
     if payload.serial and isinstance(payload.serial, dict):
@@ -4291,6 +4386,8 @@ async def update_settings(request: Request):
         if section_changed:
             changed = True
             changed_sections.add("serial")
+            updates["serial_device"] = config.get("serial_device")
+            updates["serial_baud"] = config.get("serial_baud")
 
     if payload.integrations and isinstance(payload.integrations, dict):
         current_integrations = config.get("integrations")
@@ -4304,27 +4401,17 @@ async def update_settings(request: Request):
         if section_changed:
             changed = True
             changed_sections.add("integrations")
+            updates["integrations"] = deepcopy(current_integrations)
         config["integrations"] = current_integrations
 
     if changed:
-        # Usar settings service para escritura atómica
-        service_updates = {}
-        if updates.get("network"):
-            service_updates["network"] = updates["network"]
-        if updates.get("diabetes"):
-            service_updates["diabetes"] = updates["diabetes"]
-        if updates.get("ui"):
-            service_updates["ui"] = updates["ui"]
-        if updates.get("scale"):
-            service_updates["scale"] = updates["scale"]
-        
         # Guardar con settings service (atómico)
         try:
-            service.save(service_updates)
+            service.save(updates)
         except Exception as exc:
-            LOG_MINIWEB.error(f"Error guardando settings: {exc}")
+            LOG_MINIWEB.error("Error guardando settings: %s", exc, exc_info=True)
             raise HTTPException(status_code=500, detail="Error guardando configuración")
-        
+
         # También actualizar config en memoria para mantener compatibilidad
         config.update(updates)
         
@@ -4446,7 +4533,10 @@ async def websocket_settings_updates(websocket: WebSocket):
 
 @app.post("/api/settings/test/openai")
 async def settings_test_openai(payload: SettingsTestOpenAI, request: Request):
-    _ensure_pin_valid_for_request(request, payload.pin)
+    try:
+        _ensure_pin_valid_for_request(request, payload.pin)
+    except PinValidationError as exc:
+        return _pin_error_response(exc)
     config = _load_config()
     candidate_key = (payload.apiKey or "").strip()
     api_key = candidate_key or _extract_openai_api_key(config)
@@ -4524,7 +4614,10 @@ async def _perform_nightscout_test(
     *,
     source: str,
 ) -> Any:
-    _ensure_pin_valid_for_request(request, pin)
+    try:
+        _ensure_pin_valid_for_request(request, pin)
+    except PinValidationError as exc:
+        return _pin_error_response(exc)
     config = _load_config()
     current_url, current_token = _extract_nightscout_credentials(config)
     target_url = (url or current_url).strip()
@@ -4854,7 +4947,10 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
 @app.post("/api/miniweb/connect")
 @app.post("/api/miniweb/connect-wifi")
 async def connect_wifi(credentials: WifiCredentials, request: Request):
-    _ensure_pin_valid_for_request(request, credentials.pin)
+    try:
+        _ensure_pin_valid_for_request(request, credentials.pin)
+    except PinValidationError as exc:
+        return _pin_error_response(exc)
     return await _handle_wifi_connect(credentials)
 
 
@@ -4866,7 +4962,10 @@ async def network_connect(payload: NetworkConnectRequest, request: Request):
         open=payload.open,
         pin=payload.pin,
     )
-    _ensure_pin_valid_for_request(request, payload.pin)
+    try:
+        _ensure_pin_valid_for_request(request, payload.pin)
+    except PinValidationError as exc:
+        return _pin_error_response(exc)
     return await _handle_wifi_connect(creds)
 
 

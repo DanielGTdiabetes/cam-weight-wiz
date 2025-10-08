@@ -184,8 +184,8 @@ def test_post_settings_requires_pin_for_remote(api_client, tmp_path: Path, monke
 
     response = api_client.post("/api/settings", json={"ui": {"offline_mode": True}})
 
-    assert response.status_code == 401
-    assert response.json().get("detail") == "PIN requerido"
+    assert response.status_code == 403
+    assert response.json() == {"error": "pin_required"}
 
 
 def test_post_settings_accepts_valid_pin(api_client, tmp_path: Path, monkeypatch):
