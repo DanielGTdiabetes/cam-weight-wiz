@@ -44,7 +44,7 @@ import stat
 import pwd
 import grp
 
-from audio_utils import play_audio_file, play_pcm_audio
+from backend.audio_utils import play_audio_file, play_pcm_audio
 from scale_service import HX711Service
 from serial_scale_service import SerialScaleService
 from app.services.settings_service import get_settings_service

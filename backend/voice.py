@@ -15,7 +15,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from audio_utils import is_playback_available, play_audio_file
+from backend.audio_utils import is_playback_available, play_audio_file
 
 VOICE_ROUTER_PREFIX = "/api/voice"
 router = APIRouter(prefix=VOICE_ROUTER_PREFIX, tags=["voice"])
