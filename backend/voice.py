@@ -15,6 +15,8 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
+from audio_utils import is_playback_available, play_audio_file
+
 VOICE_ROUTER_PREFIX = "/api/voice"
 router = APIRouter(prefix=VOICE_ROUTER_PREFIX, tags=["voice"])
 
@@ -58,7 +60,7 @@ def _is_espeak_available() -> bool:
 
 
 def _is_aplay_available() -> bool:
-    return shutil.which("aplay") is not None
+    return is_playback_available()
 
 
 @router.get("/tts/voices")
@@ -156,9 +158,8 @@ def _synthesize_with_espeak(text: str, output_path: Path) -> None:
 async def _play_audio_locally(path: Path) -> None:
     if not _is_aplay_available():
         return
-    cmd = ["aplay", str(path)]
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, subprocess.run, cmd)
+    await loop.run_in_executor(None, play_audio_file, path)
 
 
 def _synthesize_to_file(text: str, voice: Optional[str]) -> Tuple[Path, str]:

@@ -42,10 +42,13 @@ from rapidfuzz import fuzz
 
 LOG_WAKE = logging.getLogger("bascula.wake")
 
-SAMPLE_RATE = 16_000
-FRAME_SAMPLES = 320  # 20 ms at 16 kHz
+DEFAULT_MIC_DEVICE = "hw:0,0"
+MIC_DEVICE_ENV = "BASCULA_MIC_DEVICE"
+
+SAMPLE_RATE = 44_100
+FRAME_DURATION = 0.02
+FRAME_SAMPLES = max(1, int(SAMPLE_RATE * FRAME_DURATION))
 FRAME_BYTES = FRAME_SAMPLES * 2
-FRAME_DURATION = FRAME_SAMPLES / SAMPLE_RATE
 BUFFER_SECONDS = 8.0
 PRE_WAKE_SECONDS = 1.0
 POST_WAKE_SECONDS = 4.0
@@ -121,6 +124,9 @@ class WakeListener:
         self._current_source_name: Optional[str] = None
         self._remote_transcribe_unavailable = False
         self._transcribe_url: Optional[str] = None
+        self._mic_preflight_ok: Optional[bool] = None
+        self._audio_failure_reported = False
+        self._last_audio_failure_reason: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -160,7 +166,11 @@ class WakeListener:
         LOG_WAKE.info("[wake] set_enabled=%s", value)
         with self._state_lock:
             self.enabled = bool(value)
-            if not self.enabled:
+            if self.enabled:
+                self._mic_preflight_ok = None
+                self._audio_failure_reported = False
+                self._last_audio_failure_reason = None
+            else:
                 self.running = False
         if not value:
             with self._audio_lock:
@@ -252,13 +262,14 @@ class WakeListener:
             if audio_source is None:
                 audio_source = self._open_audio_source()
                 if audio_source is None:
+                    self._handle_audio_unavailable()
                     time.sleep(5.0)
                     continue
 
             try:
                 chunk = audio_source.read_chunk()
             except Exception as exc:  # pragma: no cover - runtime failure
-                self._record_error(f"Fallo leyendo audio: {exc}")
+                self._record_error(f"Fallo leyendo audio: {exc}", level=logging.DEBUG)
                 self._close_audio_source(audio_source)
                 audio_source = None
                 self.running = False
@@ -300,18 +311,40 @@ class WakeListener:
         return None
 
     def _open_audio_source(self) -> Optional[_BaseAudioSource]:
+        mic_device = os.getenv(MIC_DEVICE_ENV, DEFAULT_MIC_DEVICE)
         if shutil.which("arecord"):
-            try:
-                source = _ARecordSource()
-                with self._audio_lock:
-                    self._active_audio_source = source
-                self._current_source_name = "arecord"
-                LOG_WAKE.info("[wake] Capturando audio con arecord")
-                return source
-            except Exception as exc:
-                self._record_error(f"arecord no disponible: {exc}")
+            if self._mic_preflight_ok is None:
+                ok, message = _ARecordSource.preflight_check(mic_device)
+                if not ok:
+                    warning = (
+                        f"arecord pre-check falló para {mic_device}: {message or 'error desconocido'}"
+                    )
+                    LOG_WAKE.warning("[wake] %s", warning)
+                    self._mic_preflight_ok = False
+                    self._last_audio_failure_reason = warning
+                    return None
+                self._mic_preflight_ok = True
+            if self._mic_preflight_ok is False:
+                return None
+            if self._mic_preflight_ok:
+                try:
+                    source = _ARecordSource(mic_device)
+                    with self._audio_lock:
+                        self._active_audio_source = source
+                    self._current_source_name = "arecord"
+                    self._last_audio_failure_reason = None
+                    LOG_WAKE.info(
+                        "[wake] Mic device: %s opened @44.1kHz mono",
+                        mic_device,
+                    )
+                    return source
+                except Exception as exc:
+                    message = f"arecord no disponible ({mic_device}): {exc}"
+                    self._record_error(message)
+                    self._last_audio_failure_reason = message
         else:
             LOG_WAKE.warning("[wake] arecord not found, falling back to sounddevice")
+            self._last_audio_failure_reason = "arecord no encontrado"
 
         if sd is not None:
             try:
@@ -319,13 +352,30 @@ class WakeListener:
                 with self._audio_lock:
                     self._active_audio_source = source
                 self._current_source_name = "sounddevice"
+                self._last_audio_failure_reason = None
                 LOG_WAKE.info("[wake] Capturando audio con sounddevice")
                 return source
             except Exception as exc:
-                self._record_error(f"sounddevice no disponible: {exc}")
+                message = f"sounddevice no disponible: {exc}"
+                self._record_error(message)
+                self._last_audio_failure_reason = message
         else:
             self._record_error("sounddevice no instalado; no hay captura de audio")
+            self._last_audio_failure_reason = "sounddevice no instalado"
         return None
+
+    def _handle_audio_unavailable(self) -> None:
+        if self._audio_failure_reported:
+            return
+        reason = self._last_audio_failure_reason or "captura de audio no disponible"
+        LOG_WAKE.warning(
+            "[wake] Audio capture unavailable (%s); disabling wake-word",
+            reason,
+        )
+        with self._state_lock:
+            self._errors.append(f"Audio input unavailable: {reason}")
+        self._audio_failure_reported = True
+        self.set_enabled(False)
 
     def _process_audio_chunk(self, chunk: bytes, audio_source: _BaseAudioSource) -> None:
         if self._recognizer is None:
@@ -484,8 +534,8 @@ class WakeListener:
                 # Event loop closed; unsubscribe lazily
                 self.unsubscribe(queue)
 
-    def _record_error(self, message: str) -> None:
-        LOG_WAKE.warning("[wake] %s", message)
+    def _record_error(self, message: str, *, level: int = logging.WARNING) -> None:
+        LOG_WAKE.log(level, "[wake] %s", message)
         with self._state_lock:
             self._errors.append(message)
 
@@ -499,10 +549,13 @@ class _BaseAudioSource:
 
 
 class _ARecordSource(_BaseAudioSource):
-    def __init__(self) -> None:
+    def __init__(self, device: str) -> None:
+        self._device = device
         cmd = [
             "arecord",
             "-q",
+            "-D",
+            device,
             "-t",
             "raw",
             "-f",
@@ -520,6 +573,39 @@ class _ARecordSource(_BaseAudioSource):
         )
         if self._proc.stdout is None:  # pragma: no cover - defensive
             raise RuntimeError("arecord stdout no disponible")
+
+    @staticmethod
+    def preflight_check(device: str) -> Tuple[bool, Optional[str]]:
+        cmd = [
+            "arecord",
+            "-q",
+            "-D",
+            device,
+            "-t",
+            "raw",
+            "-f",
+            "S16_LE",
+            "-r",
+            str(SAMPLE_RATE),
+            "-c",
+            "1",
+            "-d",
+            "1",
+            "-",
+        ]
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            return True, None
+        except FileNotFoundError:
+            return False, "arecord no encontrado"
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="ignore") if exc.stderr else ""
+            return False, stderr.strip() or str(exc)
 
     def read_chunk(self) -> bytes:
         assert self._proc.stdout is not None
