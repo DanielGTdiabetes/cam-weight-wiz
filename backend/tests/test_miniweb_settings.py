@@ -68,14 +68,13 @@ def test_post_settings_accepts_authorization_header(miniweb_client):
 
     response = client.post(
         "/api/settings",
-        json={"openai_api_key": "sk-test"},
+        json={"network": {"openai_api_key": "sk-test"}},
         headers={"Authorization": "BasculaPin 1234"},
     )
 
     assert response.status_code == 200
-    stored = read_json(config_path)
-    assert stored.get("openai_api_key") == "sk-test"
-    assert service.load().network.openai_api_key == "sk-test"
+    stored = service.load()
+    assert stored.network.openai_api_key == "sk-test"
 
 
 def test_post_settings_updates_nightscout_from_diabetes_payload(miniweb_client):
@@ -83,17 +82,61 @@ def test_post_settings_updates_nightscout_from_diabetes_payload(miniweb_client):
 
     response = client.post(
         "/api/settings",
-        json={"diabetes": {"nightscout_url": "https://example.com", "nightscout_token": "token"}},
+        json={"diabetes": {"nightscout_url": "https://example.com", "nightscout_token": "token123"}},
         headers={"Authorization": "BasculaPin 1234"},
     )
 
     assert response.status_code == 200
-    stored = read_json(config_path)
-    assert stored.get("nightscout_url") == "https://example.com"
-    assert stored.get("nightscout_token") == "token"
     loaded = service.load()
     assert loaded.diabetes.nightscout_url == "https://example.com"
-    assert loaded.diabetes.nightscout_token == "token"
+    assert loaded.diabetes.nightscout_token == "token123"
+
+
+def test_post_settings_persists_to_disk(miniweb_client):
+    """Verify settings are persisted using atomic write"""
+    client, service, config_path = miniweb_client
+
+    # Save OpenAI key
+    response = client.post(
+        "/api/settings",
+        json={"network": {"openai_api_key": "sk-persist-test"}},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+    assert response.status_code == 200
+
+    # Reload from disk
+    fresh_service = service.__class__(config_path)
+    loaded = fresh_service.load()
+    assert loaded.network.openai_api_key == "sk-persist-test"
+
+
+def test_post_settings_updates_version_on_save(miniweb_client):
+    """Verify meta.version increments on each save"""
+    client, service, config_path = miniweb_client
+
+    # First save
+    response1 = client.post(
+        "/api/settings",
+        json={"ui": {"sound_enabled": True}},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+    assert response1.status_code == 200
+    
+    loaded1 = service.load()
+    version1 = loaded1.meta.version
+
+    # Second save
+    response2 = client.post(
+        "/api/settings",
+        json={"ui": {"sound_enabled": False}},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+    assert response2.status_code == 200
+    
+    loaded2 = service.load()
+    version2 = loaded2.meta.version
+    
+    assert version2 > version1
 
 
 def test_settings_health_reports_ok(miniweb_client):

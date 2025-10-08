@@ -198,20 +198,12 @@ export const SettingsView = () => {
   const [backendNightscoutHasToken, setBackendNightscoutHasToken] = useState(false);
   const [otaStatus, setOtaStatus] = useState<OtaStatus | null>(null);
   const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
-
-  const effectiveNetworkIp = networkIP2 && networkIP2 !== "—" ? networkIP2 : networkIP;
-  const configUrlHint = effectiveNetworkIp ? `http://${effectiveNetworkIp}/config` : "http://<IP_de_la_báscula>/config";
   const [otaJobState, setOtaJobState] = useState<OtaJobState | null>(null);
   const [otaLogs, setOtaLogs] = useState("");
   const [otaPanelOpen, setOtaPanelOpen] = useState(false);
   const [otaApplyDialogOpen, setOtaApplyDialogOpen] = useState(false);
   const [isApplyingUpdate, setIsApplyingUpdate] = useState(false);
   const [otaTargetOverride, setOtaTargetOverride] = useState("");
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const otaPollIntervalRef = useRef<number | null>(null);
-  const otaSlowPollTimeoutRef = useRef<number | null>(null);
-  const otaLastStatusRef = useRef<OtaJobState["status"] | null>(null);
-  const otaLogsRef = useRef<HTMLDivElement | null>(null);
   const [networkSSID, setNetworkSSID] = useState<string>("—");
   const [networkIP2, setNetworkIP2] = useState<string>("—");
   const [internalKeyboardEnabled, setInternalKeyboardEnabled] = useState(localClient);
@@ -223,14 +215,22 @@ export const SettingsView = () => {
   const [isNetworkModalConnecting, setIsNetworkModalConnecting] = useState(false);
   const [miniwebPin, setMiniwebPin] = useState<string | null>(null);
   const [miniwebPinStatus, setMiniwebPinStatus] = useState<"idle" | "loading" | "error">("idle");
-
-  const remoteLocked = !localClient && !pinVerified;
-  const openAiKeyboardEnabled = internalKeyboardEnabled && localClient;
-  const nightscoutKeyboardEnabled = internalKeyboardEnabled && localClient;
   const [securityPinInput, setSecurityPinInput] = useState("");
   const [pinVerified, setPinVerified] = useState(localClient);
   const [verifyingPin, setVerifyingPin] = useState(false);
   const [pinMessage, setPinMessage] = useState<string | null>(null);
+
+  const effectiveNetworkIp = networkIP2 && networkIP2 !== "—" ? networkIP2 : networkIP;
+  const configUrlHint = effectiveNetworkIp ? `http://${effectiveNetworkIp}/config` : "http://<IP_de_la_báscula>/config";
+  const remoteLocked = !localClient && !pinVerified;
+  const openAiKeyboardEnabled = internalKeyboardEnabled && localClient;
+  const nightscoutKeyboardEnabled = internalKeyboardEnabled && localClient;
+  
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const otaPollIntervalRef = useRef<number | null>(null);
+  const otaSlowPollTimeoutRef = useRef<number | null>(null);
+  const otaLastStatusRef = useRef<OtaJobState["status"] | null>(null);
+  const otaLogsRef = useRef<HTMLDivElement | null>(null);
 
   const buildApiUrl = useCallback(
     (path: string) => {

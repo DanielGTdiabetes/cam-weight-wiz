@@ -398,12 +398,7 @@ export const APModeScreen = () => {
               Usa tu móvil, tablet o PC para conectarte a la red Wi-Fi creada por la báscula.
             </p>
             <p className="text-lg">
-              Después abre la mini-web de configuración usando el enlace destacado más abajo e introduce el PIN mostrado en esta
-              pantalla.
-            </p>
-            <p className="text-sm">
-              Consejo: la app principal se abre en la dirección principal de la báscula; la configuración siempre está en la ruta{' '}
-              <span className="font-semibold">/config</span>.
+              También puedes configurar desde <span className="font-mono text-primary">http://IP/config</span> si tienes cable Ethernet conectado.
             </p>
           </div>
         </div>
@@ -469,29 +464,61 @@ export const APModeScreen = () => {
             </div>
           </div>
 
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Button
+              onClick={handleOpenConfig}
+              variant="glow"
+              size="xl"
+              className="w-full text-lg"
+            >
+              <Wifi className="mr-2 h-6 w-6" />
+              Configurar Wi-Fi
+            </Button>
+
+            <Button
+              onClick={handleStartOffline}
+              disabled={startingOffline}
+              variant="secondary"
+              size="xl"
+              className="w-full text-lg"
+            >
+              {startingOffline ? (
+                <>
+                  <Loader2 className="mr-2 h-6 w-6 animate-spin" />
+                  Activando...
+                </>
+              ) : (
+                <>
+                  <WifiOff className="mr-2 h-6 w-6" />
+                  Modo Offline
+                </>
+              )}
+            </Button>
+          </div>
+
           <div className="space-y-4 rounded-lg border border-border/60 bg-muted/20 p-6">
-            <h2 className="text-xl font-bold">Cómo continuar</h2>
+            <h2 className="text-xl font-bold">Pasos para configurar</h2>
             <ol className="space-y-3">
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   1
                 </span>
                 <p>
-                  Conéctate a <strong>{displaySsid}</strong> desde tu móvil, tablet o PC.
+                  Conéctate a <strong>{displaySsid}</strong> desde tu dispositivo.
                 </p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   2
                 </span>
-                <p>Introduce la contraseña <strong>{apPassword}</strong>.</p>
+                <p>Usa la contraseña: <strong>{apPassword}</strong></p>
               </li>
               <li className="flex gap-3">
                 <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-primary/20 font-bold text-primary">
                   3
                 </span>
                 <p>
-                  Abre la mini-web en <strong>{displayConfigUrl}</strong> (ruta <span className="font-semibold">/config</span>).
+                  Abre <strong>{displayConfigUrl}</strong>
                 </p>
               </li>
               <li className="flex gap-3">
@@ -515,35 +542,11 @@ export const APModeScreen = () => {
               <div className="space-y-1 text-sm">
                 <p className="font-semibold text-primary">¿Sin conexión a Internet?</p>
                 <p className="text-muted-foreground">
-                  Puedes activar el modo offline para usar la báscula y el temporizador mientras terminas de configurar la red.
+                  Activa el modo offline para usar la báscula sin red. Cuando tengas Internet, el sistema volverá automáticamente al modo normal.
                 </p>
               </div>
             </div>
           </div>
-
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Button onClick={handleOpenConfig} variant="outline" size="xl" className="w-full text-xl">
-              Configurar red / ajustes
-            </Button>
-            <Button
-              onClick={handleStartOffline}
-              variant="glow"
-              size="xl"
-              className="w-full text-xl"
-              disabled={startingOffline}
-            >
-              {startingOffline ? (
-                <Loader2 className="mr-2 h-6 w-6 animate-spin" />
-              ) : (
-                <WifiOff className="mr-2 h-6 w-6" />
-              )}
-              {startingOffline ? "Activando modo offline…" : "Activar modo offline"}
-            </Button>
-          </div>
-
-          <p className="text-center text-sm text-muted-foreground">
-            La báscula comprobará periódicamente la conexión y volverá al modo normal en cuanto detecte Internet.
-          </p>
         </div>
       </Card>
     </div>

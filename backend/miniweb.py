@@ -3193,16 +3193,18 @@ def _determine_effective_mode(
     offline_mode_enabled: bool,
     internet_available: bool,
 ) -> str:
-    if offline_mode_enabled:
-        return "offline"
-
+    # Sin ninguna IP en ninguna interfaz → modo AP
     if not ethernet_connected and not wifi_connected:
         return "ap"
-
-    if not internet_available:
-        return "offline"
-
-    return "kiosk"
+    
+    # Si hay conexión (ethernet o wifi) con Internet → modo kiosk
+    # (se desactiva el modo offline manual automáticamente)
+    if internet_available:
+        return "kiosk"
+    
+    # Si hay IP pero sin Internet → modo offline
+    # (tanto si es manual como automático por falta de Internet)
+    return "offline"
 
 
 def _get_wifi_status(config: Optional[Dict[str, Any]] | None = None) -> Dict[str, Any]:
@@ -4305,7 +4307,27 @@ async def update_settings(request: Request):
         config["integrations"] = current_integrations
 
     if changed:
-        _save_json(CONFIG_PATH, config)
+        # Usar settings service para escritura atómica
+        service_updates = {}
+        if updates.get("network"):
+            service_updates["network"] = updates["network"]
+        if updates.get("diabetes"):
+            service_updates["diabetes"] = updates["diabetes"]
+        if updates.get("ui"):
+            service_updates["ui"] = updates["ui"]
+        if updates.get("scale"):
+            service_updates["scale"] = updates["scale"]
+        
+        # Guardar con settings service (atómico)
+        try:
+            service.save(service_updates)
+        except Exception as exc:
+            LOG_MINIWEB.error(f"Error guardando settings: {exc}")
+            raise HTTPException(status_code=500, detail="Error guardando configuración")
+        
+        # También actualizar config en memoria para mantener compatibilidad
+        config.update(updates)
+        
         if offline_mode_changed:
             _emit_network_status_update(config)
         _apply_settings_changes(list(changed_sections), **change_metadata)
