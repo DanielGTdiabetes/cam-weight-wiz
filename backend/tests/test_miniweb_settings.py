@@ -1,6 +1,7 @@
 import json
 import json
 from pathlib import Path
+from typing import Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -40,6 +41,19 @@ def read_json(path: Path) -> dict:
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def configure_pin_environment(
+    monkeypatch,
+    *,
+    pin_required: bool,
+    extra_cidrs: Optional[str] = None,
+    trust_proxy: bool = False,
+):
+    monkeypatch.setattr(miniweb, "PIN_REQUIRED_FOR_REMOTE", pin_required)
+    monkeypatch.setattr(miniweb, "TRUST_PROXY_FOR_CLIENT_IP", trust_proxy)
+    networks = miniweb._load_pin_trusted_networks(extra_cidrs)
+    monkeypatch.setattr(miniweb, "PIN_TRUSTED_NETWORKS", networks)
 
 
 def test_get_settings_returns_defaults(miniweb_client):
@@ -89,6 +103,79 @@ def test_post_settings_accepts_authorization_header(miniweb_client):
     assert stored.network.openai_api_key == "sk-test"
 
 
+def test_pin_bypass_on_lan_by_default(miniweb_client, monkeypatch):
+    client, service, _config_path = miniweb_client
+
+    configure_pin_environment(monkeypatch, pin_required=False)
+    monkeypatch.setattr(miniweb, "_extract_client_host", lambda request: "192.168.1.50")
+
+    response = client.post("/api/settings", json={"offline_mode": True})
+
+    assert response.status_code == 200
+    assert service.load().ui.offline_mode is True
+
+
+def test_pin_still_requires_pin_outside_lan(miniweb_client, monkeypatch):
+    client, service, _config_path = miniweb_client
+
+    configure_pin_environment(monkeypatch, pin_required=False)
+    monkeypatch.setattr(miniweb, "_extract_client_host", lambda request: "8.8.8.8")
+
+    response = client.post("/api/settings", json={"offline_mode": False})
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "pin_required"}
+    assert service.load().ui.offline_mode is False
+
+
+def test_pin_allowlist_custom_network(miniweb_client, monkeypatch):
+    client, service, _config_path = miniweb_client
+
+    configure_pin_environment(monkeypatch, pin_required=False, extra_cidrs="100.64.0.0/10")
+    monkeypatch.setattr(miniweb, "_extract_client_host", lambda request: "100.64.1.2")
+
+    response = client.post("/api/settings", json={"offline_mode": True})
+
+    assert response.status_code == 200
+    assert service.load().ui.offline_mode is True
+
+
+def test_pin_proxy_headers_ignored_when_proxy_not_trusted(miniweb_client, monkeypatch):
+    client, service, _config_path = miniweb_client
+
+    configure_pin_environment(monkeypatch, pin_required=False, trust_proxy=False)
+
+    def _extract_without_proxy_headers(request):
+        return request.client.host
+
+    monkeypatch.setattr(miniweb, "_extract_client_host", _extract_without_proxy_headers)
+
+    response = client.post(
+        "/api/settings",
+        json={"offline_mode": False},
+        headers={"X-Forwarded-For": "203.0.113.5"},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"error": "pin_required"}
+    assert service.load().ui.offline_mode is False
+
+
+def test_pin_proxy_headers_respected_when_trusted(miniweb_client, monkeypatch):
+    client, service, _config_path = miniweb_client
+
+    configure_pin_environment(monkeypatch, pin_required=False, trust_proxy=True)
+
+    response = client.post(
+        "/api/settings",
+        json={"offline_mode": True},
+        headers={"X-Forwarded-For": "192.168.1.23"},
+    )
+
+    assert response.status_code == 200
+    assert service.load().ui.offline_mode is True
+
+
 def test_post_settings_updates_nightscout_from_diabetes_payload(miniweb_client):
     client, service, config_path = miniweb_client
 
@@ -135,6 +222,24 @@ def test_post_settings_accepts_plain_offline_mode(miniweb_client):
     assert response.json().get("ui", {}).get("offline_mode") is True
     stored = service.load()
     assert stored.ui.offline_mode is True
+
+
+def test_post_settings_rejects_invalid_plain_offline_mode(miniweb_client):
+    client, _service, _config_path = miniweb_client
+
+    response = client.post(
+        "/api/settings",
+        json={"offline_mode": "nope"},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json().get("detail")
+    assert isinstance(detail, list) and detail
+    first = detail[0]
+    loc = first.get("loc")
+    assert isinstance(loc, list) and loc[0] == "body" and loc[-1] == "offline_mode"
+    assert "type_error.bool" in first.get("type", "")
 
 
 def test_post_settings_rejects_invalid_offline_mode(miniweb_client):

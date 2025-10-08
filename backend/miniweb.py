@@ -119,6 +119,8 @@ SETTINGS_RELOAD_SERVICE = "bascula-backend.service"
 SECRET_PLACEHOLDER = "__stored__"
 
 
+TRUST_PROXY_FOR_CLIENT_IP = _env_flag("BASCULA_TRUST_PROXY", False)
+
 PIN_REQUIRED_FOR_REMOTE = _env_flag("BASCULA_PIN_REQUIRED", True)
 if not PIN_REQUIRED_FOR_REMOTE:
     LOG_MINIWEB.info("settings: pin bypass enabled for LAN via BASCULA_PIN_REQUIRED=false")
@@ -209,8 +211,42 @@ def _parse_trusted_networks(raw: str | None) -> Set[ipaddress._BaseNetwork]:
     return networks
 
 
+_DEFAULT_PIN_TRUSTED_CIDRS: Tuple[str, ...] = (
+    "127.0.0.0/8",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+)
+
+
+def _load_pin_trusted_networks(extra_raw: str | None) -> Set[ipaddress._BaseNetwork]:
+    networks: Set[ipaddress._BaseNetwork] = set()
+    for cidr in _DEFAULT_PIN_TRUSTED_CIDRS:
+        try:
+            networks.add(ipaddress.ip_network(cidr, strict=False))
+        except ValueError:
+            LOG_NETWORK.warning("Ignorando CIDR confiable inválido por defecto: %s", cidr)
+    if not extra_raw:
+        return networks
+    for chunk in extra_raw.split(","):
+        candidate = chunk.strip()
+        if not candidate:
+            continue
+        try:
+            network = ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            LOG_NETWORK.warning("Ignorando CIDR confiable inválido: %s", candidate)
+            continue
+        networks.add(network)
+    return networks
+
+
 _TRUSTED_HOSTS = _parse_trusted_hosts(os.getenv("BASCULA_MINIWEB_TRUSTED_HOSTS"))
 _TRUSTED_NETWORKS = _parse_trusted_networks(os.getenv("BASCULA_MINIWEB_TRUSTED_SUBNETS"))
+PIN_TRUSTED_NETWORKS = _load_pin_trusted_networks(os.getenv("BASCULA_PIN_TRUSTED_CIDRS"))
 
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -2864,17 +2900,70 @@ def _is_ap_active() -> bool:
     return _is_ap_mode_legacy()
 
 
+def _normalize_ip_candidate(raw: str) -> Optional[str]:
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    if candidate.startswith("[") and "]" in candidate:
+        candidate = candidate[1 : candidate.index("]")]
+    if "%" in candidate:
+        candidate = candidate.split("%", 1)[0]
+    try:
+        ipaddress.ip_address(candidate)
+        return candidate
+    except ValueError:
+        pass
+    if ":" in candidate and candidate.count(":") == 1:
+        host_part, _port = candidate.split(":", 1)
+        try:
+            ipaddress.ip_address(host_part)
+            return host_part
+        except ValueError:
+            return None
+    return None
+
+
+IPAddressType = Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+
+
+def _coerce_ip_address(value: str) -> Optional[IPAddressType]:
+    normalized = _normalize_ip_candidate(value)
+    if normalized is None:
+        return None
+    try:
+        ip_obj = ipaddress.ip_address(normalized)
+    except ValueError:
+        return None
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+        return ip_obj.ipv4_mapped
+    return ip_obj
+
+
+def _match_pin_trusted_network(host: Optional[str]) -> Tuple[Optional[IPAddressType], Optional[ipaddress._BaseNetwork]]:
+    if not host:
+        return None, None
+    ip_obj = _coerce_ip_address(host)
+    if ip_obj is None:
+        return None, None
+    for network in PIN_TRUSTED_NETWORKS:
+        if ip_obj in network:
+            return ip_obj, network
+    return ip_obj, None
+
+
 def _extract_client_host(request: Request) -> Optional[str]:
-    forwarded_for = request.headers.get("x-forwarded-for") if request.headers else None
-    if forwarded_for:
-        primary = forwarded_for.split(",")[0].strip()
-        if primary:
-            return primary
-    real_ip = request.headers.get("x-real-ip") if request.headers else None
-    if real_ip:
-        candidate = real_ip.strip()
-        if candidate:
-            return candidate
+    if TRUST_PROXY_FOR_CLIENT_IP and request.headers:
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            primary = forwarded_for.split(",")[0].strip()
+            normalized = _normalize_ip_candidate(primary)
+            if normalized:
+                return normalized
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            normalized = _normalize_ip_candidate(real_ip)
+            if normalized:
+                return normalized
     if request.client and request.client.host:
         return request.client.host
     return None
@@ -3920,12 +4009,24 @@ def _pin_error_response(exc: PinValidationError) -> JSONResponse:
 
 
 def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str]) -> None:
-    if not PIN_REQUIRED_FOR_REMOTE:
-        return
-
     client_host = _extract_client_host(request)
-    if _is_trusted_client(client_host):
-        return
+    ip_obj, trusted_network = _match_pin_trusted_network(client_host)
+
+    if PIN_REQUIRED_FOR_REMOTE:
+        if _is_trusted_client(client_host):
+            return
+    else:
+        if trusted_network is not None and ip_obj is not None:
+            LOG_MINIWEB.info(
+                "pin bypass active for trusted LAN (ip=%s, cidr=%s)",
+                str(ip_obj),
+                str(trusted_network),
+            )
+            return
+        if _is_trusted_client(client_host):
+            return
+        display_ip = str(ip_obj) if ip_obj is not None else (client_host or "unknown")
+        LOG_MINIWEB.warning("pin bypass skipped for untrusted origin (ip=%s)", display_ip)
 
     pin = (provided_pin or "").strip()
     if not pin:
@@ -3935,7 +4036,7 @@ def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str])
     if not pin:
         raise PinValidationError("pin_required")
 
-    ip_key = client_host or "unknown"
+    ip_key = str(ip_obj) if ip_obj is not None else (client_host or "unknown")
     _check_rate_limit(ip_key)
     if pin != CURRENT_PIN:
         _register_fail(ip_key)
