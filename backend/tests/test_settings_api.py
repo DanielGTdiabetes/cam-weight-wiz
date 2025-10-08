@@ -206,6 +206,40 @@ def test_post_settings_accepts_valid_pin(api_client, tmp_path: Path, monkeypatch
     assert stored.ui.offline_mode is True
 
 
+def test_post_settings_rejects_non_object_payload(api_client, tmp_path: Path, monkeypatch):
+    _service, pin_path = _prepare_api_state(tmp_path, monkeypatch)
+    pin_path.write_text("1234", encoding="utf-8")
+
+    response = api_client.post(
+        "/api/settings",
+        json=["not", "an", "object"],
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": {"code": "invalid_payload", "message": "Se esperaba un objeto JSON"}
+    }
+
+
+def test_post_settings_returns_422_for_model_validation_errors(
+    api_client, tmp_path: Path, monkeypatch
+):
+    _service, pin_path = _prepare_api_state(tmp_path, monkeypatch)
+    pin_path.write_text("1234", encoding="utf-8")
+
+    response = api_client.post(
+        "/api/settings",
+        json={"nightscout": "oops"},
+        headers={"Authorization": "BasculaPin 1234"},
+    )
+
+    assert response.status_code == 422
+    detail = response.json().get("detail")
+    assert isinstance(detail, list)
+    assert any("nightscout" in error.get("loc", []) for error in detail)
+
+
 def test_post_settings_accepts_legacy_diabetes_payload(api_client, tmp_path: Path, monkeypatch):
     service, pin_path = _prepare_api_state(tmp_path, monkeypatch)
     pin_path.write_text("1234", encoding="utf-8")

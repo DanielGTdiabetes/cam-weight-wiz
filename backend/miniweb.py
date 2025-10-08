@@ -30,10 +30,11 @@ from pathlib import Path
 import httpx
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, PlainTextResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 # Settings service
 import sys
@@ -3932,7 +3933,10 @@ async def update_settings(request: Request):
             detail={"code": "invalid_payload", "message": "Se esperaba un objeto JSON"},
         )
 
-    payload = SettingsUpdatePayload.model_validate(raw_payload)
+    try:
+        payload = SettingsUpdatePayload.model_validate(raw_payload)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors()) from exc
 
     requires_pin = any(
         getattr(payload, field) is not None
