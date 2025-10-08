@@ -97,12 +97,31 @@ LOG_OTA = logging.getLogger("bascula.ota")
 LOG_MINIWEB = logging.getLogger("bascula.miniweb")
 LOG_APP = logging.getLogger("bascula.app")
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default
+
 LOG_DIR = Path("/var/log/bascula")
 MINIWEB_LOG_PATH = LOG_DIR / "miniweb.log"
 APP_LOG_PATH = LOG_DIR / "app.log"
 SETTINGS_RELOAD_SERVICE = "bascula-backend.service"
 
 SECRET_PLACEHOLDER = "__stored__"
+
+
+PIN_REQUIRED_FOR_REMOTE = _env_flag("BASCULA_PIN_REQUIRED", True)
+if not PIN_REQUIRED_FOR_REMOTE:
+    LOG_MINIWEB.info("settings: pin bypass enabled for LAN via BASCULA_PIN_REQUIRED=false")
 
 
 def _ensure_log_dir() -> None:
@@ -3901,6 +3920,9 @@ def _pin_error_response(exc: PinValidationError) -> JSONResponse:
 
 
 def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str]) -> None:
+    if not PIN_REQUIRED_FOR_REMOTE:
+        return
+
     client_host = _extract_client_host(request)
     if _is_trusted_client(client_host):
         return

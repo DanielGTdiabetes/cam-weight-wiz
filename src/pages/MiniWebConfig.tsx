@@ -188,10 +188,59 @@ const parseErrorResponse = async (response: Response): Promise<string> => {
     return `HTTP ${response.status}`;
   }
 };
+
+interface SettingsSaveToastOptions {
+  successDescription?: string;
+}
+
+type ActiveToast = {
+  update: (props: Record<string, unknown>) => void;
+  dismiss: () => void;
+};
 export const MiniWebConfig = () => {
   const localClient = isLocalClient();
   useSettingsSync(); // Enable real-time settings sync
   const { toast } = useToast();
+
+  const handleSettingsResponse = useCallback(
+    async (response: Response, options?: SettingsSaveToastOptions) => {
+      if (response.ok) {
+        toast({
+          title: "Guardado correctamente",
+          description: options?.successDescription,
+        });
+        return true;
+      }
+
+      if (response.status === 403) {
+        toast({
+          title: "PIN requerido/incorrecto",
+          description: "Ingresa el PIN correcto para guardar los cambios.",
+          variant: "destructive",
+        });
+        return false;
+      }
+
+      const description = await parseErrorResponse(response);
+
+      if (response.status === 422) {
+        toast({
+          title: "Datos inválidos",
+          description,
+          variant: "destructive",
+        });
+        return false;
+      }
+
+      toast({
+        title: "Error de guardado",
+        description,
+        variant: "destructive",
+      });
+      return false;
+    },
+    [toast],
+  );
 
   const [pinInput, setPinInput] = useState("");
   const [pinVerified, setPinVerified] = useState(localClient);
@@ -256,6 +305,7 @@ export const MiniWebConfig = () => {
 
   const [healthStatus, setHealthStatus] = useState<HealthState>({ ok: false, message: "Sin comprobar", timestamp: null });
   const redirectTimerRef = useRef<number | null>(null);
+  const wifiToastRef = useRef<ActiveToast | null>(null);
 
   const getAuthorizationHeader = useCallback(
     (pinOverride?: string): string | undefined => {
@@ -651,10 +701,13 @@ export const MiniWebConfig = () => {
 
       setConnectingWifi(false);
       setNetworkMessage({ type: "success", message });
-      toast({
-        title: "Wi-Fi conectada",
-        description: "La báscula se conectó correctamente. Volviendo a la app principal…",
-      });
+      const successDescription = "La báscula se conectó correctamente. Volviendo a la app principal…";
+      if (wifiToastRef.current) {
+        wifiToastRef.current.update({ title: "Conectado", description: successDescription });
+        wifiToastRef.current = null;
+      } else {
+        toast({ title: "Conectado", description: successDescription });
+      }
       void refreshStatus();
       scheduleRedirect();
     };
@@ -679,11 +732,12 @@ export const MiniWebConfig = () => {
       const reason = payload?.message?.trim() || "No se pudo conectar a la red Wi-Fi.";
       setConnectingWifi(false);
       setNetworkMessage({ type: "error", message: reason });
-      toast({
-        title: "Conexión fallida",
-        description: reason,
-        variant: "destructive",
-      });
+      if (wifiToastRef.current) {
+        wifiToastRef.current.update({ title: "Conexión fallida", description: reason, variant: "destructive" });
+        wifiToastRef.current = null;
+      } else {
+        toast({ title: "Conexión fallida", description: reason, variant: "destructive" });
+      }
       void refreshStatus();
     };
 
@@ -920,6 +974,12 @@ export const MiniWebConfig = () => {
     }
 
     setConnectingWifi(true);
+    setNetworkMessage({ type: "info", message: "Conectando…" });
+    const connectingToast = toast({
+      title: "Conectando…",
+      description: `La báscula intenta conectarse a "${ssid}".`,
+    });
+    wifiToastRef.current = connectingToast;
     try {
       const response = await fetch("/api/miniweb/connect-wifi", {
         method: "POST",
@@ -929,21 +989,30 @@ export const MiniWebConfig = () => {
 
       if (!response.ok) {
         const message = await parseErrorResponse(response);
-        setNetworkMessage({ type: "error", message });
+        const isPinError = response.status === 403;
+        const errorTitle = isPinError ? "PIN requerido/incorrecto" : "Error al conectar";
+        const errorDescription = isPinError
+          ? "Ingresa el PIN correcto para cambiar la red Wi-Fi."
+          : message || "No se pudo conectar a la red.";
+        connectingToast.update({
+          title: errorTitle,
+          description: errorDescription,
+          variant: "destructive",
+        });
+        wifiToastRef.current = null;
+        setNetworkMessage({ type: "error", message: errorDescription });
         return;
       }
-
-      setNetworkMessage({ type: "success", message: "Solicitud enviada. Verificando la conexión…" });
-      toast({ title: "Conectando", description: "La báscula está intentando conectarse a la red seleccionada." });
       await refreshStatus();
     } catch (error) {
       logger.error("No se pudo iniciar la conexión Wi-Fi", { error });
-      setNetworkMessage({ type: "error", message: "No se pudo conectar a la red. Inténtalo nuevamente." });
-      toast({
-        title: "Error de conexión",
+      connectingToast.update({
+        title: "Error al conectar",
         description: "Ocurrió un problema al conectar con la red Wi-Fi.",
         variant: "destructive",
       });
+      wifiToastRef.current = null;
+      setNetworkMessage({ type: "error", message: "No se pudo conectar a la red. Inténtalo nuevamente." });
     } finally {
       setConnectingWifi(false);
     }
@@ -967,29 +1036,32 @@ export const MiniWebConfig = () => {
 
     setSavingOfflineMode(true);
     try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (pin) {
-        headers.Authorization = `BasculaPin ${pin}`;
-      }
-      const response = await fetch("/api/settings", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ ui: { offline_mode: nextValue } }),
-      });
-      if (!response.ok) {
-        const message = await parseErrorResponse(response);
-        throw new Error(message);
-      }
-      toast({
-        title: "Modo offline actualizado",
-        description: nextValue
+      const response = await authorizedFetch(
+        "/api/settings",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ui: { offline_mode: nextValue } }),
+        },
+        pin,
+      );
+      const success = await handleSettingsResponse(response, {
+        successDescription: nextValue
           ? "La báscula usará el modo offline cuando no haya Internet."
           : "La báscula volverá a mostrar la pantalla de punto de acceso sin conexión.",
       });
+      if (!success) {
+        setOfflineModeEnabled(previous);
+        return;
+      }
       await refreshStatus();
     } catch (error) {
-      const description = error instanceof Error ? error.message : "No se pudo actualizar el modo offline.";
-      toast({ title: "Error al guardar", description, variant: "destructive" });
+      logger.error("No se pudo actualizar el modo offline", { error });
+      toast({
+        title: "Error de guardado",
+        description: "No se pudo actualizar el modo offline.",
+        variant: "destructive",
+      });
       setOfflineModeEnabled(previous);
     } finally {
       setSavingOfflineMode(false);
@@ -1021,27 +1093,32 @@ export const MiniWebConfig = () => {
     }
     setSavingIntegrations(true);
     try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (pin) {
-        headers.Authorization = `BasculaPin ${pin}`;
-      }
-      const response = await fetch("/api/settings", {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
+      const response = await authorizedFetch(
+        "/api/settings",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        pin,
+      );
+      const success = await handleSettingsResponse(response, {
+        successDescription: "Los cambios se aplicaron correctamente.",
       });
-      if (!response.ok) {
-        const message = await parseErrorResponse(response);
-        throw new Error(message);
+      if (!success) {
+        return;
       }
-      toast({ title: "Integraciones guardadas", description: "Los cambios se aplicaron correctamente." });
       setOpenaiDirty(false);
       setNightscoutUrlDirty(false);
       setNightscoutTokenDirty(false);
       await refreshSettings();
     } catch (error) {
-      const description = error instanceof Error ? error.message : "No se pudieron guardar las integraciones.";
-      toast({ title: "Error al guardar", description, variant: "destructive" });
+      logger.error("No se pudieron guardar las integraciones", { error });
+      toast({
+        title: "Error de guardado",
+        description: "No se pudieron guardar las integraciones.",
+        variant: "destructive",
+      });
     } finally {
       setSavingIntegrations(false);
     }
