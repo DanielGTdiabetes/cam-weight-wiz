@@ -44,6 +44,7 @@ import stat
 import pwd
 import grp
 
+from backend.audio_utils import play_audio_file, play_pcm_audio
 from scale_service import HX711Service
 from serial_scale_service import SerialScaleService
 from app.services.settings_service import get_settings_service
@@ -347,6 +348,7 @@ DEFAULT_SERIAL_DEVICE = "/dev/serial0"
 DEFAULT_SERIAL_BAUD = 115200
 
 LOG_SCALE = logging.getLogger("bascula.scale")
+LOG_VOICE = logging.getLogger("bascula.voice")
 
 # Global state
 ScaleServiceType = Union[HX711Service, SerialScaleService]
@@ -1183,10 +1185,12 @@ async def timer_countdown(seconds: int):
     if timer_state["running"]:
         # Timer finished, play sound
         try:
-            subprocess.run(["aplay", "/usr/share/sounds/alsa/Front_Center.wav"], check=False)
-        except:
+            await asyncio.to_thread(
+                play_audio_file, Path("/usr/share/sounds/alsa/Front_Center.wav")
+            )
+        except Exception:
             pass
-    
+
     timer_state["running"] = False
     timer_state["remaining"] = 0
 
@@ -1280,37 +1284,76 @@ async def export_bolus(data: BolusData):
 
 # ============= VOICE/TTS =============
 
+
+def _detect_piper_sample_rate(model_path: str) -> int:
+    sample_rate = 22050
+    json_path = Path(f"{model_path}.json")
+    if json_path.exists():
+        try:
+            with json_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                rate = data.get("sample_rate")
+                if isinstance(rate, (int, float)):
+                    sample_rate = int(rate)
+                else:
+                    audio_cfg = data.get("audio")
+                    if isinstance(audio_cfg, dict):
+                        audio_rate = audio_cfg.get("sample_rate")
+                        if isinstance(audio_rate, (int, float)):
+                            sample_rate = int(audio_rate)
+        except Exception:
+            pass
+    return sample_rate
+
+
+def _synthesize_with_piper_raw(model_path: str, text: str) -> bytes:
+    cmd = ["piper", "--model", model_path, "--output-raw"]
+    proc = subprocess.run(
+        cmd,
+        input=text.encode("utf-8"),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return proc.stdout
+
+
 @app.post("/api/voice/speak")
 async def speak_text(data: SpeakRequest):
     """Convert text to speech using Piper TTS"""
     try:
         # Sanitize text to prevent command injection
         safe_text = data.text.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
-        
+
         # Use Piper TTS if installed
-        if os.path.exists("/usr/local/bin/piper"):
+        piper_binary = "/usr/local/bin/piper"
+        if os.path.exists(piper_binary):
             voice_model = f"/opt/piper/models/{data.voice}.onnx"
             if os.path.exists(voice_model):
-                # Generate speech using piped commands safely
-                echo_proc = subprocess.Popen(
-                    ["echo", data.text],
-                    stdout=subprocess.PIPE
-                )
-                piper_proc = subprocess.Popen(
-                    ["piper", "--model", voice_model, "--output-raw"],
-                    stdin=echo_proc.stdout,
-                    stdout=subprocess.PIPE
-                )
-                subprocess.Popen(
-                    ["aplay", "-r", "22050", "-f", "S16_LE"],
-                    stdin=piper_proc.stdout
-                )
-                echo_proc.stdout.close()
-                piper_proc.stdout.close()
-                return {"success": True}
-        
+                sample_rate = _detect_piper_sample_rate(voice_model)
+                try:
+                    pcm_audio = await asyncio.to_thread(
+                        _synthesize_with_piper_raw,
+                        voice_model,
+                        data.text,
+                    )
+                    await asyncio.to_thread(
+                        play_pcm_audio,
+                        pcm_audio,
+                        sample_rate=sample_rate,
+                        channels=1,
+                    )
+                    return {"success": True}
+                except Exception as exc:
+                    LOG_VOICE.warning(
+                        "Piper playback failed for %s: %s",
+                        voice_model,
+                        exc,
+                    )
+
         # Fallback to espeak (already safe with list)
-        subprocess.Popen(["espeak", "-v", "es", data.text])
+        subprocess.Popen(["espeak", "-v", "es", safe_text])
         return {"success": True, "fallback": "espeak"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
