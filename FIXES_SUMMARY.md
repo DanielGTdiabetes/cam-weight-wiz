@@ -1,125 +1,29 @@
-# Fixes Summary - Configuration & Network UX
+# Fixes Summary - Configuración sin PIN y nueva UI de /config
 
-## Backend Changes
+## 2025-XX-XX
 
-### 1. Fixed `effective_mode` Logic (backend/miniweb.py)
-**Problem:** Offline mode didn't deactivate when Ethernet with Internet was connected.
+### Cambios clave
+- **Nueva interfaz React/Vite (`src/pages/MiniWebConfig.tsx`)**: vista única para estado del dispositivo, Wi-Fi, OpenAI y Nightscout. Maneja `__stored__`, no limpia inputs tras guardar y permite seleccionar redes con un clic.
+- **Estado compartido con Zustand (`src/stores/configStore.ts`)**: centraliza `settings`, `networkStatus`, estados ocupados y la cola de toasts para sincronizar la UI con el backend.
+- **Toasts consistentes (`src/components/config/ConfigToastManager.tsx`)**: puente entre el store y el sistema de notificaciones existente para mostrar mensajes estándar (éxito, advertencia, error, info).
+- **Backend sin PIN (`backend/miniweb.py`)**: eliminada la validación de PIN en `/api/settings`, `/api/wifi/*`, `/api/settings/test/*` y pruebas Nightscout/OpenAI; el endpoint de PIN ahora devuelve `enabled: false`.
+- **Actualización de service worker**: el script `scripts/generate-service-worker.mjs` genera versiones `cwz-<semver>-<sha>` para forzar la recarga del frontend y se añade el botón "Recargar UI".
 
-**Solution:** Rewrote `_determine_effective_mode()`:
-- No IP on any interface → `"ap"` mode
-- Connection with Internet → `"kiosk"` mode (auto-disables manual offline)
-- Connection without Internet → `"offline"` mode
-- Removed priority check for `offline_mode_enabled` that prevented auto-recovery
+### Notas de migración
+1. Ejecuta `npm run build` (o el `install-all.sh` existente) para regenerar `backend/dist/` tras cualquier cambio en `frontend/`.
+2. Las peticiones desde clientes antiguos pueden seguir enviando el campo `pin`, pero es ignorado. No es necesario actualizar claves ni tokens existentes; si están almacenados se muestran como `__stored__`.
+3. El botón de teclado en pantalla sólo funciona en la báscula (determinada por `hostname`/`userAgent`). Verifica que `matchbox-keyboard` esté instalado en la imagen de la Pi.
+4. El botón "Recargar UI" limpia Cache Storage y pide a los service workers descargar la última versión; puede ser útil tras despliegues OTA.
 
-### 2. Fixed Settings Persistence (backend/miniweb.py)
-**Problem:** `/api/settings` responded 200 but didn't persist OpenAI API key and Nightscout settings.
+### Pruebas manuales sugeridas
+- Abrir `http://<ip>:8080/config` desde la LAN y comprobar que no se solicita PIN.
+- Guardar una clave de OpenAI y un token/URL de Nightscout; recargar la página para comprobar el badge "Guardado" y que los inputs permanecen editables.
+- Escanear redes Wi-Fi, seleccionar una red con un clic, introducir contraseña y conectar. Verificar mensajes "Conectando…" → "Conectado".
+- Alternar "Modo offline" y confirmar que el estado se refleja en el panel de "Estado rápido".
+- Usar "Probar" en OpenAI/Nightscout para ver toasts de éxito o error según respuesta del backend.
+- Desde la báscula, abrir el teclado en pantalla y usar "Recargar UI" para validar la limpieza de caché.
 
-**Solution:** 
-- Changed from `_save_json()` to use `SettingsService.save()` with atomic writes
-- Settings now properly persist to `~/.bascula/config.json` with correct permissions (600)
-- Version metadata increments on each save for change tracking
+### Pruebas automáticas recomendadas
+- `pytest` (si hay suites configuradas) para validar `/api/settings` y `/api/wifi/*`.
+- `npm run build` para asegurar que la UI compila y genera `backend/dist/`.
 
-### 3. Updated Tests (backend/tests/)
-- Updated `test_effective_mode.py` to reflect new logic (Internet availability overrides manual offline)
-- Enhanced `test_miniweb_settings.py` with tests for:
-  - Disk persistence verification
-  - Version increment on save
-  - Atomic write guarantees
-
-### 4. Hotfix: LAN PIN bypass flag (backend/miniweb.py)
-- Añadida la variable de entorno `BASCULA_PIN_REQUIRED` (por defecto `true`) para permitir desactivar temporalmente la exigencia de PIN en la miniweb cuando el acceso proviene de la LAN.
-- Se registra en los logs cuando el bypass está activo para facilitar auditorías: `settings: pin bypass enabled for LAN via BASCULA_PIN_REQUIRED=false`.
-
-## Frontend Changes
-
-### 4. Fixed Build Errors (src/pages/SettingsView.tsx)
-**Problem:** Variables used before declaration causing TypeScript errors.
-
-**Solution:** Reordered state declarations to fix hoisting issues with `networkIP2` and `pinVerified`.
-
-### 5. Simplified AP Mode Screen (src/components/APModeScreen.tsx)
-**Problem:** Confusing UI with duplicate buttons and unclear messaging.
-
-**Solution:**
-- Streamlined to two clear buttons: "Configurar Wi-Fi" and "Modo Offline"
-- Removed duplicate button sections
-- Updated messaging to clarify auto-recovery when Internet is restored
-- Added note about cable Ethernet configuration option
-
-## Expected Behavior
-
-### Normal Operation
-1. **With Internet:** System runs in `kiosk` mode (normal operation)
-2. **Without Internet:** System switches to `offline` mode automatically
-3. **No connection:** System shows AP mode screen with WiFi setup
-
-### Offline Mode Toggle
-1. **Manual activation:** User can activate offline mode from AP screen or settings
-2. **Auto-deactivation:** When Internet becomes available (especially via Ethernet), system automatically returns to `kiosk` mode
-3. **Persistence:** Offline mode preference is saved but overridden by Internet availability
-
-### Settings Persistence
-1. **OpenAI API Key:** Saved to `network.openai_api_key`
-2. **Nightscout URL/Token:** Saved to `diabetes.nightscout_url` and `diabetes.nightscout_token`
-3. **Atomic Writes:** All settings use atomic write (write to `.tmp` + rename) to prevent corruption
-4. **Permissions:** Config file is `600` (owner read/write only), directory is `700`
-
-## Outstanding Issues
-
-### 1. "Cannot access 'Yc' before initialization" Error
-**Status:** Likely a build cache/bundling issue
-**Suggested Fix:**
-- Clear Vite build cache: `rm -rf backend/dist .vite node_modules/.vite`
-- Rebuild: `npm run build` or from `scripts/install-all.sh`
-- May require code splitting review if persists
-
-### 2. Touch Keyboard Disappeared
-**Status:** Needs investigation
-**Files to Check:**
-- `src/components/KeyboardDialog.tsx`
-- `src/components/NumericKeyboard.tsx`
-- `src/components/AlphanumericKeyboard.tsx`
-- Backend keyboard integration
-
-### 3. Installation Script Updates
-**Recommended:** Update `scripts/install-all.sh` to:
-```bash
-# Clear frontend cache
-rm -rf backend/dist
-rm -rf node_modules/.vite
-rm -rf .vite
-
-# Rebuild
-npm run build
-
-# Restart services
-sudo systemctl restart bascula-miniweb
-```
-
-## Testing Checklist
-
-- [x] Offline mode auto-disables when Ethernet with Internet connects
-- [x] Settings persist to disk with atomic writes
-- [x] AP screen shows correct buttons and messaging
-- [x] Build errors resolved
-- [ ] Touch keyboard works on Raspberry Pi (needs hardware testing)
-- [ ] Remote access to `/settings` works without "Yc" error (needs cache clear + rebuild)
-- [ ] POST `/api/settings` persists OpenAI key and Nightscout credentials (covered by tests)
-
-## Migration Notes
-
-**No breaking changes.** Existing config files are compatible. The settings service includes automatic migration for misplaced keys (e.g., `openai_api_key` in wrong section).
-
-## Files Modified
-
-### Backend
-- `backend/miniweb.py` - effective_mode logic, settings persistence
-- `backend/tests/test_effective_mode.py` - updated test expectations
-- `backend/tests/test_miniweb_settings.py` - added persistence tests
-
-### Frontend
-- `src/pages/SettingsView.tsx` - fixed variable declarations
-- `src/components/APModeScreen.tsx` - simplified UI and messaging
-
-### New Files
-- `FIXES_SUMMARY.md` - this document

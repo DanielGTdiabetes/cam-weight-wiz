@@ -5,9 +5,7 @@ Includes: Scale, Camera, OCR, Timer, Nightscout, TTS, Recipes, Settings, OTA
 
 from fastapi import (
     Body,
-    Depends,
     FastAPI,
-    Header,
     HTTPException,
     Request,
     Response,
@@ -289,48 +287,10 @@ async def chatgpt_barcode_lookup(payload: Dict[str, Any]) -> Optional[Dict[str, 
 # Configuration
 CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
 CONFIG_PATH = CFG_DIR / "config.json"
-PIN_PATH = CFG_DIR / "miniweb_pin"
 _settings_service = get_settings_service(CONFIG_PATH)
 _TEST_RATE_LIMIT_SECONDS = 5.0
 _test_rate_limit: Dict[str, float] = {}
 _test_rate_lock = threading.Lock()
-PIN_AUTH_PREFIX = "BasculaPin "
-
-
-def _load_pin() -> Optional[str]:
-    try:
-        value = PIN_PATH.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    except Exception:
-        return None
-
-    if value.isdigit() and len(value) == 4:
-        return value
-    return None
-
-
-def _require_pin_header(authorization: Optional[str]) -> None:
-    if not authorization or not authorization.startswith(PIN_AUTH_PREFIX):
-        raise HTTPException(status_code=401, detail="PIN requerido")
-
-    provided = authorization[len(PIN_AUTH_PREFIX) :].strip()
-    expected = _load_pin()
-    if not expected:
-        raise HTTPException(status_code=401, detail="PIN no configurado")
-    if provided != expected:
-        raise HTTPException(status_code=401, detail="PIN incorrecto")
-
-
-def require_pin(request: Request, authorization: Optional[str] = Header(None)) -> None:
-    client = request.client
-    client_host = client.host if client else None
-    if client_host in {"127.0.0.1", "::1", "::ffff:127.0.0.1"} or client_host is None:
-        return
-
-    _require_pin_header(authorization)
-
-
 def _enforce_test_rate_limit(ip: str) -> None:
     now = time.monotonic()
     with _test_rate_lock:
@@ -1760,7 +1720,7 @@ async def put_settings_not_allowed() -> JSONResponse:
 
 
 @app.post("/api/settings")
-async def update_settings(settings: Dict[str, Any], _: None = Depends(require_pin)):
+async def update_settings(settings: Dict[str, Any]):
     """Update settings"""
     return await _handle_settings_update(settings)
 
@@ -1795,7 +1755,6 @@ async def websocket_settings_updates(websocket: WebSocket):
 async def settings_test_openai(
     request: Request,
     payload: SettingsTestOpenAIRequest = Body(default_factory=SettingsTestOpenAIRequest),
-    _: None = Depends(require_pin),
 ):
     client_ip = request.client.host if request.client else "unknown"
     try:
@@ -1861,7 +1820,6 @@ async def settings_test_openai(
 async def settings_test_nightscout(
     request: Request,
     payload: SettingsTestNightscoutRequest = Body(default_factory=SettingsTestNightscoutRequest),
-    _: None = Depends(require_pin),
 ):
     client_ip = request.client.host if request.client else "unknown"
     try:

@@ -9,8 +9,6 @@ import socket
 import fcntl
 import struct
 import ipaddress
-import random
-import string
 import asyncio
 import time
 import threading
@@ -19,7 +17,7 @@ import tempfile
 import traceback
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple, TYPE_CHECKING
 from copy import deepcopy
 from urllib.parse import urlparse
@@ -77,7 +75,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DIST_DIR = BASE_DIR / "dist"
 
 CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
-PIN_PATH = CFG_DIR / "miniweb_pin"
 CONFIG_PATH = CFG_DIR / "config.json"
 
 # WebSocket connections for real-time sync
@@ -120,11 +117,6 @@ SECRET_PLACEHOLDER = "__stored__"
 
 
 TRUST_PROXY_FOR_CLIENT_IP = _env_flag("BASCULA_TRUST_PROXY", False)
-
-PIN_REQUIRED_FOR_REMOTE = _env_flag("BASCULA_PIN_REQUIRED", True)
-if not PIN_REQUIRED_FOR_REMOTE:
-    LOG_MINIWEB.info("settings: pin bypass enabled for LAN via BASCULA_PIN_REQUIRED=false")
-
 
 def _ensure_log_dir() -> None:
     try:
@@ -211,42 +203,8 @@ def _parse_trusted_networks(raw: str | None) -> Set[ipaddress._BaseNetwork]:
     return networks
 
 
-_DEFAULT_PIN_TRUSTED_CIDRS: Tuple[str, ...] = (
-    "127.0.0.0/8",
-    "10.0.0.0/8",
-    "172.16.0.0/12",
-    "192.168.0.0/16",
-    "::1/128",
-    "fc00::/7",
-    "fe80::/10",
-)
-
-
-def _load_pin_trusted_networks(extra_raw: str | None) -> Set[ipaddress._BaseNetwork]:
-    networks: Set[ipaddress._BaseNetwork] = set()
-    for cidr in _DEFAULT_PIN_TRUSTED_CIDRS:
-        try:
-            networks.add(ipaddress.ip_network(cidr, strict=False))
-        except ValueError:
-            LOG_NETWORK.warning("Ignorando CIDR confiable inválido por defecto: %s", cidr)
-    if not extra_raw:
-        return networks
-    for chunk in extra_raw.split(","):
-        candidate = chunk.strip()
-        if not candidate:
-            continue
-        try:
-            network = ipaddress.ip_network(candidate, strict=False)
-        except ValueError:
-            LOG_NETWORK.warning("Ignorando CIDR confiable inválido: %s", candidate)
-            continue
-        networks.add(network)
-    return networks
-
-
 _TRUSTED_HOSTS = _parse_trusted_hosts(os.getenv("BASCULA_MINIWEB_TRUSTED_HOSTS"))
 _TRUSTED_NETWORKS = _parse_trusted_networks(os.getenv("BASCULA_MINIWEB_TRUSTED_SUBNETS"))
-PIN_TRUSTED_NETWORKS = _load_pin_trusted_networks(os.getenv("BASCULA_PIN_TRUSTED_CIDRS"))
 
 CFG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -888,30 +846,6 @@ def _load_config() -> Dict[str, Any]:
     return config
 
 
-def _gen_pin() -> str:
-    return "".join(random.choices(string.digits, k=4))
-
-
-def _load_pin() -> Optional[str]:
-    try:
-        if PIN_PATH.exists():
-            value = PIN_PATH.read_text().strip()
-            if value.isdigit() and len(value) == 4:
-                return value
-    except Exception:
-        return None
-    return None
-
-
-def _write_pin(pin: str) -> None:
-    try:
-        CFG_DIR.mkdir(parents=True, exist_ok=True)
-        PIN_PATH.write_text(pin)
-        os.chmod(PIN_PATH, 0o600)
-    except Exception:
-        pass
-
-
 def _default_ota_state() -> Dict[str, Any]:
     return {
         "status": "idle",
@@ -1399,15 +1333,6 @@ with _OTA_STATE_LOCK:
             _append_ota_log(f"[ota] {recovery_message}")
         except Exception:
             pass
-
-def _get_or_create_pin() -> str:
-    pin = _load_pin()
-    if pin:
-        return pin
-    pin = _gen_pin()
-    _write_pin(pin)
-    return pin
-
 
 def _coerce_int(value: Any, default: int, label: str) -> int:
     try:
@@ -2939,18 +2864,6 @@ def _coerce_ip_address(value: str) -> Optional[IPAddressType]:
     return ip_obj
 
 
-def _match_pin_trusted_network(host: Optional[str]) -> Tuple[Optional[IPAddressType], Optional[ipaddress._BaseNetwork]]:
-    if not host:
-        return None, None
-    ip_obj = _coerce_ip_address(host)
-    if ip_obj is None:
-        return None, None
-    for network in PIN_TRUSTED_NETWORKS:
-        if ip_obj in network:
-            return ip_obj, network
-    return ip_obj, None
-
-
 def _extract_client_host(request: Request) -> Optional[str]:
     if TRUST_PROXY_FOR_CLIENT_IP and request.headers:
         forwarded_for = request.headers.get("x-forwarded-for")
@@ -2999,14 +2912,6 @@ def _is_trusted_client(client_host: Optional[str]) -> bool:
         mapped = client_host.split(":")[-1]
         return _host_in_trusted_set(mapped)
     return False
-
-
-def _allow_pin_disclosure(client_host: Optional[str]) -> bool:
-    if _is_trusted_client(client_host):
-        return True
-    if os.getenv("BASCULA_ALLOW_PIN_READ", "0") == "1":
-        return True
-    return _is_ap_active()
 
 
 def _nm_unescape(value: str) -> str:
@@ -3909,7 +3814,7 @@ if DIST_DIR.exists():
 
 
 class PinVerification(BaseModel):
-    pin: str
+    pin: Optional[str] = None
 
 
 class WifiCredentials(BaseModel):
@@ -3945,13 +3850,11 @@ class DiabetesUpdate(BaseModel):
 
 class SettingsTestOpenAI(BaseModel):
     apiKey: Optional[str] = None
-    pin: Optional[str] = None
 
 
 class SettingsTestNightscout(BaseModel):
     url: Optional[str] = None
     token: Optional[str] = None
-    pin: Optional[str] = None
 
 
 class SettingsUpdatePayload(BaseModel):
@@ -3971,104 +3874,20 @@ class SettingsUpdatePayload(BaseModel):
     offline_mode: Optional[Any] = None
 
 
-# ---------- PIN persistente ----------
-CURRENT_PIN = _get_or_create_pin()
-
-# Rate limit básico en memoria (por IP)
-FAILED_ATTEMPTS: Dict[str, List[datetime]] = {}
-MAX_ATTEMPTS = 10
-WINDOW = timedelta(minutes=10)
-
-
-def _check_rate_limit(ip: str):
-    now = datetime.utcnow()
-    history = FAILED_ATTEMPTS.get(ip, [])
-    history = [t for t in history if now - t <= WINDOW]
-    FAILED_ATTEMPTS[ip] = history
-    if len(history) >= MAX_ATTEMPTS:
-        raise HTTPException(status_code=429, detail="Too many attempts, try later")
-
-
-def _register_fail(ip: str):
-    FAILED_ATTEMPTS.setdefault(ip, []).append(datetime.utcnow())
-
-
-def _clear_failures(ip: str):
-    if ip in FAILED_ATTEMPTS:
-        FAILED_ATTEMPTS.pop(ip, None)
-
-
-class PinValidationError(Exception):
-    def __init__(self, code: str):
-        self.code = code
-        super().__init__(code)
-
-
-def _pin_error_response(exc: PinValidationError) -> JSONResponse:
-    return JSONResponse(status_code=403, content={"error": exc.code})
-
-
-def _ensure_pin_valid_for_request(request: Request, provided_pin: Optional[str]) -> None:
-    client_host = _extract_client_host(request)
-    ip_obj, trusted_network = _match_pin_trusted_network(client_host)
-
-    if PIN_REQUIRED_FOR_REMOTE:
-        if _is_trusted_client(client_host):
-            return
-    else:
-        if trusted_network is not None and ip_obj is not None:
-            LOG_MINIWEB.info(
-                "pin bypass active for trusted LAN (ip=%s, cidr=%s)",
-                str(ip_obj),
-                str(trusted_network),
-            )
-            return
-        if _is_trusted_client(client_host):
-            return
-        display_ip = str(ip_obj) if ip_obj is not None else (client_host or "unknown")
-        LOG_MINIWEB.warning("pin bypass skipped for untrusted origin (ip=%s)", display_ip)
-
-    pin = (provided_pin or "").strip()
-    if not pin:
-        auth_header = request.headers.get("Authorization", "") if hasattr(request, "headers") else ""
-        if isinstance(auth_header, str) and auth_header.lower().startswith("basculapin "):
-            pin = auth_header.split(" ", 1)[1].strip()
-    if not pin:
-        raise PinValidationError("pin_required")
-
-    ip_key = str(ip_obj) if ip_obj is not None else (client_host or "unknown")
-    _check_rate_limit(ip_key)
-    if pin != CURRENT_PIN:
-        _register_fail(ip_key)
-        raise PinValidationError("pin_invalid")
-
-    _clear_failures(ip_key)
-
-
+# ---------- PIN persistente (deshabilitado) ----------
 @app.get("/health")
 async def health():
     return {"ok": True}
 
 
 @app.get("/api/miniweb/pin")
-async def get_pin(request: Request):
-    client_host = _extract_client_host(request)
-    if _allow_pin_disclosure(client_host):
-        return {"pin": CURRENT_PIN}
-    raise HTTPException(status_code=403, detail="Not allowed")
+async def get_pin(_: Request):
+    return {"pin": None, "enabled": False}
 
 
 @app.post("/api/miniweb/verify-pin")
-async def verify_pin(data: PinVerification, request: Request):
-    client_host = _extract_client_host(request)
-    ip = client_host or "unknown"
-    _check_rate_limit(ip)
-    pin = (data.pin or "").strip()
-    if pin == CURRENT_PIN:
-        _clear_failures(ip)
-        return {"success": True}
-    _register_fail(ip)
-    raise HTTPException(status_code=403, detail="Invalid PIN")
+async def verify_pin(_: PinVerification, __: Request):
+    return {"success": True, "enabled": False}
 
 
 @app.get("/api/settings")
@@ -4119,45 +3938,6 @@ async def update_settings(request: Request):
         plain_offline_mode = payload.offline_mode
     elif "offline_mode" in raw_payload:
         plain_offline_mode = raw_payload.get("offline_mode")
-
-    requires_pin = any(
-        getattr(payload, field) is not None
-        for field in (
-            "openai",
-            "nightscout",
-            "ui",
-            "tts",
-            "scale",
-            "serial",
-            "integrations",
-            "network",
-            "diabetes",
-            "offline_mode",
-        )
-    )
-    if not requires_pin:
-        network_payload = raw_payload.get("network")
-        diabetes_payload = raw_payload.get("diabetes")
-        if (
-            "openai_api_key" in raw_payload
-            or (isinstance(network_payload, dict) and "openai_api_key" in network_payload)
-            or "nightscout_url" in raw_payload
-            or "nightscout_token" in raw_payload
-            or (
-                isinstance(diabetes_payload, dict)
-                and any(
-                    key in diabetes_payload
-                    for key in ("nightscout_url", "nightscout_token", "diabetes_enabled")
-                )
-            )
-            or plain_offline_mode is not None
-        ):
-            requires_pin = True
-    if requires_pin or (payload.pin is not None and not trusted_client):
-        try:
-            _ensure_pin_valid_for_request(request, payload.pin)
-        except PinValidationError as exc:
-            return JSONResponse(status_code=403, content={"error": exc.code})
 
     ui_payload: Optional[Dict[str, Any]] = None
     if isinstance(payload.ui, dict):
@@ -4655,11 +4435,7 @@ async def websocket_settings_updates(websocket: WebSocket):
 
 
 @app.post("/api/settings/test/openai")
-async def settings_test_openai(payload: SettingsTestOpenAI, request: Request):
-    try:
-        _ensure_pin_valid_for_request(request, payload.pin)
-    except PinValidationError as exc:
-        return _pin_error_response(exc)
+async def settings_test_openai(payload: SettingsTestOpenAI):
     config = _load_config()
     candidate_key = (payload.apiKey or "").strip()
     api_key = candidate_key or _extract_openai_api_key(config)
@@ -4730,17 +4506,11 @@ async def _execute_nightscout_test_request(url: str, token: str) -> Tuple[int, D
 
 
 async def _perform_nightscout_test(
-    request: Request,
     url: Optional[str],
     token: Optional[str],
-    pin: Optional[str],
     *,
     source: str,
 ) -> Any:
-    try:
-        _ensure_pin_valid_for_request(request, pin)
-    except PinValidationError as exc:
-        return _pin_error_response(exc)
     config = _load_config()
     current_url, current_token = _extract_nightscout_credentials(config)
     target_url = (url or current_url).strip()
@@ -4762,21 +4532,17 @@ async def _perform_nightscout_test(
 
 @app.get("/api/nightscout/test")
 async def api_nightscout_test(
-    request: Request,
     url: Optional[str] = None,
     token: Optional[str] = None,
-    pin: Optional[str] = None,
 ):
-    return await _perform_nightscout_test(request, url, token, pin, source="get")
+    return await _perform_nightscout_test(url, token, source="get")
 
 
 @app.post("/api/settings/test/nightscout")
-async def settings_test_nightscout(payload: SettingsTestNightscout, request: Request):
+async def settings_test_nightscout(payload: SettingsTestNightscout):
     return await _perform_nightscout_test(
-        request,
         payload.url,
         payload.token,
-        payload.pin,
         source="legacy_post",
     )
 
@@ -4795,6 +4561,42 @@ async def scan_networks():
         raise HTTPException(status_code=400, detail={"code": code}) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/wifi/scan")
+async def wifi_scan():
+    return await scan_networks()
+
+
+@app.get("/api/wifi/networks")
+async def wifi_networks():
+    return await scan_networks()
+
+
+@app.get("/api/wifi/status")
+async def wifi_status():
+    return await miniweb_status()
+
+
+@app.post("/api/util/osk")
+async def launch_on_screen_keyboard(request: Request):
+    client_host = _extract_client_host(request)
+    if not _is_trusted_client(client_host):
+        raise HTTPException(status_code=403, detail="Solo disponible en la báscula")
+
+    try:
+        subprocess.Popen(
+            ["matchbox-keyboard"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="matchbox-keyboard no disponible") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {"ok": True}
 
 
 @app.get("/api/net/events")
@@ -5069,27 +4871,23 @@ async def _handle_wifi_connect(credentials: WifiCredentials) -> Dict[str, Any]:
 
 @app.post("/api/miniweb/connect")
 @app.post("/api/miniweb/connect-wifi")
-async def connect_wifi(credentials: WifiCredentials, request: Request):
-    try:
-        _ensure_pin_valid_for_request(request, credentials.pin)
-    except PinValidationError as exc:
-        return _pin_error_response(exc)
+async def connect_wifi(credentials: WifiCredentials):
     return await _handle_wifi_connect(credentials)
 
 
 @app.post("/api/network/connect")
-async def network_connect(payload: NetworkConnectRequest, request: Request):
+async def network_connect(payload: NetworkConnectRequest):
     creds = WifiCredentials(
         ssid=payload.ssid,
         password=payload.psk,
         open=payload.open,
-        pin=payload.pin,
     )
-    try:
-        _ensure_pin_valid_for_request(request, payload.pin)
-    except PinValidationError as exc:
-        return _pin_error_response(exc)
     return await _handle_wifi_connect(creds)
+
+
+@app.post("/api/wifi/connect")
+async def wifi_connect(credentials: WifiCredentials):
+    return await _handle_wifi_connect(credentials)
 
 
 @app.get("/api/miniweb/status")
@@ -5404,7 +5202,7 @@ def _print_boot_banner():
             print(f"📍 Access URL: {url}")
     else:
         print("📍 Access URL: http://<device-ip>:8080")
-    print(f"🔐 Mini-Web PIN: {CURRENT_PIN}")
+    print("🔐 Mini-Web PIN deshabilitado")
     print("============================================================")
 
 
