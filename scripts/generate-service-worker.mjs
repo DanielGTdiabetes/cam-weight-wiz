@@ -59,7 +59,7 @@ async function generate() {
 
   const pkgVersion = await readPackageVersion();
   const gitSha = readGitSha();
-  const cacheVersion = `v${pkgVersion}-${gitSha}`;
+  const cacheVersion = `cwz-${pkgVersion}-${gitSha}`;
 
   const template = await readFile(templatePath, 'utf8');
   const generated = template.replace(/__CACHE_VERSION__/g, cacheVersion);
