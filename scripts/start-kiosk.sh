@@ -79,9 +79,6 @@ CHROME_BIN="$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/
 
 exec "${CHROME_BIN}" \
   --kiosk \
-  --use-angle=gles \
-  --ozone-platform=x11 \
-  --disable-dev-shm-usage \
   --noerrdialogs \
   --disable-infobars \
   --no-first-run \
