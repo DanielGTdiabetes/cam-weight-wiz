@@ -1912,6 +1912,7 @@ else
 fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
+install -d -m0755 -o www-data -g www-data /run/bascula/captures || true
 cat > /etc/nginx/sites-available/bascula <<'EOF'
 server {
     listen 80 default_server;
@@ -1922,6 +1923,11 @@ server {
     gzip on;
     gzip_vary on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+
+    set_real_ip_from 127.0.0.1;
+    set_real_ip_from ::1;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
 
     # PWA/SPA
     location / {
@@ -1966,9 +1972,9 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer solo /tmp para la última captura
-    location ^~ /tmp/ {
-        alias /tmp/;
+    # Exponer capturas controladas solo a localhost
+    location ^~ /captures/ {
+        alias /run/bascula/captures/;
         default_type image/jpeg;
         autoindex off;
         add_header Cache-Control "no-store";
@@ -1990,6 +1996,11 @@ server {
     gzip_vary on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 
+    set_real_ip_from 127.0.0.1;
+    set_real_ip_from ::1;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
     # PWA/SPA
     location / {
         try_files $uri $uri/ /index.html;
@@ -2033,9 +2044,9 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer solo /tmp para la última captura
-    location ^~ /tmp/ {
-        alias /tmp/;
+    # Exponer capturas controladas solo a localhost
+    location ^~ /captures/ {
+        alias /run/bascula/captures/;
         default_type image/jpeg;
         autoindex off;
         add_header Cache-Control "no-store";
@@ -2057,6 +2068,11 @@ server {
     gzip_vary on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 
+    set_real_ip_from 127.0.0.1;
+    set_real_ip_from ::1;
+    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+
     # PWA/SPA
     location / {
         try_files $uri $uri/ /index.html;
@@ -2100,9 +2116,9 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer solo /tmp para la última captura
-    location ^~ /tmp/ {
-        alias /tmp/;
+    # Exponer capturas controladas solo a localhost
+    location ^~ /captures/ {
+        alias /run/bascula/captures/;
         default_type image/jpeg;
         autoindex off;
         add_header Cache-Control "no-store";
@@ -2495,5 +2511,5 @@ else
     || echo "[WARN] cámara no disponible o backend no iniciado"
 fi
 
-curl -fsSI http://localhost/tmp/camera-capture.jpg \
+curl -fsSI http://localhost/captures/camera-capture.jpg \
   || echo "[WARN] cámara no disponible o backend no iniciado"

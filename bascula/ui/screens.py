@@ -266,8 +266,12 @@ class ScanScreen(ttk.Frame):
                 self.after(0, lambda: self._on_capture_failure("Error al capturar imagen"))
                 return
 
+            default_path = "/run/bascula/captures/camera-capture.jpg"
+            default_url = "/captures/camera-capture.jpg"
             path_value = data.get("path")
-            file_path = path_value if isinstance(path_value, str) and path_value else "/tmp/camera-capture.jpg"
+            file_path = path_value if isinstance(path_value, str) and path_value else default_path
+            url_value = data.get("url")
+            display_url = url_value if isinstance(url_value, str) and url_value else default_url
 
             size_value = data.get("size")
             try:
@@ -276,16 +280,16 @@ class ScanScreen(ttk.Frame):
                 size = 0
 
             timestamp = int(time.time() * 1000)
-            self.after(0, lambda: self._on_capture_success(file_path, size, timestamp))
+            self.after(0, lambda: self._on_capture_success(file_path, display_url, size, timestamp))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_capture_success(self, path: str, size: int, timestamp: int) -> None:
+    def _on_capture_success(self, path: str, display_url: str, size: int, timestamp: int) -> None:
         self._capture_in_progress = False
         self._capture_button.state(["!disabled"])
         status_text = "Imagen actualizada" if size <= 0 else f"Imagen actualizada ({size} bytes)"
         self._set_status(status_text, error=False)
-        display_path = f"/tmp/camera-capture.jpg?ts={timestamp}"
+        display_path = f"{display_url}?ts={timestamp}"
         self._current_capture = display_path
         self._load_preview(Path(path))
 
