@@ -1977,13 +1977,11 @@ fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -d -m0755 /run/bascula || true
-if id -u pi >/dev/null 2>&1; then
-  install -d -m0770 -o pi -g pi /run/bascula/captures || true
-else
-  install -d -m0770 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /run/bascula/captures || true
-  log_warn "Usuario pi no encontrado; asignando capturas a ${TARGET_USER}:${TARGET_GROUP}"
-fi
-chmod 0770 /run/bascula/captures || true
+# Configurar permisos para nginx
+install -d -o pi -g www-data -m 0755 /run/bascula
+install -d -o pi -g www-data -m 02770 /run/bascula/captures
+# asegurar que el usuario pi pertenece al grupo www-data
+usermod -aG www-data pi || true
 cat > /etc/nginx/sites-available/bascula <<'EOF'
 server {
     listen 80 default_server;
