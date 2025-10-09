@@ -1972,15 +1972,11 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer capturas controladas solo a localhost
-    location ^~ /captures/ {
-        alias /run/bascula/captures/;
+    # Exponer la última captura de la cámara
+    location = /tmp/camera-capture.jpg {
+        alias /tmp/camera-capture.jpg;
         default_type image/jpeg;
-        autoindex off;
         add_header Cache-Control "no-store";
-        allow 127.0.0.1;
-        allow ::1;
-        deny all;
     }
 }
 EOF
@@ -2044,15 +2040,11 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer capturas controladas solo a localhost
-    location ^~ /captures/ {
-        alias /run/bascula/captures/;
+    # Exponer la última captura de la cámara
+    location = /tmp/camera-capture.jpg {
+        alias /tmp/camera-capture.jpg;
         default_type image/jpeg;
-        autoindex off;
         add_header Cache-Control "no-store";
-        allow 127.0.0.1;
-        allow ::1;
-        deny all;
     }
 }
 EOF
@@ -2116,15 +2108,11 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer capturas controladas solo a localhost
-    location ^~ /captures/ {
-        alias /run/bascula/captures/;
+    # Exponer la última captura de la cámara
+    location = /tmp/camera-capture.jpg {
+        alias /tmp/camera-capture.jpg;
         default_type image/jpeg;
-        autoindex off;
         add_header Cache-Control "no-store";
-        allow 127.0.0.1;
-        allow ::1;
-        deny all;
     }
 }
 EOF
@@ -2511,5 +2499,5 @@ else
     || echo "[WARN] cámara no disponible o backend no iniciado"
 fi
 
-curl -fsSI http://localhost/captures/camera-capture.jpg \
+curl -fsSI http://localhost/tmp/camera-capture.jpg \
   || echo "[WARN] cámara no disponible o backend no iniciado"
