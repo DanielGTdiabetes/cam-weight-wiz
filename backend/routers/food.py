@@ -12,10 +12,21 @@ from typing import Any, Dict, Optional
 import requests
 from fastapi import APIRouter, HTTPException
 from PIL import Image
+
 try:
-    from pydantic import BaseModel, Field, field_validator, conint
-except Exception:  # pragma: no cover - fallback for Pydantic v1
-    from pydantic.v1 import BaseModel, Field, validator as field_validator, conint
+    # Pydantic v2
+    from pydantic import BaseModel, Field, field_validator
+    _PYDANTIC_V2 = True
+except ImportError:
+    # Pydantic v1 (no uso de pydantic.v1)
+    from pydantic import BaseModel, Field, validator as field_validator
+    _PYDANTIC_V2 = False
+
+
+def pre_validator(*fields):
+    if _PYDANTIC_V2:
+        return field_validator(*fields, mode="before")
+    return field_validator(*fields, pre=True)
 
 ConfigDict = None
 try:  # pragma: no cover - ConfigDict only exists in Pydantic v2
@@ -44,16 +55,22 @@ class ScanRequest(BaseModel):
         default=None,
         description="Existing image path to reuse instead of taking a new capture.",
     )
-    rotate: conint(ge=0, le=270) = Field(
+    rotate: int = Field(
         default=0,
-        description="Rotation angle in degrees applied before processing (0/90/180/270).",
+        ge=0,
+        le=359,
+        description="Rotation angle in degrees applied before processing (0-359).",
     )
 
-    @field_validator("rotate")
-    def _rotate_multiple_of_90(cls, value: int) -> int:  # noqa: D417,N805
-        if value % 90 != 0:
-            raise ValueError("rotate must be a multiple of 90 (0, 90, 180, 270)")
-        return value
+    @pre_validator("rotate")
+    def _normalize_rotate(cls, v: Any) -> int:  # noqa: D417,N805
+        try:
+            iv = int(v)
+        except (TypeError, ValueError) as exc:  # pragma: no cover - error path only
+            raise ValueError("rotate must be an integer") from exc
+        if iv < 0:
+            raise ValueError("rotate must be greater than or equal to 0")
+        return iv % 360
 
     if ConfigDict is not None:  # pragma: no cover - attribute differs across Pydantic versions
         model_config = ConfigDict(extra="ignore")
@@ -67,6 +84,14 @@ class ScanRequest(BaseModel):
 class NutritionData:
     product: Dict[str, Any]
     nutrients_100g: Dict[str, Optional[float]]
+
+
+def _model_to_dict(m: Any) -> Dict[str, Any]:
+    if hasattr(m, "model_dump"):
+        return m.model_dump()  # type: ignore[no-any-return]
+    if hasattr(m, "dict"):
+        return m.dict()  # type: ignore[no-any-return]
+    return dict(m)
 
 
 def _to_float(value: Any) -> Optional[float]:
@@ -285,7 +310,7 @@ def _save_results(image: Image.Image, metadata: Dict[str, Any], timestamp: str) 
     saved = {"thumb": str(thumb_path), "json": str(json_path)}
 
     try:
-        to_store = dict(metadata)
+        to_store = _model_to_dict(metadata)
         to_store["saved"] = saved
         with json_path.open("w", encoding="utf-8") as handle:
             json.dump(to_store, handle, ensure_ascii=False, indent=2)
