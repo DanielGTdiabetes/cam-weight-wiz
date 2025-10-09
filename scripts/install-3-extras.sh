@@ -8,30 +8,45 @@ fi
 
 echo "[+] Configurando ALSA (mic USB compartido y salida HiFiBerry)"
 cat <<'EOC' > /etc/asound.conf
-##### ENTRADA (MICRÓFONO USB) #####
-# Dispositivo físico (USB PnP — ver arecord -l)
+##### ENTRADA (MICRÓFONO USB) — compatible 48 kHz/16 kHz #####
+# Dispositivo físico del micrófono USB (ajusta índices si cambian)
+pcm.raw_mic {
+  type hw
+  card 0
+  device 0
+}
+
+# dsnoop al RATIO NATIVO del USB (48 kHz)
 pcm.dsnoop_mic {
   type dsnoop
   ipc_key 2048
   slave {
-    pcm "hw:0,0"
-    rate 16000
+    pcm "raw_mic"
+    rate 48000
     channels 1
     format S16_LE
+    period_time 0
+    period_size 1024
+    buffer_size 4096
   }
 }
 
-# Ganancia software sobre la entrada (ajustable sin distorsión)
-pcm.bascula_mix_in {
+# Ganancia software (control SoftMicGain) encadenada a dsnoop
+pcm.soft_mic {
   type softvol
   slave.pcm "dsnoop_mic"
   control {
     name "SoftMicGain"
     card 0
   }
-  min_dB -5.0
-  max_dB 20.0
-  resolution 200
+  min_dB -30.0
+  max_dB +30.0
+}
+
+# EXPOSICIÓN PARA LAS APPS con re-muestreo automático
+pcm.bascula_mix_in {
+  type plug
+  slave.pcm "soft_mic"
 }
 
 ctl.bascula_mix_in {
@@ -95,13 +110,16 @@ else
   echo "[WARN] Usuario pi no encontrado; omitiendo alta en grupo video"
 fi
 
-echo "[+] Verificando MIC (arecord a 16 kHz vía bascula_mix_in)"
+echo "[+] Verificando MIC (arecord vía bascula_mix_in a 16 kHz y 48 kHz)"
 if command -v arecord >/dev/null 2>&1; then
-  if arecord -q -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 /tmp/alsa_mic_test.wav; then
-    echo "[OK] MIC grabó correctamente: /tmp/alsa_mic_test.wav"
-  else
-    echo "[WARN] MIC no disponible. Revisa /etc/asound.conf y arecord -l"
-  fi
+  for rate in 16000 48000; do
+    outfile="/tmp/alsa_mic_test_${rate}.wav"
+    if arecord -q -D bascula_mix_in -f S16_LE -r "${rate}" -c 1 -d 2 "${outfile}"; then
+      echo "[OK] MIC grabó correctamente a ${rate} Hz: ${outfile}"
+    else
+      echo "[WARN] MIC no disponible a ${rate} Hz. Revisa /etc/asound.conf y arecord -l"
+    fi
+  done
 else
   echo "[WARN] arecord no disponible; omitiendo prueba de micrófono"
 fi

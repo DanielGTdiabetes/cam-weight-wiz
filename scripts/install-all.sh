@@ -235,34 +235,50 @@ configure_hifiberry_audio() {
 # Báscula Digital Pro - Audio Config (verificada)
 # ===========================
 
-##### ENTRADA (MICRÓFONO USB) #####
-# Dispositivo físico (USB PnP — ver arecord -l)
-pcm.dsnoop_mic {
-    type dsnoop
-    ipc_key 2048
-    slave {
-        pcm "hw:0,0"
-        rate 16000
-        channels 1
-        format S16_LE
-    }
+##### ENTRADA (MICRÓFONO USB) — compatible 48 kHz/16 kHz #####
+# Dispositivo físico del micrófono USB (ajusta índices si cambian)
+pcm.raw_mic {
+  type hw
+  card 0
+  device 0
 }
 
+# dsnoop al RATIO NATIVO del USB (48 kHz)
+pcm.dsnoop_mic {
+  type dsnoop
+  ipc_key 2048
+  slave {
+    pcm "raw_mic"
+    rate 48000
+    channels 1
+    format S16_LE
+    period_time 0
+    period_size 1024
+    buffer_size 4096
+  }
+}
+
+# Ganancia software (control SoftMicGain) encadenada a dsnoop
+pcm.soft_mic {
+  type softvol
+  slave.pcm "dsnoop_mic"
+  control {
+    name "SoftMicGain"
+    card 0
+  }
+  min_dB -30.0
+  max_dB +30.0
+}
+
+# EXPOSICIÓN PARA LAS APPS con re-muestreo automático
 pcm.bascula_mix_in {
-    type softvol
-    slave.pcm "dsnoop_mic"
-    control {
-        name "SoftMicGain"
-        card 0
-    }
-    min_dB -5.0
-    max_dB 20.0
-    resolution 200
+  type plug
+  slave.pcm "soft_mic"
 }
 
 ctl.bascula_mix_in {
-    type hw
-    card 0
+  type hw
+  card 0
 }
 
 ##### SALIDA (HIFIBERRY DAC) #####
@@ -438,7 +454,6 @@ check_playback() {
 run_audio_io_self_tests() {
   local restart_service="${1:-1}"
   local waited_param="${2:-0}"
-  local mic_test="/tmp/alsa_mic_test.wav"
   local waited=0
 
   if [[ "${restart_service}" -eq 1 ]]; then
@@ -466,13 +481,17 @@ run_audio_io_self_tests() {
 
   log_env_audio
 
-  log "Verificando MIC (arecord a 16 kHz vía bascula_mix_in)"
+  log "Verificando MIC (arecord vía bascula_mix_in a 16 kHz y 48 kHz)"
   if command -v arecord >/dev/null 2>&1; then
-    if arecord -q -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 "${mic_test}"; then
-      printf '[inst][ok] MIC grabó correctamente: %s\n' "${mic_test}"
-    else
-      warn "MIC no disponible. Revisa /etc/asound.conf y arecord -l"
-    fi
+    local rate
+    for rate in 16000 48000; do
+      local mic_test="/tmp/alsa_mic_test_${rate}.wav"
+      if arecord -q -D bascula_mix_in -f S16_LE -r "${rate}" -c 1 -d 2 "${mic_test}"; then
+        printf '[inst][ok] MIC grabó correctamente a %s Hz: %s\n' "${rate}" "${mic_test}"
+      else
+        warn "MIC no disponible a ${rate} Hz. Revisa /etc/asound.conf y arecord -l"
+      fi
+    done
   else
     warn "arecord no disponible; omitiendo prueba de micrófono"
   fi
