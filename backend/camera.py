@@ -17,9 +17,8 @@ from backend.camera_service import (
 )
 
 
-CAPTURE_DIRECTORY = Path("/run/bascula/captures")
+CAPTURE_DIRECTORY = Path("/tmp")
 CAPTURE_PATH = CAPTURE_DIRECTORY / "camera-capture.jpg"
-CAPTURE_URL = "/captures/camera-capture.jpg"
 
 
 router = APIRouter(prefix="/api/camera", tags=["camera"])
@@ -28,29 +27,17 @@ LOG = logging.getLogger("bascula.camera.api")
 
 
 def _camera_error_response(status_code: int, reason: str, message: str):
-    detail = {"ok": False, "error": reason, "message": message}
+    detail = {"ok": False, "error": reason, "detail": message}
     return JSONResponse(detail, status_code=status_code)
 
 
-def _capture_payload(full: bool, size: int) -> Dict[str, object]:
-    return {
-        "ok": True,
-        "path": str(CAPTURE_PATH),
-        "url": CAPTURE_URL,
-        "full": bool(full),
-        "size": size,
-    }
+def _capture_payload(size: int) -> Dict[str, object]:
+    return {"ok": True, "path": str(CAPTURE_PATH), "size": size}
 
 
-def _last_capture_metadata(full: bool = False) -> Dict[str, object]:
+def _last_capture_metadata() -> Dict[str, object]:
     size = _capture_size()
-    return {
-        "ok": size > 0,
-        "path": str(CAPTURE_PATH),
-        "url": CAPTURE_URL,
-        "full": bool(full),
-        "size": size,
-    }
+    return {"ok": size > 0, "path": str(CAPTURE_PATH), "size": size}
 
 
 def _capture_size() -> int:
@@ -75,7 +62,7 @@ def camera_info():
         "Rotation": properties.get("Rotation"),
         "PixelArraySize": properties.get("PixelArraySize"),
     }
-    response["lastCapture"] = _last_capture_metadata(full=False)
+    response["lastCapture"] = _last_capture_metadata()
     return response
 
 
@@ -146,6 +133,6 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
         filename.chmod(0o644)
     except OSError:
         LOG.warning("No se pudieron ajustar permisos de %s", filename, exc_info=True)
-    payload = _capture_payload(full=full, size=int(result.get("size", 0)))
-    LOG.info("capture_to_file: saved %s size=%s full=%s", payload["path"], payload["size"], payload["full"])
+    payload = _capture_payload(size=int(result.get("size", 0)))
+    LOG.info("capture_to_file: saved %s size=%s", payload["path"], payload["size"])
     return payload

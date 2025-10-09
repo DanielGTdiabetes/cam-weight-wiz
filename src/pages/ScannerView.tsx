@@ -7,27 +7,32 @@ import { useToast } from "@/hooks/use-toast";
 interface CaptureResponse {
   ok?: boolean;
   path?: string;
-  url?: string;
-  full?: boolean;
   size?: number;
+  detail?: string;
   message?: string;
   error?: string;
 }
 
 export const ScannerView = () => {
   const [isCapturing, setIsCapturing] = useState(false);
-  const [captureUrl, setCaptureUrl] = useState<string | null>(null);
+  const [capturePath, setCapturePath] = useState<string | null>(null);
   const [captureTs, setCaptureTs] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { toast } = useToast();
 
   const imageUrl = useMemo(() => {
-    if (!captureUrl) {
+    if (!capturePath) {
       return null;
     }
-    const tsSuffix = captureTs ? `?ts=${captureTs}` : "";
-    return `${captureUrl}${tsSuffix}`;
-  }, [captureUrl, captureTs]);
+    const tsValue = captureTs ?? Date.now();
+    const basePath = capturePath.startsWith("http")
+      ? capturePath
+      : capturePath.startsWith("/")
+        ? capturePath
+        : `/${capturePath}`;
+    const separator = basePath.includes("?") ? "&" : "?";
+    return `${basePath}${separator}t=${tsValue}`;
+  }, [capturePath, captureTs]);
 
   const handleCapture = useCallback(async () => {
     setIsCapturing(true);
@@ -43,27 +48,40 @@ export const ScannerView = () => {
         payload = (await response.json()) as CaptureResponse;
       } catch (parseError) {
         if (!response.ok) {
-          throw parseError instanceof Error ? parseError : new Error("capture_failed");
+          throw parseError instanceof Error
+            ? parseError
+            : new Error("capture_failed");
         }
       }
 
       const captureOk = response.ok && (payload?.ok ?? true);
       if (!captureOk) {
-        const backendMessage = payload?.message || payload?.error;
+        const backendMessage =
+          payload?.detail || payload?.message || payload?.error;
         throw new Error(backendMessage || "capture_failed");
       }
 
-      const defaultUrl = "/captures/camera-capture.jpg";
-      const nextUrl = payload?.url && payload.url.startsWith("/") ? payload.url : defaultUrl;
-      setCaptureUrl(nextUrl);
+      const pathValue = payload?.path;
+      if (typeof pathValue !== "string" || pathValue.trim().length === 0) {
+        throw new Error("capture_missing_path");
+      }
+
+      setCapturePath(pathValue.trim());
       setCaptureTs(Date.now());
     } catch (error) {
       console.error("Error al capturar imagen", error);
-      const message = "Error al capturar imagen";
+      const fallback = "Error al capturar imagen";
+      const rawMessage =
+        error instanceof Error &&
+        error.message &&
+        !["capture_failed", "capture_missing_path"].includes(error.message)
+          ? error.message
+          : null;
+      const message = rawMessage ?? fallback;
       setErrorMessage(message);
       toast({
-        title: message,
-        description: "Revisa la cámara y vuelve a intentarlo.",
+        title: "Captura fallida",
+        description: rawMessage ?? "Revisa la cámara y vuelve a intentarlo.",
         variant: "destructive",
       });
     } finally {
@@ -77,7 +95,8 @@ export const ScannerView = () => {
         <div className="max-w-3xl space-y-2">
           <h2 className="text-3xl font-bold">Escáner de alimentos</h2>
           <p className="text-base text-muted-foreground">
-            Pulsa “Activar cámara” para tomar una foto desde la báscula y ver el resultado al instante.
+            Pulsa “Activar cámara” para tomar una foto desde la báscula y ver el
+            resultado al instante.
           </p>
         </div>
 
@@ -119,9 +138,12 @@ export const ScannerView = () => {
               <div className="rounded-full border border-dashed border-muted-foreground/40 p-6">
                 <Camera className="h-16 w-16 opacity-30" />
               </div>
-              <p className="text-lg font-medium">Aún no hay captura disponible.</p>
+              <p className="text-lg font-medium">
+                Aún no hay captura disponible.
+              </p>
               <p className="max-w-xs text-sm text-muted-foreground/80">
-                Cuando captures desde la mini-web, la imagen aparecerá aquí con un identificador único para evitar la caché.
+                Cuando captures desde la mini-web, la imagen aparecerá aquí con
+                un identificador único para evitar la caché.
               </p>
             </div>
           )}

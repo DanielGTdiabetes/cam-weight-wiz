@@ -5,7 +5,6 @@ import atexit
 import errno
 import io
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -51,20 +50,6 @@ else:
 LOG_CAMERA = logging.getLogger("bascula.camera")
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if not normalized:
-        return default
-    if normalized in {"1", "true", "t", "yes", "y", "on"}:
-        return True
-    if normalized in {"0", "false", "f", "no", "n", "off"}:
-        return False
-    return default
-
-
 class CameraError(RuntimeError):
     """Base error for camera operations."""
 
@@ -102,7 +87,6 @@ class Picamera2Service:
         self._transform: Optional[LibcameraTransform] = None
         self._warmup_delay = 0.2  # 200 ms para estabilizar tras iniciar la cámara
         self._closed = False
-        self._release_on_exit = _env_flag("BASCULA_CAM_RELEASE_ON_EXIT", False)
         LOG_CAMERA.debug("Picamera2Service inicializado")
 
     # ---------- Singleton helpers ----------
@@ -215,15 +199,25 @@ class Picamera2Service:
         return camera
 
     def _perform_capture(self, camera: Picamera2) -> bytes:
+        request = None
+        array = None
         try:
             camera.start()
             time.sleep(self._warmup_delay)
-            array = camera.capture_array("main")
+            request = camera.capture_request()
+            array = request.make_array("main")
         finally:
+            if request is not None:
+                try:
+                    request.release()
+                except Exception:
+                    LOG_CAMERA.debug("No se pudo liberar la solicitud de captura", exc_info=True)
             try:
                 camera.stop()
             except Exception:
                 LOG_CAMERA.debug("Error al detener la cámara", exc_info=True)
+        if array is None:
+            raise CameraOperationError("No se pudo capturar la imagen")
         image = Image.fromarray(array)
         if image.mode != "RGB":
             image = image.convert("RGB")
@@ -266,13 +260,14 @@ class Picamera2Service:
     # ---------- Public API ----------
     def get_camera_info(self) -> Dict[str, Any]:
         with self._camera_lock:
-            camera = self._ensure_camera()
-            if not self._properties:
-                self._properties = dict(getattr(camera, "camera_properties", {}) or {})
-            snapshot = dict(self._properties)
-            if self._release_on_exit:
+            try:
+                camera = self._ensure_camera()
+                if not self._properties:
+                    self._properties = dict(getattr(camera, "camera_properties", {}) or {})
+                snapshot = dict(self._properties)
+                return snapshot
+            finally:
                 self._release_camera()
-            return snapshot
 
     def capture_bytes(self, full: bool = False, timeout_ms: int = 2000) -> bytes:
         deadline = time.monotonic() + max(timeout_ms, 1) / 1000.0
@@ -304,8 +299,7 @@ class Picamera2Service:
                     self._handle_fatal_error("Fallo en la captura", exc)
                     raise CameraOperationError("Fallo en la captura") from exc
                 finally:
-                    if self._release_on_exit:
-                        self._release_camera()
+                    self._release_camera()
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.25)
@@ -318,7 +312,7 @@ class Picamera2Service:
         data = self.capture_bytes(full=full, timeout_ms=timeout_ms)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        return {"ok": True, "path": str(target), "full": full, "size": len(data)}
+        return {"ok": True, "path": str(target), "size": len(data)}
 
     def close(self) -> None:
         with self._camera_lock:
