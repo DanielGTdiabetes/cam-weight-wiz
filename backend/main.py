@@ -1458,6 +1458,8 @@ class SettingsTestOpenAIRequest(BaseModel):
 
 
 class SettingsTestNightscoutRequest(BaseModel):
+    url: Optional[str] = None
+    token: Optional[str] = None
     nightscout_url: Optional[str] = None
     nightscout_token: Optional[str] = None
 
@@ -1826,11 +1828,16 @@ async def settings_test_nightscout(
 
     config = load_config()
     current_url, current_token = _get_nightscout_credentials(config)
-    target_url = (payload.nightscout_url or current_url or "").strip()
-    target_token = (payload.nightscout_token or current_token or "").strip()
+    candidate_url = payload.url or payload.nightscout_url or current_url or ""
+    candidate_token = payload.token or payload.nightscout_token or current_token or ""
+    target_url = candidate_url.strip()
+    target_token = candidate_token.strip()
 
     if not target_url:
-        return JSONResponse(status_code=400, content={"ok": False, "message": "Nightscout no está configurado."})
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "message": "missing_url", "status": 400},
+        )
 
     normalized_url = target_url.rstrip("/")
     headers = {"API-SECRET": target_token} if target_token else {}
@@ -1855,36 +1862,53 @@ async def settings_test_nightscout(
                 else:
                     raise
     except httpx.HTTPStatusError as exc:
-        message = f"Nightscout respondió con {exc.response.status_code}"
+        status_code = exc.response.status_code
         try:
-            payload = exc.response.json()
-            if isinstance(payload, dict):
-                msg = payload.get("message") or payload.get("status")
-                if isinstance(msg, str) and msg:
-                    message = msg
+            error_payload = exc.response.json()
         except Exception:
-            pass
-        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "message": message})
+            error_payload = exc.response.text
+        message = "unauthorized"
+        if status_code not in {401, 403}:
+            text = str(error_payload).lower()
+            if "unauthorized" not in text and "not authorized" not in text and "forbidden" not in text:
+                message = "http_error"
+        return JSONResponse(
+            status_code=status_code,
+            content={"ok": False, "message": message, "status": status_code, "details": error_payload},
+        )
     except httpx.TimeoutException:
-        return JSONResponse(status_code=504, content={"ok": False, "message": "Nightscout no respondió a tiempo."})
+        return JSONResponse(
+            status_code=504,
+            content={"ok": False, "message": "timeout", "status": 504},
+        )
     except httpx.RequestError as exc:
-        return JSONResponse(status_code=502, content={"ok": False, "message": f"No se pudo conectar a Nightscout: {exc}"})
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "message": str(exc), "status": 502},
+        )
     except Exception as exc:
-        return JSONResponse(status_code=500, content={"ok": False, "message": f"Error inesperado: {exc}"})
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "message": str(exc), "status": 500},
+        )
 
-    message = "Nightscout respondió correctamente."
+    details: Any = None
     try:
         data = response.json()
         if isinstance(data, dict):
-            status = data.get("status") or data.get("name") or data.get("version")
-            if isinstance(status, str) and status:
-                message = f"Nightscout operativo ({status})"
-            elif used_endpoint == "entries":
-                message = "Nightscout respondió con entradas recientes."
+            details = data
+        else:
+            details = data
     except Exception:
-        pass
+        details = response.text
 
-    return {"ok": True, "message": message}
+    return {
+        "ok": True,
+        "message": "authorized",
+        "status": response.status_code,
+        "endpoint": used_endpoint,
+        "details": details,
+    }
 
 
 @app.get("/api/settings/health")

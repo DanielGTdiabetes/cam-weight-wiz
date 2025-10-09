@@ -61,6 +61,8 @@ BASCULA_SAMPLE_RATE=16000
 BASCULA_AUDIO_DEVICE=bascula_out
 ```
 
+El listener de wake-word opera siempre a 16 kHz mediante el alias `bascula_mix_in`, por lo que conviene mantener los aliases de ALSA generados por el instalador. Si el preflight del micrófono falla, el backend intentará usar el primer dispositivo USB disponible (`hw:<card>,0` detectado con `arecord -l`).
+
 Tras `install-all.sh`, el script ejecuta pruebas rápidas: graba con `arecord` sobre `bascula_mix_in`, reinicia la miniweb para aplicar los overrides y reproduce audio por `bascula_out` (usando `aplay` o `speaker-test`). 【F:scripts/install-all.sh†L316-L392】
 
 Para comprobaciones manuales adicionales:
@@ -76,6 +78,20 @@ speaker-test -D bascula_out -t sine -f 440 -l 1
 El backend y la miniweb requieren una serie de librerías que ahora se instalan desde `requirements.txt`. 【F:requirements.txt†L1-L20】
 Entre las más relevantes se encuentran `fastapi`, `uvicorn[standard]`, `pydantic`, `rapidfuzz` (>=3,<4), `vosk`, `picamera2` y `piper-tts`, necesarias para la API, reconocimiento de voz y cámara. 【F:requirements.txt†L2-L20】
 El instalador crea la `venv` con el usuario objetivo, instala esas dependencias y valida el entorno importando `fastapi`, `uvicorn` y `rapidfuzz` antes de habilitar los servicios, evitando fallos por módulos faltantes. 【F:scripts/install-all.sh†L1202-L1254】
+
+Adicionalmente, asegúrate de tener disponibles los paquetes del sistema `python3-picamera2`, `rpicam-apps` y `python3-pil` (Pillow) para que la cámara IMX708 funcione con Picamera2 y el guardado de JPEG.
+
+### Cámara (Picamera2 + miniweb)
+
+La miniweb en `:8080` expone tres endpoints REST para consultar el estado de la cámara y realizar capturas puntuales:
+
+| Método | Endpoint | Descripción |
+|--------|----------|-------------|
+| GET | `/api/camera/info` | Devuelve propiedades del sensor detectado (modelo, rotación y resolución nativa). |
+| POST | `/api/camera/capture` | Captura un frame JPEG en memoria y lo devuelve como `image/jpeg`. |
+| POST | `/api/camera/capture-to-file` | Captura un JPEG one-shot (`RGB888`) y lo guarda en `/tmp/camera-capture.jpg`, devolviendo `{ ok, path, full, size }`. |
+
+Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
 
 ## API de configuración de red
 

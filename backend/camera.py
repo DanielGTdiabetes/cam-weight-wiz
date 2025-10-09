@@ -33,7 +33,7 @@ def camera_info():
         service = get_camera_service()
         properties = service.get_camera_info()
     except CameraUnavailableError as exc:
-        LOG.error("No hay cámara disponible: %s", exc)
+        LOG.exception("No hay cámara disponible: %s", exc)
         return _camera_error_response(503, "camera_unavailable", str(exc))
     return {
         "Model": properties.get("Model"),
@@ -47,16 +47,16 @@ def _capture_bytes(full: bool, timeout_ms: int = 2000) -> bytes:
     try:
         return service.capture_bytes(full=full, timeout_ms=timeout_ms)
     except CameraBusyError as exc:
-        LOG.warning("La cámara está ocupada: %s", exc)
+        LOG.exception("La cámara está ocupada: %s", exc)
         raise HTTPException(status_code=409, detail={"error": "camera_busy", "message": str(exc)}) from exc
     except CameraUnavailableError as exc:
-        LOG.error("Cámara no disponible: %s", exc)
+        LOG.exception("Cámara no disponible: %s", exc)
         raise HTTPException(status_code=503, detail={"error": "camera_unavailable", "message": str(exc)}) from exc
     except CameraTimeoutError as exc:
-        LOG.error("La captura superó el tiempo de espera: %s", exc)
+        LOG.exception("La captura superó el tiempo de espera: %s", exc)
         raise HTTPException(status_code=504, detail={"error": "camera_timeout", "message": str(exc)}) from exc
     except CameraOperationError as exc:
-        LOG.error("Error en la captura: %s", exc)
+        LOG.exception("Error en la captura: %s", exc)
         raise HTTPException(status_code=500, detail={"error": "camera_failure", "message": str(exc)}) from exc
 
 
@@ -90,15 +90,15 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
     try:
         result = service.capture_jpeg(str(filename), full=full)
     except CameraBusyError as exc:
-        LOG.warning("La cámara está ocupada: %s", exc)
+        LOG.exception("La cámara está ocupada: %s", exc)
         return _camera_error_response(409, "camera_busy", str(exc))
     except CameraUnavailableError as exc:
-        LOG.error("Cámara no disponible: %s", exc)
+        LOG.exception("Cámara no disponible: %s", exc)
         return _camera_error_response(503, "camera_unavailable", str(exc))
     except CameraTimeoutError as exc:
-        LOG.error("La captura superó el tiempo de espera: %s", exc)
+        LOG.exception("La captura superó el tiempo de espera: %s", exc)
         return _camera_error_response(504, "camera_timeout", str(exc))
     except CameraOperationError as exc:
-        LOG.error("Error en la captura: %s", exc)
+        LOG.exception("Error en la captura: %s", exc)
         return _camera_error_response(500, "camera_failure", str(exc))
     return result

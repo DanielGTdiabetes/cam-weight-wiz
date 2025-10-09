@@ -3877,6 +3877,8 @@ class SettingsTestOpenAI(BaseModel):
 class SettingsTestNightscout(BaseModel):
     url: Optional[str] = None
     token: Optional[str] = None
+    nightscout_url: Optional[str] = None
+    nightscout_token: Optional[str] = None
 
 
 class SettingsUpdatePayload(BaseModel):
@@ -4497,6 +4499,17 @@ async def settings_test_openai(payload: SettingsTestOpenAI):
     return {"ok": True, "model": first_model}
 
 
+def _looks_unauthorized(status_code: int, payload: Any) -> bool:
+    if status_code in {401, 403}:
+        return True
+    if isinstance(payload, dict):
+        text = " ".join(str(value) for value in payload.values())
+    else:
+        text = str(payload)
+    lowered = text.lower()
+    return "unauthorized" in lowered or "not authorized" in lowered or "forbidden" in lowered
+
+
 async def _execute_nightscout_test_request(url: str, token: str) -> Tuple[int, Dict[str, Any]]:
     if not url:
         return 422, {"ok": False, "status": 422, "message": "missing_url"}
@@ -4540,7 +4553,12 @@ async def _execute_nightscout_test_request(url: str, token: str) -> Tuple[int, D
                 payload_ok = True
 
         if payload_ok:
-            return 200, {"ok": True, "status": status_code, "details": payload}
+            return 200, {
+                "ok": True,
+                "status": status_code,
+                "details": payload,
+                "message": "authorized",
+            }
 
         return 502, {
             "ok": False,
@@ -4549,7 +4567,13 @@ async def _execute_nightscout_test_request(url: str, token: str) -> Tuple[int, D
             "message": "unexpected_response",
         }
 
-    return status_code, {"ok": False, "status": status_code, "details": payload, "message": "http_error"}
+    message = "unauthorized" if _looks_unauthorized(status_code, payload) else "http_error"
+    return status_code, {
+        "ok": False,
+        "status": status_code,
+        "details": payload,
+        "message": message,
+    }
 
 
 async def _perform_nightscout_test(
@@ -4560,8 +4584,10 @@ async def _perform_nightscout_test(
 ) -> Any:
     config = _load_config()
     current_url, current_token = _extract_nightscout_credentials(config)
-    target_url = (url or current_url).strip()
-    target_token = (token or current_token).strip()
+    candidate_url = url or current_url or ""
+    candidate_token = token or current_token or ""
+    target_url = candidate_url.strip()
+    target_token = candidate_token.strip()
 
     status_code, content = await _execute_nightscout_test_request(target_url, target_token)
     _log_settings_event(
@@ -4588,9 +4614,9 @@ async def api_nightscout_test(
 @app.post("/api/settings/test/nightscout")
 async def settings_test_nightscout(payload: SettingsTestNightscout):
     return await _perform_nightscout_test(
-        payload.url,
-        payload.token,
-        source="legacy_post",
+        payload.url or payload.nightscout_url,
+        payload.token or payload.nightscout_token,
+        source="post",
     )
 
 
