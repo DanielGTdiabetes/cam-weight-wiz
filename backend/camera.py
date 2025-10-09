@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from backend.camera_service import (
     CameraBusyError,
@@ -102,3 +102,18 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
         LOG.exception("Error en la captura: %s", exc)
         return _camera_error_response(500, "camera_failure", str(exc))
     return result
+
+
+@router.get("/last.jpg")
+def camera_last_capture():
+    """Devuelve el último archivo de captura almacenado en /tmp."""
+    tmp_dir = Path(os.getenv("TMPDIR", "/tmp"))
+    filename = tmp_dir / "camera-capture.jpg"
+    if not filename.exists():
+        raise HTTPException(status_code=404, detail={"error": "capture_not_found", "message": "No hay captura disponible"})
+
+    headers = {
+        "Cache-Control": "no-store, max-age=0",
+        "X-Accel-Buffering": "no",
+    }
+    return FileResponse(filename, media_type="image/jpeg", filename="camera-capture.jpg", headers=headers)

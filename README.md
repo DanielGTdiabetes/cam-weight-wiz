@@ -90,6 +90,7 @@ La miniweb en `:8080` expone tres endpoints REST para consultar el estado de la 
 | GET | `/api/camera/info` | Devuelve propiedades del sensor detectado (modelo, rotación y resolución nativa). |
 | POST | `/api/camera/capture` | Captura un frame JPEG en memoria y lo devuelve como `image/jpeg`. |
 | POST | `/api/camera/capture-to-file` | Captura un JPEG one-shot (`RGB888`) y lo guarda en `/tmp/camera-capture.jpg`, devolviendo `{ ok, path, full, size }`. |
+| GET | `/api/camera/last.jpg` | Devuelve el último JPEG guardado en `/tmp/camera-capture.jpg` sin cachearlo. |
 
 Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
 
@@ -102,7 +103,7 @@ curl -s -X POST http://localhost/api/camera/capture-to-file | jq .
 journalctl -u bascula-miniweb -n 50 --no-pager | grep 'POST /api/camera/capture-to-file' | tail -n 1
 ```
 
-En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y muestra `/tmp/camera-capture.jpg?ts=<epoch_ms>` para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa.
+En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y muestra `/api/camera/last.jpg?ts=<epoch_ms>` para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa.
 
 ## API de configuración de red
 
