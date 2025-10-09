@@ -90,7 +90,7 @@ La miniweb en `:8080` expone cuatro endpoints REST para consultar el estado de l
 | GET | `/api/camera/info` | Devuelve propiedades del sensor detectado (modelo, rotación y resolución nativa). |
 | POST | `/api/camera/capture` | Captura un frame JPEG en memoria y lo devuelve como `image/jpeg`. |
 | POST | `/api/camera/capture-to-file` | Captura un JPEG one-shot (`RGB888`) y lo guarda en `/tmp/camera-capture.jpg`, devolviendo `{ ok, path, full, size }`. |
-| GET | `/api/camera/last.jpg` | Devuelve la última captura almacenada como `image/jpeg`, con cabeceras `Cache-Control: no-store, private`. |
+| GET | `/api/camera/last.jpg` | Devuelve la última captura almacenada como `image/jpeg`, con cabeceras `Cache-Control: no-store, private`, lista para embeberse en un `<img>`. |
 
 Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
 

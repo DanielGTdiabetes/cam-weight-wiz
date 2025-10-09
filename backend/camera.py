@@ -119,7 +119,7 @@ def camera_last_capture():
             {"ok": False, "error": "no_capture", "message": "No hay captura disponible"},
             status_code=404,
         )
-    response = FileResponse(path=filename, media_type="image/jpeg", filename=filename.name)
-    response.headers["Cache-Control"] = "no-store, private, max-age=0"
+    response = FileResponse(path=filename, media_type="image/jpeg")
+    response.headers["Cache-Control"] = "no-store, private"
     response.headers.setdefault("Pragma", "no-cache")
     return response
