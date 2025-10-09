@@ -42,17 +42,34 @@ Tras el reinicio:
 
 ### Configuración de audio (HifiBerry + micro USB)
 
-El instalador configura ALSA para priorizar la salida HifiBerry (card 1, `hw:1,0`) y el micrófono USB como captura por defecto. Se escribe `/etc/asound.conf` con los defaults globales y se instalan las utilidades necesarias (`alsa-utils`, `pulseaudio`, `sox`, `ffmpeg`) para poder probar TTS/STT de inmediato. 【F:scripts/install-all.sh†L212-L276】【F:scripts/install-all.sh†L640-L690】
+El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (dsnoop a 48 kHz → plug `bascula_mix_in`) y mezclar la salida HifiBerry mediante `dmix` (`bascula_out`). 【F:scripts/install-all.sh†L212-L314】
 
-Tras reiniciar, valida el audio ejecutando desde la Raspberry Pi:
+Antes de ejecutar la instalación, verifica los índices reales de las tarjetas con:
 
 ```bash
-aplay -D hw:1,0 /usr/share/sounds/alsa/Front_Center.wav
-arecord -D hw:0,0 -f cd -c1 -r 44100 test.wav
-aplay -D hw:1,0 test.wav
+arecord -l
+aplay -l
 ```
 
-Si cualquiera de los comandos falla, revisa `/etc/asound.conf` y que `aplay -l` detecte la tarjeta HifiBerry como `card 1` y el micrófono USB como `card 0`. 【F:scripts/install-all.sh†L212-L276】
+En nuestros presets habituales: micrófono USB = `card 0, device 0`; HiFiBerry DAC = `card 1, device 0`. Si difiere, edita `/etc/asound.conf` y ajusta las secciones `pcm.raw_mic`/`pcm.raw_dac`. 【F:scripts/install-all.sh†L212-L314】
+
+El backend consume estas variables publicadas por el servicio `bascula-miniweb`:
+
+```
+BASCULA_MIC_DEVICE=bascula_mix_in
+BASCULA_SAMPLE_RATE=16000
+BASCULA_AUDIO_DEVICE=bascula_out
+```
+
+Tras `install-all.sh`, el script ejecuta pruebas rápidas: graba con `arecord` sobre `bascula_mix_in`, reinicia la miniweb para aplicar los overrides y reproduce audio por `bascula_out` (usando `aplay` o `speaker-test`). 【F:scripts/install-all.sh†L316-L392】
+
+Para comprobaciones manuales adicionales:
+
+```bash
+arecord -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 /tmp/test.wav
+aplay -D bascula_out /usr/share/sounds/alsa/Front_Center.wav
+speaker-test -D bascula_out -t sine -f 440 -l 1
+```
 
 ### Dependencias Python críticas
 
