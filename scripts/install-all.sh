@@ -1770,8 +1770,10 @@ else
 fi
 
 if ! sudo -H -u "${TARGET_USER}" "${VENV_PY}" - <<'PY'
-import rapidfuzz
 import fastapi
+import httpx
+import pydantic
+import rapidfuzz
 import uvicorn
 print("py_deps_ok")
 PY
