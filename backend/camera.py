@@ -17,7 +17,9 @@ from backend.camera_service import (
 )
 
 
-CAPTURE_PATH = Path("/tmp/camera-capture.jpg")
+CAPTURE_DIRECTORY = Path("/run/bascula/captures")
+CAPTURE_PATH = CAPTURE_DIRECTORY / "camera-capture.jpg"
+CAPTURE_URL = "/captures/camera-capture.jpg"
 
 
 router = APIRouter(prefix="/api/camera", tags=["camera"])
@@ -31,7 +33,13 @@ def _camera_error_response(status_code: int, reason: str, message: str):
 
 
 def _capture_payload(full: bool, size: int) -> Dict[str, object]:
-    return {"ok": True, "path": str(CAPTURE_PATH), "full": bool(full), "size": size}
+    return {
+        "ok": True,
+        "path": str(CAPTURE_PATH),
+        "url": CAPTURE_URL,
+        "full": bool(full),
+        "size": size,
+    }
 
 
 def _last_capture_metadata(full: bool = False) -> Dict[str, object]:
@@ -39,6 +47,7 @@ def _last_capture_metadata(full: bool = False) -> Dict[str, object]:
     return {
         "ok": size > 0,
         "path": str(CAPTURE_PATH),
+        "url": CAPTURE_URL,
         "full": bool(full),
         "size": size,
     }
@@ -110,9 +119,13 @@ def camera_test():
 
 @router.post("/capture-to-file")
 def camera_capture_to_file(full: bool = Query(False, description="Captura en resolución completa")):
-    """Captura para depuración guardando la imagen en /tmp."""
-    tmp_dir = CAPTURE_PATH.parent
-    tmp_dir.mkdir(parents=True, exist_ok=True)
+    """Captura para depuración guardando la imagen en un directorio controlado."""
+    capture_dir = CAPTURE_PATH.parent
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        capture_dir.chmod(0o755)
+    except OSError:
+        LOG.warning("No se pudieron ajustar permisos de %s", capture_dir, exc_info=True)
     filename = CAPTURE_PATH
     service = get_camera_service()
     try:
@@ -129,6 +142,10 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
     except CameraOperationError as exc:
         LOG.exception("Error en la captura: %s", exc)
         return _camera_error_response(500, "camera_failure", str(exc))
+    try:
+        filename.chmod(0o644)
+    except OSError:
+        LOG.warning("No se pudieron ajustar permisos de %s", filename, exc_info=True)
     payload = _capture_payload(full=full, size=int(result.get("size", 0)))
     LOG.info("capture_to_file: saved %s size=%s full=%s", payload["path"], payload["size"], payload["full"])
     return payload

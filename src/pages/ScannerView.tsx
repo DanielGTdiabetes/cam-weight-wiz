@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 interface CaptureResponse {
   ok?: boolean;
   path?: string;
+  url?: string;
   full?: boolean;
   size?: number;
   message?: string;
@@ -15,16 +16,18 @@ interface CaptureResponse {
 
 export const ScannerView = () => {
   const [isCapturing, setIsCapturing] = useState(false);
+  const [captureUrl, setCaptureUrl] = useState<string | null>(null);
   const [captureTs, setCaptureTs] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { toast } = useToast();
 
   const imageUrl = useMemo(() => {
-    if (!captureTs) {
+    if (!captureUrl) {
       return null;
     }
-    return `/tmp/camera-capture.jpg?ts=${captureTs}`;
-  }, [captureTs]);
+    const tsSuffix = captureTs ? `?ts=${captureTs}` : "";
+    return `${captureUrl}${tsSuffix}`;
+  }, [captureUrl, captureTs]);
 
   const handleCapture = useCallback(async () => {
     setIsCapturing(true);
@@ -50,6 +53,9 @@ export const ScannerView = () => {
         throw new Error(backendMessage || "capture_failed");
       }
 
+      const defaultUrl = "/captures/camera-capture.jpg";
+      const nextUrl = payload?.url && payload.url.startsWith("/") ? payload.url : defaultUrl;
+      setCaptureUrl(nextUrl);
       setCaptureTs(Date.now());
     } catch (error) {
       console.error("Error al capturar imagen", error);
