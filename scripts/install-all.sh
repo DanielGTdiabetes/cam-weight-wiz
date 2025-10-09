@@ -1361,45 +1361,63 @@ DEBIAN_FRONTEND=noninteractive dpkg-reconfigure xserver-xorg-legacy || true
 log "✓ Xwrapper configurado"
 
 # Configure Xorg to use KMS/modesetting instead of fbdev
-log "[8b/20] Configurando Xorg para KMS (modesetting driver)..."
-# Remove fbdev driver if installed to prevent framebuffer mode
-apt-get purge -y xserver-xorg-video-fbdev 2>/dev/null || true
-apt-get autoremove -y || true
+log "[8b/20] Configurando entorno gráfico seguro (fbdev fallback)..."
+# === FIX DEFINITIVO XORG SCREEN DETECTION (Raspberry Pi 4/5) ===
+echo "==> Configurando entorno X11 seguro para arranque del kiosk"
 
-# Remove any fbdev config files
-rm -f /usr/share/X11/xorg.conf.d/*fbdev*.conf /etc/X11/xorg.conf.d/*fbdev*.conf 2>/dev/null || true
+# Crear directorio de configuración si no existe
+install -d -m0755 /etc/X11/xorg.conf.d
 
-if [[ ${IS_PI5:-0} -eq 1 ]]; then
-  log "[Pi5] Eliminando overrides xorg.conf.d existentes para dejar KMS autodetectado"
-  for candidate in /etc/X11/xorg.conf.d/*modesetting*.conf /etc/X11/xorg.conf.d/*vc4*.conf; do
-    [[ -e "${candidate}" ]] || continue
-    if [[ "${candidate}" == *.bak ]]; then
-      log "[Pi5] ${candidate} ya está respaldado"
-      continue
-    fi
-    if mv "${candidate}" "${candidate}.bak"; then
-      log "[Pi5] ${candidate} → ${candidate}.bak"
-    else
-      warn "[Pi5] No se pudo mover ${candidate}"
-    fi
-  done
-  log "[Pi5] Sin overrides forzados en /etc/X11/xorg.conf.d (usando auto-KMS)"
-else
-  install -d -m 0755 /etc/X11/xorg.conf.d
-  cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
+# Eliminar configuraciones previas conflictivas
+rm -f /etc/X11/xorg.conf.d/10-primary-kms.conf
+rm -f /etc/X11/xorg.conf.d/99-modesetting.conf
+
+# Crear configuración fbdev como fallback seguro
+cat > /etc/X11/xorg.conf.d/20-fbdev.conf <<'EOF'
 Section "Device"
-  Identifier "vc4"
-  Driver "modesetting"
-  Option "AccelMethod" "glamor"
-  Option "kmsdev" "/dev/dri/card1"
+  Identifier "fb0"
+  Driver "fbdev"
+  Option "fbdev" "/dev/fb0"
 EndSection
 
 Section "Screen"
   Identifier "Screen0"
-  Device "vc4"
+  Device "fb0"
 EndSection
 EOF
-  log "✓ Xorg configurado para DRM card1"
+
+# Asegurar overlay de video y VC4 KMS activo en /boot/firmware/config.txt
+if [[ -f "${CONF}" ]]; then
+  sed -i '/^dtoverlay=vc4-kms-v3d/d' "${CONF}"
+  printf 'dtoverlay=vc4-kms-v3d\n' >> "${CONF}"
+else
+  warn "config.txt no encontrado; no se pudo asegurar dtoverlay=vc4-kms-v3d"
+fi
+
+# Verificar módulos básicos
+ensure_pkg xserver-xorg-video-fbdev x11-xserver-utils
+
+echo "✅ Xorg configurado con fallback fbdev (/dev/fb0) garantizado."
+
+# Comprobación tras instalación
+if ! grep -q 'Driver "fbdev"' /etc/X11/xorg.conf.d/20-fbdev.conf 2>/dev/null; then
+  echo "⚠️  Advertencia: no se detectó configuración fbdev. Reintentando..."
+  cat > /etc/X11/xorg.conf.d/20-fbdev.conf <<'EOF'
+Section "Device"
+  Identifier "fb0"
+  Driver "fbdev"
+  Option "fbdev" "/dev/fb0"
+EndSection
+
+Section "Screen"
+  Identifier "Screen0"
+  Device "fb0"
+EndSection
+EOF
+fi
+
+if [[ -d "/var/log/bascula" ]]; then
+  printf '[OK] Xorg fallback fbdev configurado correctamente (%s)\n' "$(date)" >> /var/log/bascula/install.log
 fi
 
 # Configure Polkit rules
