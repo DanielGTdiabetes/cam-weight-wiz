@@ -123,6 +123,9 @@ class Picamera2Service:
         if normalized == 180:
             LOG_CAMERA.info("camera transform: hflip+vflip (rotation 180)")
             return Transform(hflip=1, vflip=1)
+        if normalized in {90, 270}:
+            LOG_CAMERA.info("camera transform: rotation %s", normalized)
+            return Transform(rotation=normalized)
         LOG_CAMERA.info("camera transform: identity")
         return Transform()
 
