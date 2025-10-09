@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import type { WeightData } from "@/services/api";
 import { storage } from "@/services/storage";
+import { isLocalClient } from "@/lib/network";
 
 const WS_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8080";
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -9,12 +10,11 @@ const MAX_RECONNECT_DELAY = 30000; // 30 seconds
 const HTTP_POLL_MS = 500;
 const ERROR_GRACE_MS = 5000;
 
-type ReadResp = {
-  ok?: boolean;
-  grams?: number;
-  stable?: boolean;
-  weight?: number;
-  reason?: string;
+type ConnectionState = "connected" | "reconnecting" | "no-data";
+
+type WeightResponse = {
+  value: number | string | null;
+  ts?: string | null;
 };
 
 export interface UseScaleWebSocketReturn {
@@ -24,6 +24,7 @@ export interface UseScaleWebSocketReturn {
   isConnected: boolean;
   error: string | null;
   reconnectAttempts: number;
+  connectionState: "connected" | "reconnecting" | "no-data";
 }
 
 export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
@@ -34,6 +35,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
   const [error, setError] = useState<string | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [lastHttpOkAt, setLastHttpOkAt] = useState<number>(0);
+  const [connectionState, setConnectionState] = useState<ConnectionState>("reconnecting");
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -41,13 +43,23 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
   const httpIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const httpAbortControllerRef = useRef<AbortController | null>(null);
   const httpInFlightRef = useRef(false);
-  const isWsConnectedRef = useRef(false);
+  const realtimeConnectedRef = useRef(false);
   const lastHttpOkAtRef = useRef(0);
+  const sseRef = useRef<EventSource | null>(null);
+  const sseReconnectRef = useRef<NodeJS.Timeout | null>(null);
+  const remoteSseActiveRef = useRef(false);
 
   const settings = storage.getSettings();
   const defaultOrigin = typeof window !== "undefined" ? window.location.origin : "";
-  const apiBaseUrl = (settings.apiUrl || defaultOrigin).replace(/\/$/, "");
-  const wsBaseUrl = (settings.wsUrl || WS_URL).replace(/\/$/, "");
+  const localClient = isLocalClient();
+  const configuredApiUrl = (settings.apiUrl || defaultOrigin).replace(/\/$/, "");
+  const configuredWsUrl = (settings.wsUrl || WS_URL).replace(/\/$/, "");
+  const apiBaseUrl = localClient ? configuredApiUrl : (defaultOrigin || configuredApiUrl);
+  const wsBaseUrl = localClient
+    ? configuredWsUrl
+    : defaultOrigin
+      ? defaultOrigin.replace(/^http/i, defaultOrigin.startsWith("https") ? "wss" : "ws")
+      : configuredWsUrl;
   const hostname = typeof window !== "undefined" ? window.location.hostname : "";
   const isDemoMode = /\.lovable\.app$/i.test(hostname);
 
@@ -55,13 +67,21 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
     const now = Date.now();
     const hasRecentHttp =
       lastHttpOkAtRef.current > 0 && now - lastHttpOkAtRef.current <= ERROR_GRACE_MS;
-    const wsConnected = isWsConnectedRef.current;
+    const realtimeConnected = realtimeConnectedRef.current;
 
-    setIsConnected(wsConnected || hasRecentHttp);
+    setIsConnected(realtimeConnected || hasRecentHttp);
 
-    const showConnError = !wsConnected && !hasRecentHttp;
+    if (realtimeConnected) {
+      setConnectionState("connected");
+    } else if (hasRecentHttp) {
+      setConnectionState("reconnecting");
+    } else {
+      setConnectionState("no-data");
+    }
+
+    const showConnError = !realtimeConnected && !hasRecentHttp;
     setError(showConnError ? "Error de conexión con la báscula" : null);
-  }, [setError, setIsConnected]);
+  }, [setConnectionState, setError, setIsConnected]);
 
   const ensureGracePeriod = useCallback(() => {
     if (lastHttpOkAtRef.current === 0) {
@@ -110,6 +130,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
     }
 
     ensureGracePeriod();
+    updateConnectivity();
 
     const fetchRead = async () => {
       if (httpInFlightRef.current) {
@@ -122,7 +143,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
       httpAbortControllerRef.current = controller;
 
       try {
-        const response = await fetch(`${apiBaseUrl}/api/scale/read`, {
+        const response = await fetch(`${apiBaseUrl}/api/scale/weight`, {
           signal: controller.signal,
         });
 
@@ -131,26 +152,28 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
           return;
         }
 
-        const data: ReadResp = await response.json();
+        const data: WeightResponse = await response.json();
 
-        if (data?.ok === false) {
+        const rawValue = data?.value;
+        let gramsValue = 0;
+
+        if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+          gramsValue = rawValue;
+        } else if (typeof rawValue === "string") {
+          const parsed = Number(rawValue);
+          if (Number.isNaN(parsed)) {
+            handleHttpOutcome(false);
+            return;
+          }
+          gramsValue = parsed;
+        } else if (rawValue !== null) {
           handleHttpOutcome(false);
           return;
         }
 
-        const gramsValue =
-          typeof data.grams === "number"
-            ? data.grams
-            : typeof data.weight === "number"
-              ? data.weight
-              : 0;
-
         setWeight(gramsValue);
         setUnit("g");
-
-        if (typeof data.stable === "boolean") {
-          setIsStable(data.stable);
-        }
+        setIsStable(false);
 
         handleHttpOutcome(true);
       } catch (err) {
@@ -167,7 +190,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
     httpIntervalRef.current = setInterval(() => {
       void fetchRead();
     }, HTTP_POLL_MS);
-  }, [apiBaseUrl, ensureGracePeriod, handleHttpOutcome, isDemoMode, setIsStable, setUnit, setWeight]);
+  }, [apiBaseUrl, ensureGracePeriod, handleHttpOutcome, isDemoMode, setIsStable, setUnit, setWeight, updateConnectivity]);
 
   const getReconnectDelay = (attempt: number): number => {
     const delay = Math.min(
@@ -178,13 +201,17 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
   };
 
   const connect = useCallback(() => {
+    if (!localClient) {
+      return null;
+    }
+
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
 
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      isWsConnectedRef.current = false;
+      realtimeConnectedRef.current = false;
       startHttpPolling();
       updateConnectivity();
       return;
@@ -196,7 +223,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
       ws.onopen = () => {
         stopHttpPolling();
-        isWsConnectedRef.current = true;
+        realtimeConnectedRef.current = true;
         resetHttpTracking();
         setReconnectAttempts(0);
         updateConnectivity();
@@ -225,7 +252,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
       ws.onclose = (event) => {
         console.log("Scale WebSocket disconnected", event.code, event.reason);
-        isWsConnectedRef.current = false;
+        realtimeConnectedRef.current = false;
         wsRef.current = null;
         startHttpPolling();
         updateConnectivity();
@@ -242,7 +269,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
       return ws;
     } catch (err) {
       console.error("Failed to create WebSocket:", err);
-      isWsConnectedRef.current = false;
+      realtimeConnectedRef.current = false;
       startHttpPolling();
       updateConnectivity();
 
@@ -256,7 +283,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
       return null;
     }
-  }, [reconnectAttempts, resetHttpTracking, setIsStable, setUnit, setWeight, startHttpPolling, stopHttpPolling, updateConnectivity, wsBaseUrl]);
+  }, [localClient, reconnectAttempts, resetHttpTracking, setIsStable, setUnit, setWeight, startHttpPolling, stopHttpPolling, updateConnectivity, wsBaseUrl]);
 
   useEffect(() => {
     if (isDemoMode) {
@@ -265,16 +292,61 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
         wsRef.current.close();
         wsRef.current = null;
       }
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+      if (sseReconnectRef.current) {
+        clearTimeout(sseReconnectRef.current);
+        sseReconnectRef.current = null;
+      }
+      remoteSseActiveRef.current = false;
+      realtimeConnectedRef.current = true;
+      const now = Date.now();
+      lastHttpOkAtRef.current = now;
+      setLastHttpOkAt(now);
       setWeight(127.5);
       setIsStable(true);
       setUnit("g");
       setIsConnected(true);
       setError(null);
+      setConnectionState("connected");
+      return () => {
+        realtimeConnectedRef.current = false;
+        stopHttpPolling();
+        if (reconnectTimeoutRef.current) {
+          clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
+        if (sseReconnectRef.current) {
+          clearTimeout(sseReconnectRef.current);
+          sseReconnectRef.current = null;
+        }
+        updateConnectivity();
+      };
+    }
+
+    if (!localClient) {
+      shouldReconnectRef.current = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      realtimeConnectedRef.current = false;
+      updateConnectivity();
       return () => {
         stopHttpPolling();
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
           reconnectTimeoutRef.current = null;
+        }
+        if (wsRef.current) {
+          wsRef.current.close();
+          wsRef.current = null;
         }
       };
     }
@@ -295,12 +367,152 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
         wsRef.current.close();
         wsRef.current = null;
       }
+
+      realtimeConnectedRef.current = false;
+      updateConnectivity();
     };
-  }, [connect, isDemoMode, stopHttpPolling]);
+  }, [connect, isDemoMode, localClient, stopHttpPolling, updateConnectivity]);
 
   useEffect(() => {
     lastHttpOkAtRef.current = lastHttpOkAt;
   }, [lastHttpOkAt]);
+
+  useEffect(() => {
+    if (isDemoMode || localClient) {
+      return;
+    }
+
+    if (typeof window === "undefined" || typeof window.EventSource === "undefined") {
+      realtimeConnectedRef.current = false;
+      updateConnectivity();
+      startHttpPolling();
+      return () => {
+        stopHttpPolling();
+      };
+    }
+
+    remoteSseActiveRef.current = true;
+
+    const scheduleReconnect = () => {
+      if (!remoteSseActiveRef.current) {
+        return;
+      }
+      if (sseReconnectRef.current) {
+        clearTimeout(sseReconnectRef.current);
+      }
+      sseReconnectRef.current = setTimeout(() => {
+        if (!remoteSseActiveRef.current) {
+          return;
+        }
+        realtimeConnectedRef.current = false;
+        updateConnectivity();
+        connectSse();
+      }, 1500);
+    };
+
+    const connectSse = () => {
+      if (!remoteSseActiveRef.current) {
+        return;
+      }
+
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+
+      try {
+        const source = new EventSource("/api/scale/events");
+        sseRef.current = source;
+
+        source.onopen = () => {
+          if (!remoteSseActiveRef.current) {
+            return;
+          }
+          realtimeConnectedRef.current = true;
+          resetHttpTracking();
+          stopHttpPolling();
+          setError(null);
+          setReconnectAttempts(0);
+          updateConnectivity();
+        };
+
+        source.addEventListener("weight", event => {
+          if (!remoteSseActiveRef.current) {
+            return;
+          }
+
+          try {
+            const message = event as MessageEvent<string>;
+            const payload = JSON.parse(message.data) as { value: number | string | null; ts?: string | null };
+            const rawValue = payload?.value;
+            let nextWeight = 0;
+
+            if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+              nextWeight = rawValue;
+            } else if (typeof rawValue === "string") {
+              const parsed = Number(rawValue);
+              if (!Number.isNaN(parsed)) {
+                nextWeight = parsed;
+              }
+            }
+
+            setWeight(nextWeight);
+            setIsStable(false);
+            setUnit("g");
+            realtimeConnectedRef.current = true;
+            updateConnectivity();
+          } catch (err) {
+            console.error("Failed to parse SSE weight event", err);
+          }
+        });
+
+        source.onerror = () => {
+          if (!remoteSseActiveRef.current) {
+            return;
+          }
+          realtimeConnectedRef.current = false;
+          updateConnectivity();
+          startHttpPolling();
+          scheduleReconnect();
+        };
+      } catch (err) {
+        console.error("Failed to initialise SSE connection", err);
+        realtimeConnectedRef.current = false;
+        updateConnectivity();
+        startHttpPolling();
+        scheduleReconnect();
+      }
+    };
+
+    connectSse();
+
+    return () => {
+      remoteSseActiveRef.current = false;
+      if (sseReconnectRef.current) {
+        clearTimeout(sseReconnectRef.current);
+        sseReconnectRef.current = null;
+      }
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+      stopHttpPolling();
+      realtimeConnectedRef.current = false;
+      updateConnectivity();
+    };
+  }, [
+    isDemoMode,
+    localClient,
+    resetHttpTracking,
+    setError,
+    setIsStable,
+    setReconnectAttempts,
+    setUnit,
+    setWeight,
+    startHttpPolling,
+    stopHttpPolling,
+    updateConnectivity,
+  ]);
 
   return {
     weight,
@@ -309,5 +521,6 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
     isConnected,
     error,
     reconnectAttempts,
+    connectionState,
   };
 };
