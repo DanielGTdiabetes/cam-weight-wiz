@@ -120,6 +120,7 @@ def camera_last_capture():
             status_code=404,
         )
     response = FileResponse(path=filename, media_type="image/jpeg")
+    response.headers["Content-Disposition"] = "inline"
     response.headers["Cache-Control"] = "no-store, private"
     response.headers.setdefault("Pragma", "no-cache")
     return response
