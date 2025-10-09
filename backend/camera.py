@@ -34,6 +34,16 @@ def _capture_payload(full: bool, size: int) -> Dict[str, object]:
     return {"ok": True, "path": str(CAPTURE_PATH), "full": bool(full), "size": size}
 
 
+def _last_capture_metadata(full: bool = False) -> Dict[str, object]:
+    size = _capture_size()
+    return {
+        "ok": size > 0,
+        "path": str(CAPTURE_PATH),
+        "full": bool(full),
+        "size": size,
+    }
+
+
 def _capture_size() -> int:
     try:
         return CAPTURE_PATH.stat().st_size
@@ -50,12 +60,13 @@ def camera_info():
         LOG.exception("No hay cámara disponible: %s", exc)
         return _camera_error_response(503, "camera_unavailable", str(exc))
 
-    response = _capture_payload(full=False, size=_capture_size())
-    response["camera"] = {
+    response = {
+        "ok": True,
         "Model": properties.get("Model"),
         "Rotation": properties.get("Rotation"),
         "PixelArraySize": properties.get("PixelArraySize"),
     }
+    response["lastCapture"] = _last_capture_metadata(full=False)
     return response
 
 
