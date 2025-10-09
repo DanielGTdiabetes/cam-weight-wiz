@@ -71,7 +71,7 @@ En Raspberry Pi 5 con Raspberry Pi OS Bookworm puede aparecer el error de Xorg `
 
 ### Configuración de audio (HifiBerry + micro USB)
 
-El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (`dsnoop_mic` a 16 kHz envuelto por `softvol` → `bascula_mix_in` con control `SoftMicGain`) y dirigir la salida HifiBerry mediante `plug` (`bascula_out`). 【F:scripts/install-all.sh†L224-L314】
+El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (`dsnoop_mic` a la tasa nativa —48 kHz por defecto— envuelto por `softvol` → `bascula_mix_in` con control `SoftMicGain`) y dirigir la salida HifiBerry mediante `plug` (`bascula_out`). 【F:scripts/install-all.sh†L224-L314】
 
 Antes de ejecutar la instalación, verifica los índices reales de las tarjetas con:
 
