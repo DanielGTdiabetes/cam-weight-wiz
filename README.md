@@ -71,7 +71,7 @@ En Raspberry Pi 5 con Raspberry Pi OS Bookworm puede aparecer el error de Xorg `
 
 ### Configuración de audio (HifiBerry + micro USB)
 
-El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (dsnoop a 48 kHz → plug `bascula_mix_in`) y mezclar la salida HifiBerry mediante `dmix` (`bascula_out`). 【F:scripts/install-all.sh†L212-L314】
+El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (`dsnoop_mic` a 16 kHz envuelto por `softvol` → `bascula_mix_in` con control `SoftMicGain`) y dirigir la salida HifiBerry mediante `plug` (`bascula_out`). 【F:scripts/install-all.sh†L224-L314】
 
 Antes de ejecutar la instalación, verifica los índices reales de las tarjetas con:
 
@@ -80,7 +80,7 @@ arecord -l
 aplay -l
 ```
 
-En nuestros presets habituales: micrófono USB = `card 0, device 0`; HiFiBerry DAC = `card 1, device 0`. Si difiere, edita `/etc/asound.conf` y ajusta las secciones `pcm.raw_mic`/`pcm.raw_dac`. 【F:scripts/install-all.sh†L212-L314】
+En nuestros presets habituales: micrófono USB = `card 0, device 0`; HiFiBerry DAC = `card 1, device 0`. Si difiere, edita `/etc/asound.conf` y ajusta las secciones `pcm.dsnoop_mic`/`pcm.bascula_out`. 【F:scripts/install-all.sh†L224-L314】
 
 El backend consume estas variables publicadas por el servicio `bascula-miniweb`:
 
@@ -100,6 +100,21 @@ Para comprobaciones manuales adicionales:
 arecord -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 /tmp/test.wav
 aplay -D bascula_out /usr/share/sounds/alsa/Front_Center.wav
 speaker-test -D bascula_out -t sine -f 440 -l 1
+```
+
+#### Ajuste de ganancia del micrófono
+
+Para subir o bajar la ganancia software del micrófono USB:
+
+```
+alsamixer  # F6 → seleccionar card 0 (USB) y mover SoftMicGain
+```
+
+Para fijar el hardware al máximo y habilitar AGC (si existe el control):
+
+```bash
+amixer -c 0 sset 'Mic' 16 cap
+amixer -c 0 sset 'Auto Gain Control' on
 ```
 
 ### Dependencias Python críticas

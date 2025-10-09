@@ -236,7 +236,7 @@ configure_hifiberry_audio() {
 # ===========================
 
 ##### ENTRADA (MICRÓFONO USB) #####
-# Micrófono USB (card 0)
+# Dispositivo físico (USB PnP — ver arecord -l)
 pcm.dsnoop_mic {
     type dsnoop
     ipc_key 2048
@@ -249,8 +249,15 @@ pcm.dsnoop_mic {
 }
 
 pcm.bascula_mix_in {
-    type plug
+    type softvol
     slave.pcm "dsnoop_mic"
+    control {
+        name "SoftMicGain"
+        card 0
+    }
+    min_dB -5.0
+    max_dB 20.0
+    resolution 200
 }
 
 ctl.bascula_mix_in {
@@ -282,6 +289,13 @@ ctl.!default {
 }
 EOF
 
+  if command -v amixer >/dev/null 2>&1; then
+    amixer -c 0 sset 'Mic' 16 cap >/dev/null 2>&1 || true
+    amixer -c 0 sset 'Auto Gain Control' on >/dev/null 2>&1 || true
+  fi
+
+  printf '[inst][info] SoftMicGain disponible (softvol). Ajustable desde alsamixer (F6->card 0) si fuera necesario.\n'
+
   if command -v aplay >/dev/null 2>&1; then
     if aplay -L | grep -q 'plughw:CARD=sndrpihifiberry,DEV=0'; then
       printf '[ok] HiFiBerry detectado\n'
@@ -312,10 +326,10 @@ configure_usb_microphone() {
     return
   fi
 
-  amixer -c 0 set Mic 16 unmute >/dev/null 2>&1 || true
-  amixer -c 0 set 'Auto Gain Control' on >/dev/null 2>&1 || true
+  amixer -c 0 sset 'Mic' 16 cap >/dev/null 2>&1 || true
+  amixer -c 0 sset 'Auto Gain Control' on >/dev/null 2>&1 || true
 
-  printf '[install] Micrófono USB configurado con ganancia máxima\n'
+  printf '[install] Micrófono USB configurado (Mic=100%%, AGC=on). SoftMicGain listo en alsamixer.\n'
 }
 
 configure_miniweb_audio_env() {
@@ -1149,6 +1163,9 @@ ensure_enable_uart "${CONF}"
 
 configure_hifiberry_audio
 configure_usb_microphone
+
+install -m 0755 "${SCRIPT_DIR}/test-audio.sh" /usr/local/bin/bascula-test-audio
+/usr/local/bin/bascula-test-audio || true
 
 # --- KMS check (Pi5) ---
 if grep -q "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null; then

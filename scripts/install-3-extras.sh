@@ -9,32 +9,29 @@ fi
 echo "[+] Configurando ALSA (mic USB compartido y salida HiFiBerry)"
 cat <<'EOC' > /etc/asound.conf
 ##### ENTRADA (MICRÓFONO USB) #####
-# Dispositivo físico del micrófono USB (ajustado tras `arecord -l`): card 0, device 0
-pcm.raw_mic {
-  type hw
-  card 0
-  device 0
-}
-
-# dsnoop a 48 kHz (nativo del USB), para acceso simultáneo (Basculín + Recetas)
+# Dispositivo físico (USB PnP — ver arecord -l)
 pcm.dsnoop_mic {
   type dsnoop
   ipc_key 2048
   slave {
-    pcm "raw_mic"
-    format S16_LE
-    rate 48000
+    pcm "hw:0,0"
+    rate 16000
     channels 1
-    period_time 0
-    period_size 1024
-    buffer_size 4096
+    format S16_LE
   }
 }
 
-# plug que adapta automáticamente la tasa que pidan las apps (ej. 16 kHz)
+# Ganancia software sobre la entrada (ajustable sin distorsión)
 pcm.bascula_mix_in {
-  type plug
+  type softvol
   slave.pcm "dsnoop_mic"
+  control {
+    name "SoftMicGain"
+    card 0
+  }
+  min_dB -5.0
+  max_dB 20.0
+  resolution 200
 }
 
 ctl.bascula_mix_in {
@@ -76,6 +73,13 @@ ctl.bascula_out {
   card 1
 }
 EOC
+
+if command -v amixer >/dev/null 2>&1; then
+  amixer -c 0 sset 'Mic' 16 cap >/dev/null 2>&1 || true
+  amixer -c 0 sset 'Auto Gain Control' on >/dev/null 2>&1 || true
+fi
+
+echo "[inst][info] SoftMicGain disponible (softvol). Ajustable desde alsamixer (F6->card 0) si fuera necesario."
 
 if command -v alsactl >/dev/null 2>&1; then
   alsactl store || true
