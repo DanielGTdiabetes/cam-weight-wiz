@@ -22,6 +22,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Optional, Dict, Any, List, Union, Set
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -143,7 +144,7 @@ def _get_nightscout_credentials(config: Dict[str, Any]) -> tuple[str, str]:
     return url, token
 
 
-async def invoke_chatgpt(messages: List[Dict[str, str]]) -> Optional[str]:
+async def invoke_chatgpt(messages: List[Dict[str, Any]]) -> Optional[str]:
     """Send a chat completion request and return the assistant message."""
 
     api_key = get_chatgpt_api_key()
@@ -219,35 +220,74 @@ def coerce_float(value: Any, default: float) -> float:
         return default
 
 
-async def chatgpt_food_analysis(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Ask ChatGPT to identify a food item using the provided context."""
+async def chatgpt_food_analysis(
+    image_bytes: bytes,
+    weight_grams: float,
+    average_rgb: Dict[str, float],
+    *,
+    mime_type: str = "image/jpeg",
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Ask ChatGPT to identify a food item directly from an image."""
 
     if not get_chatgpt_api_key():
         return None
 
+    try:
+        encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    except Exception:
+        return None
+
     system_prompt = (
-        "Eres un asistente experto en nutrición. Debes identificar alimentos "
-        "a partir de descripciones de color promedio, candidatos sugeridos y "
-        "peso. Responde únicamente en JSON válido con el formato: "
-        "{\"name\": string, \"confidence\": number, \"nutrition\": {\"carbs\": number, "
+        "Eres un asistente experto en nutrición y composición de alimentos. "
+        "Debes analizar imágenes de comida y devolver una respuesta JSON con el "
+        "formato {\"name\": string, \"confidence\": number, \"nutrition\": {\"carbs\": number, "
         "\"proteins\": number, \"fats\": number, \"glycemic_index\": number}}. "
-        "Todas las cantidades nutricionales deben estar expresadas en gramos "
-        "para el peso indicado y, si no estás seguro, devuelve valores "
-        "conservadores y fija la confianza a un valor bajo."
+        "Los macronutrientes deben corresponder al peso exacto indicado en gramos. "
+        "Si existe incertidumbre, usa valores conservadores y disminuye la confianza."
     )
 
-    content = json.dumps(payload, ensure_ascii=False)
+    context_lines = [
+        f"Peso medido por la báscula: {weight_grams:.2f} gramos.",
+        "Color promedio aproximado capturado por el sistema: "
+        f"({average_rgb.get('r', 0)}, {average_rgb.get('g', 0)}, {average_rgb.get('b', 0)}).",
+    ]
+
+    if extra_context:
+        try:
+            context_lines.append(
+                "Datos adicionales del sistema: "
+                f"{json.dumps(extra_context, ensure_ascii=False)}"
+            )
+        except (TypeError, ValueError):
+            pass
+
+    prompt_lines = [
+        "Analiza la comida de la imagen adjunta y devuelve exclusivamente el JSON "
+        "con el formato solicitado. Indica la confianza en un rango de 0 a 1.",
+        *context_lines,
+    ]
+
+    user_message = {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "\n".join(prompt_lines),
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{encoded_image}",
+                },
+            },
+        ],
+    }
 
     response = await invoke_chatgpt(
         [
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": (
-                    "Analiza la siguiente información y responde solo con el JSON solicitado:\n"
-                    f"{content}"
-                ),
-            },
+            user_message,
         ]
     )
 
@@ -913,7 +953,8 @@ async def apply_calibration(data: CalibrationApplyRequest):
 
 @app.post("/api/scanner/analyze")
 async def analyze_food(image: UploadFile = File(...), weight: float = Form(...)):
-    """Analyze food from camera image using a lightweight color heuristic"""
+    """Analyze food from a camera image using ChatGPT when available."""
+
     if weight <= 0:
         raise HTTPException(status_code=400, detail="El peso debe ser mayor que cero")
 
@@ -926,11 +967,13 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
     except ImportError as exc:
         raise HTTPException(
             status_code=500,
-            detail="Pillow no está instalado en el backend. Instala 'pillow' para habilitar el análisis de imágenes."
+            detail="Pillow no está instalado en el backend. Instala 'pillow' para habilitar el análisis de imágenes.",
         ) from exc
 
     try:
-        img = Image.open(BytesIO(raw_bytes)).convert("RGB")
+        img = Image.open(BytesIO(raw_bytes))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Imagen inválida: {exc}") from exc
 
@@ -946,120 +989,74 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
     avg_g = sum(p[1] for p in sampled) / len(sampled)
     avg_b = sum(p[2] for p in sampled) / len(sampled)
 
-    food_profiles = [
-        {
-            "name": "Manzana Roja",
-            "rgb": (180, 45, 40),
-            "glycemic_index": 40,
-            "macros_per_100": {"carbs": 14.0, "proteins": 0.3, "fats": 0.2},
-        },
-        {
-            "name": "Banana",
-            "rgb": (225, 205, 80),
-            "glycemic_index": 51,
-            "macros_per_100": {"carbs": 23.0, "proteins": 1.3, "fats": 0.3},
-        },
-        {
-            "name": "Tomate",
-            "rgb": (185, 60, 55),
-            "glycemic_index": 38,
-            "macros_per_100": {"carbs": 3.9, "proteins": 0.9, "fats": 0.2},
-        },
-        {
-            "name": "Brócoli",
-            "rgb": (95, 135, 75),
-            "glycemic_index": 15,
-            "macros_per_100": {"carbs": 7.0, "proteins": 2.8, "fats": 0.4},
-        },
-        {
-            "name": "Pollo Cocido",
-            "rgb": (200, 180, 150),
-            "glycemic_index": 0,
-            "macros_per_100": {"carbs": 0.0, "proteins": 31.0, "fats": 3.6},
-        },
-        {
-            "name": "Arroz Blanco",
-            "rgb": (220, 220, 200),
-            "glycemic_index": 73,
-            "macros_per_100": {"carbs": 28.0, "proteins": 2.7, "fats": 0.3},
-        },
-    ]
-
-    def color_distance(profile_rgb: tuple[int, int, int]) -> float:
-        pr, pg, pb = profile_rgb
-        return math.sqrt((pr - avg_r) ** 2 + (pg - avg_g) ** 2 + (pb - avg_b) ** 2)
-
-    ranked = sorted(food_profiles, key=lambda profile: color_distance(profile["rgb"]))
-    best_match = ranked[0]
-    max_distance = math.sqrt(3 * (255 ** 2))
-    distance = color_distance(best_match["rgb"])
-    confidence = max(0.1, 1 - (distance / max_distance))
-
-    macros = {
-        key: round(weight * value / 100, 2)
-        for key, value in best_match["macros_per_100"].items()
-    }
-
     avg_color = {
         "r": round(avg_r, 2),
         "g": round(avg_g, 2),
         "b": round(avg_b, 2),
     }
 
-    heuristics_result = {
-        "name": best_match["name"],
-        "confidence": round(confidence, 2),
-        "avg_color": avg_color,
-        "nutrition": {
-            "carbs": macros["carbs"],
-            "proteins": macros["proteins"],
-            "fats": macros["fats"],
-            "glycemic_index": best_match["glycemic_index"],
-        },
+    mime_type = image.content_type or ""
+    if not mime_type and getattr(img, "format", None):
+        mime_type = f"image/{img.format.lower()}"
+    if not mime_type:
+        mime_type = "image/jpeg"
+
+    extra_context: Dict[str, Any] = {
+        "average_rgb": avg_color,
+        "dimensions": {"width": img.width, "height": img.height},
+        "weight_grams": weight,
     }
 
-    if get_chatgpt_api_key():
-        top_candidates = []
-        for profile in ranked[:5]:
-            top_candidates.append(
-                {
-                    "name": profile["name"],
-                    "distance": round(color_distance(profile["rgb"]), 3),
-                    "macros_per_100": profile["macros_per_100"],
-                    "glycemic_index": profile["glycemic_index"],
-                }
-            )
+    if image.filename:
+        extra_context["filename"] = image.filename
+    if getattr(img, "format", None):
+        extra_context["format"] = img.format
 
-        chatgpt_payload = {
-            "weight_grams": weight,
-            "average_rgb": avg_color,
-            "heuristic_best_match": heuristics_result,
-            "candidates": top_candidates,
+    if not get_chatgpt_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="No hay una API key configurada para ChatGPT. Configura OPENAI_API_KEY o CHATGPT_API_KEY para habilitar el análisis automático.",
+        )
+
+    chatgpt_response = await chatgpt_food_analysis(
+        raw_bytes,
+        weight,
+        avg_color,
+        mime_type=mime_type,
+        extra_context=extra_context,
+    )
+
+    if isinstance(chatgpt_response, dict):
+        nutrition_defaults = {
+            "carbs": 0.0,
+            "proteins": 0.0,
+            "fats": 0.0,
+            "glycemic_index": 50.0,
         }
 
-        chatgpt_response = await chatgpt_food_analysis(chatgpt_payload)
-        if isinstance(chatgpt_response, dict):
-            nutrition = heuristics_result["nutrition"].copy()
-            gpt_nutrition = chatgpt_response.get("nutrition", {})
-            for key in ["carbs", "proteins", "fats", "glycemic_index"]:
-                nutrition[key] = round(
-                    coerce_float(gpt_nutrition.get(key), nutrition[key]),
-                    2 if key != "glycemic_index" else 0,
-                )
+        nutrition: Dict[str, float] = {}
+        gpt_nutrition = chatgpt_response.get("nutrition", {}) or {}
+        for key, default in nutrition_defaults.items():
+            digits = 2 if key != "glycemic_index" else 0
+            value = coerce_float(gpt_nutrition.get(key), default)
+            if key != "glycemic_index":
+                value = max(0.0, value)
+            nutrition[key] = round(value, digits)
 
-            confidence_value = coerce_float(
-                chatgpt_response.get("confidence"),
-                heuristics_result["confidence"],
-            )
+        confidence_value = coerce_float(chatgpt_response.get("confidence"), 0.5)
+        confidence_value = max(0.0, min(1.0, confidence_value))
 
-            return {
-                "name": chatgpt_response.get("name", heuristics_result["name"]),
-                "confidence": round(confidence_value, 2),
-                "avg_color": avg_color,
-                "nutrition": nutrition,
-            }
+        return {
+            "name": chatgpt_response.get("name", "Alimento no identificado"),
+            "confidence": round(confidence_value, 2),
+            "avg_color": avg_color,
+            "nutrition": nutrition,
+        }
 
-    return heuristics_result
+    raise HTTPException(
+        status_code=502,
+        detail="El servicio de análisis inteligente no devolvió una respuesta válida",
+    )
 
 @app.get("/api/scanner/barcode/{barcode}")
 
