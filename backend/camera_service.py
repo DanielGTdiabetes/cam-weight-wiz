@@ -5,6 +5,7 @@ import atexit
 import errno
 import io
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -327,7 +328,11 @@ class Picamera2Service:
         data = self.capture_bytes(full=full, timeout_ms=timeout_ms)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        return {"ok": True, "path": str(target), "size": len(data)}
+        try:
+            os.chmod(target, 0o660)  # rw-rw----
+        except Exception:
+            LOG_CAMERA.debug("No se pudo ajustar chmod 660 a %s", target, exc_info=True)
+        return {"ok": True, "path": str(target), "full": full, "size": len(data)}
 
     def close(self) -> None:
         with self._camera_lock:
