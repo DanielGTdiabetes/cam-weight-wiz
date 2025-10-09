@@ -989,10 +989,76 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
     avg_g = sum(p[1] for p in sampled) / len(sampled)
     avg_b = sum(p[2] for p in sampled) / len(sampled)
 
+    food_profiles = [
+        {
+            "name": "Manzana Roja",
+            "rgb": (180, 45, 40),
+            "glycemic_index": 40,
+            "macros_per_100": {"carbs": 14.0, "proteins": 0.3, "fats": 0.2},
+        },
+        {
+            "name": "Banana",
+            "rgb": (225, 205, 80),
+            "glycemic_index": 51,
+            "macros_per_100": {"carbs": 23.0, "proteins": 1.3, "fats": 0.3},
+        },
+        {
+            "name": "Tomate",
+            "rgb": (185, 60, 55),
+            "glycemic_index": 38,
+            "macros_per_100": {"carbs": 3.9, "proteins": 0.9, "fats": 0.2},
+        },
+        {
+            "name": "Brócoli",
+            "rgb": (95, 135, 75),
+            "glycemic_index": 15,
+            "macros_per_100": {"carbs": 7.0, "proteins": 2.8, "fats": 0.4},
+        },
+        {
+            "name": "Pollo Cocido",
+            "rgb": (200, 180, 150),
+            "glycemic_index": 0,
+            "macros_per_100": {"carbs": 0.0, "proteins": 31.0, "fats": 3.6},
+        },
+        {
+            "name": "Arroz Blanco",
+            "rgb": (220, 220, 200),
+            "glycemic_index": 73,
+            "macros_per_100": {"carbs": 28.0, "proteins": 2.7, "fats": 0.3},
+        },
+    ]
+
+    def color_distance(profile_rgb: tuple[int, int, int]) -> float:
+        pr, pg, pb = profile_rgb
+        return math.sqrt((pr - avg_r) ** 2 + (pg - avg_g) ** 2 + (pb - avg_b) ** 2)
+
+    ranked = sorted(food_profiles, key=lambda profile: color_distance(profile["rgb"]))
+    best_match = ranked[0]
+    max_distance = math.sqrt(3 * (255 ** 2))
+    distance = color_distance(best_match["rgb"])
+    confidence = max(0.1, 1 - (distance / max_distance))
+
+    macros = {
+        key: round(weight * value / 100, 2)
+        for key, value in best_match["macros_per_100"].items()
+    }
+
     avg_color = {
         "r": round(avg_r, 2),
         "g": round(avg_g, 2),
         "b": round(avg_b, 2),
+    }
+
+    heuristics_result = {
+        "name": best_match["name"],
+        "confidence": round(confidence, 2),
+        "avg_color": avg_color,
+        "nutrition": {
+            "carbs": macros["carbs"],
+            "proteins": macros["proteins"],
+            "fats": macros["fats"],
+            "glycemic_index": best_match["glycemic_index"],
+        },
     }
 
     mime_type = image.content_type or ""
@@ -1012,11 +1078,19 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
     if getattr(img, "format", None):
         extra_context["format"] = img.format
 
-    if not get_chatgpt_api_key():
-        raise HTTPException(
-            status_code=503,
-            detail="No hay una API key configurada para ChatGPT. Configura OPENAI_API_KEY o CHATGPT_API_KEY para habilitar el análisis automático.",
+    top_candidates = []
+    for profile in ranked[:5]:
+        top_candidates.append(
+            {
+                "name": profile["name"],
+                "distance": round(color_distance(profile["rgb"]), 3),
+                "macros_per_100": profile["macros_per_100"],
+                "glycemic_index": profile["glycemic_index"],
+            }
         )
+
+    extra_context["heuristic_best_match"] = heuristics_result
+    extra_context["candidates"] = top_candidates
 
     chatgpt_response = await chatgpt_food_analysis(
         raw_bytes,
@@ -1053,10 +1127,7 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
             "nutrition": nutrition,
         }
 
-    raise HTTPException(
-        status_code=502,
-        detail="El servicio de análisis inteligente no devolvió una respuesta válida",
-    )
+    return heuristics_result
 
 @app.get("/api/scanner/barcode/{barcode}")
 
