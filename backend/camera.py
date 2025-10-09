@@ -17,7 +17,7 @@ from backend.camera_service import (
 )
 
 
-CAPTURE_DIRECTORY = Path("/tmp")
+CAPTURE_DIRECTORY = Path("/run/bascula/captures")
 CAPTURE_PATH = CAPTURE_DIRECTORY / "camera-capture.jpg"
 
 
@@ -109,10 +109,6 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
     """Captura para depuración guardando la imagen en un directorio controlado."""
     capture_dir = CAPTURE_PATH.parent
     capture_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        capture_dir.chmod(0o755)
-    except OSError:
-        LOG.warning("No se pudieron ajustar permisos de %s", capture_dir, exc_info=True)
     filename = CAPTURE_PATH
     service = get_camera_service()
     try:

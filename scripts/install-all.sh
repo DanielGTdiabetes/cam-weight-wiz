@@ -1912,7 +1912,8 @@ else
 fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
-install -d -m0755 -o www-data -g www-data /run/bascula/captures || true
+install -d -m0755 -o pi -g www-data /run/bascula || true
+install -d -m0755 -o pi -g www-data /run/bascula/captures || true
 cat > /etc/nginx/sites-available/bascula <<'EOF'
 server {
     listen 80 default_server;
@@ -1973,8 +1974,8 @@ server {
     }
 
     # Exponer la última captura de la cámara
-    location = /tmp/camera-capture.jpg {
-        alias /tmp/camera-capture.jpg;
+    location = /run/bascula/captures/camera-capture.jpg {
+        alias /run/bascula/captures/camera-capture.jpg;
         default_type image/jpeg;
         add_header Cache-Control "no-store";
     }
@@ -2041,8 +2042,8 @@ server {
     }
 
     # Exponer la última captura de la cámara
-    location = /tmp/camera-capture.jpg {
-        alias /tmp/camera-capture.jpg;
+    location = /run/bascula/captures/camera-capture.jpg {
+        alias /run/bascula/captures/camera-capture.jpg;
         default_type image/jpeg;
         add_header Cache-Control "no-store";
     }
@@ -2109,8 +2110,8 @@ server {
     }
 
     # Exponer la última captura de la cámara
-    location = /tmp/camera-capture.jpg {
-        alias /tmp/camera-capture.jpg;
+    location = /run/bascula/captures/camera-capture.jpg {
+        alias /run/bascula/captures/camera-capture.jpg;
         default_type image/jpeg;
         add_header Cache-Control "no-store";
     }
@@ -2490,14 +2491,55 @@ fi
 # speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1
 
 echo "== PRUEBA CÁMARA =="
-if command -v jq >/dev/null 2>&1; then
-  curl -fsS -X POST http://localhost:8080/api/camera/capture-to-file | jq . \
-    || echo "[WARN] cámara no disponible o backend no iniciado"
+CAPTURE_API_URL="http://localhost:8080/api/camera/capture-to-file"
+CAPTURE_INFO_URL="http://localhost:8080/api/camera/info"
+CAPTURE_STATIC_URL="http://localhost/run/bascula/captures/camera-capture.jpg"
+CAPTURE_PATH="/run/bascula/captures/camera-capture.jpg"
+CAPTURE_DIR="/run/bascula/captures"
+
+if command -v curl >/dev/null 2>&1; then
+  if command -v jq >/dev/null 2>&1; then
+    if curl -fsS "${CAPTURE_INFO_URL}" | jq -e '.ok == true' >/dev/null; then
+      echo "[ok] camera info disponible"
+    else
+      echo "[WARN] cámara no reporta info válida" >&2
+      curl -fsS "${CAPTURE_INFO_URL}" | jq . || true
+    fi
+
+    capture_json="$(curl -fsS -X POST "${CAPTURE_API_URL}" || true)"
+    if [[ -n "${capture_json}" ]]; then
+      if echo "${capture_json}" | jq -e --arg path "${CAPTURE_PATH}" \
+        '.ok == true and .path == $path and ((.size | try tonumber catch 0) > 0)' >/dev/null; then
+        echo "${capture_json}" | jq .
+      else
+        echo "${capture_json}" | jq .
+        echo "[WARN] respuesta inesperada de capture-to-file" >&2
+      fi
+    else
+      echo "[WARN] captura no devolvió respuesta" >&2
+    fi
+  else
+    echo "[WARN] jq no encontrado; mostrando respuesta plana" >&2
+    curl -fsS "${CAPTURE_INFO_URL}" || echo "[WARN] cámara no disponible" >&2
+    curl -fsS -X POST "${CAPTURE_API_URL}" || echo "[WARN] captura no disponible" >&2
+  fi
+
+  curl -fsSI "${CAPTURE_STATIC_URL}" \
+    || echo "[WARN] cámara no disponible o backend no iniciado" >&2
 else
-  echo "[WARN] jq no encontrado; omitiendo formateo JSON"
-  curl -fsS -X POST http://localhost:8080/api/camera/capture-to-file \
-    || echo "[WARN] cámara no disponible o backend no iniciado"
+  echo "[WARN] curl no encontrado; omitiendo prueba de cámara" >&2
 fi
 
-curl -fsSI http://localhost/tmp/camera-capture.jpg \
-  || echo "[WARN] cámara no disponible o backend no iniciado"
+if command -v sudo >/dev/null 2>&1; then
+  if sudo -u pi test -w "${CAPTURE_DIR}"; then
+    echo "[ok] ${CAPTURE_DIR} writable por pi"
+  else
+    echo "[WARN] ${CAPTURE_DIR} no escribible por pi" >&2
+  fi
+else
+  if [ -w "${CAPTURE_DIR}" ]; then
+    echo "[ok] ${CAPTURE_DIR} writable"
+  else
+    echo "[WARN] ${CAPTURE_DIR} no escribible" >&2
+  fi
+fi
