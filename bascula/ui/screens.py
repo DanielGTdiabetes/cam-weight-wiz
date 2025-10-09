@@ -266,7 +266,7 @@ class ScanScreen(ttk.Frame):
                 self.after(0, lambda: self._on_capture_failure("Error al capturar imagen"))
                 return
 
-            default_path = "/tmp/camera-capture.jpg"
+            default_path = "/run/bascula/captures/camera-capture.jpg"
             path_value = data.get("path")
             file_path = path_value if isinstance(path_value, str) and path_value else default_path
             display_url = file_path

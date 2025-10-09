@@ -2,7 +2,7 @@
 set -euo pipefail
 
 API_URL="http://localhost/api/camera/capture-to-file"
-CAPTURE_PATH="/tmp/camera-capture.jpg"
+CAPTURE_PATH="/run/bascula/captures/camera-capture.jpg"
 
 response_file="$(mktemp)"
 trap 'rm -f "${response_file}"' EXIT
@@ -20,7 +20,7 @@ with open(path, "rb") as fh:
     data = json.load(fh)
 if not data.get("ok"):
     raise SystemExit("respuesta ok=false")
-if data.get("path") != "/tmp/camera-capture.jpg":
+if data.get("path") != "/run/bascula/captures/camera-capture.jpg":
     raise SystemExit("path inesperado: %s" % data.get("path"))
 size = int(data.get("size", 0))
 if size <= 0:

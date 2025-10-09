@@ -4,7 +4,7 @@ import requests
 
 
 CAPTURE_ENDPOINT = "http://localhost:8080/api/camera/capture-to-file"
-CAPTURE_FILE_PATH = "/tmp/camera-capture.jpg"
+CAPTURE_FILE_PATH = "/run/bascula/captures/camera-capture.jpg"
 
 
 def _request_capture() -> dict:

@@ -51,15 +51,22 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
   const settings = storage.getSettings();
   const defaultOrigin = typeof window !== "undefined" ? window.location.origin : "";
+  // HTTP base para REST/SSE: prioriza configuración persistida; si no hay, usa el origin actual.
+  const apiBaseUrl = (settings.apiUrl || defaultOrigin || "").replace(/\/$/, "");
+  // WS base para socket: intenta usar wsUrl configurado; si no, deriva del origin (cambiando esquema) o
+  // recurre al valor por defecto.
+  const wsBaseUrl = (() => {
+    const configured = (settings.wsUrl || "").replace(/\/$/, "");
+    if (configured) {
+      return configured;
+    }
+    if (!defaultOrigin) {
+      return WS_URL.replace(/\/$/, "");
+    }
+    const isHttps = defaultOrigin.startsWith("https");
+    return defaultOrigin.replace(/^http/i, isHttps ? "wss" : "ws").replace(/\/$/, "");
+  })();
   const localClient = isLocalClient();
-  const configuredApiUrl = (settings.apiUrl || defaultOrigin).replace(/\/$/, "");
-  const configuredWsUrl = (settings.wsUrl || WS_URL).replace(/\/$/, "");
-  const apiBaseUrl = localClient ? configuredApiUrl : (defaultOrigin || configuredApiUrl);
-  const wsBaseUrl = localClient
-    ? configuredWsUrl
-    : defaultOrigin
-      ? defaultOrigin.replace(/^http/i, defaultOrigin.startsWith("https") ? "wss" : "ws")
-      : configuredWsUrl;
   const hostname = typeof window !== "undefined" ? window.location.hostname : "";
   const isDemoMode = /\.lovable\.app$/i.test(hostname);
 
@@ -143,7 +150,10 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
       httpAbortControllerRef.current = controller;
 
       try {
-        const response = await fetch(`${apiBaseUrl}/api/scale/weight`, {
+        const weightPath = "/api/scale/weight";
+        const weightBase = apiBaseUrl || "";
+        const weightUrl = weightBase ? `${weightBase}${weightPath}` : weightPath;
+        const response = await fetch(weightUrl, {
           signal: controller.signal,
         });
 
@@ -421,7 +431,10 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
       }
 
       try {
-        const source = new EventSource("/api/scale/events");
+        const ssePath = "/api/scale/events";
+        const sseBase = apiBaseUrl || "";
+        const sseUrl = sseBase ? `${sseBase}${ssePath}` : ssePath;
+        const source = new EventSource(sseUrl);
         sseRef.current = source;
 
         source.onopen = () => {
