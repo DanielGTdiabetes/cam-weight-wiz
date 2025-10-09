@@ -153,3 +153,18 @@ else
   fi
 fi
 
+echo "[+] Probando cámara con libcamera-still"
+if command -v libcamera-still >/dev/null 2>&1; then
+  TMP_LIBCAM_LOG=$(mktemp -t libcamera-still.XXXXXX.log)
+  if libcamera-still -o /tmp/test_cam.jpg --timeout 800 >"$TMP_LIBCAM_LOG" 2>&1; then
+    echo "[OK] libcamera-still capturó /tmp/test_cam.jpg"
+  else
+    status=$?
+    echo "[ERROR] libcamera-still falló (código $status). Cámara ocupada — comprobar servicios en ejecución."
+    cat "$TMP_LIBCAM_LOG" || true
+  fi
+  rm -f "$TMP_LIBCAM_LOG"
+else
+  echo "[WARN] libcamera-still no disponible; omitiendo prueba de cámara"
+fi
+

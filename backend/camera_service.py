@@ -5,6 +5,7 @@ import atexit
 import errno
 import io
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -44,6 +45,20 @@ else:
 LOG_CAMERA = logging.getLogger("bascula.camera")
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return default
+
+
 class CameraError(RuntimeError):
     """Base error for camera operations."""
 
@@ -81,6 +96,7 @@ class Picamera2Service:
         self._transform: Optional[LibcameraTransform] = None
         self._warmup_delay = 0.2  # 200 ms para estabilizar tras iniciar la cámara
         self._closed = False
+        self._release_on_exit = _env_flag("BASCULA_CAM_RELEASE_ON_EXIT", False)
         LOG_CAMERA.debug("Picamera2Service inicializado")
 
     # ---------- Singleton helpers ----------
@@ -98,29 +114,57 @@ class Picamera2Service:
     def _ensure_camera(self) -> Picamera2:
         if self._closed:
             raise CameraUnavailableError("La cámara se ha cerrado previamente")
-        if self._camera is not None:
-            return self._camera
-        with self._camera_lock:
-            if self._camera is not None:
-                return self._camera
-            try:
-                camera = Picamera2()
-            except Exception as exc:  # pragma: no cover - hardware specific failure
-                raise CameraUnavailableError(str(exc)) from exc
-            self._properties = dict(getattr(camera, "camera_properties", {}) or {})
-            rotation = self._resolve_rotation(self._properties.get("Rotation"))
-            hflip = self._properties.get("HorizontalFlip")
-            vflip = self._properties.get("VerticalFlip")
-            self._transform = self._build_transform(rotation, hflip, vflip)
-            self._camera = camera
-            self._configs.clear()
-            self._active_config = None
-            LOG_CAMERA.info(
-                "Picamera2 preparada: modelo=%s, rotación=%s",
-                self._properties.get("Model", "desconocido"),
-                rotation if rotation is not None else "sin especificar",
-            )
-            return camera
+
+        attempts = 0
+        last_error: Optional[BaseException] = None
+
+        while attempts < 2:
+            attempts += 1
+            with self._camera_lock:
+                if self._camera is not None:
+                    return self._camera
+
+                temp_camera: Optional[Picamera2] = None
+                try:
+                    self._release_camera()
+                    temp_camera = Picamera2()
+                    self._properties = dict(getattr(temp_camera, "camera_properties", {}) or {})
+                    rotation = self._resolve_rotation(self._properties.get("Rotation"))
+                    hflip = self._properties.get("HorizontalFlip")
+                    vflip = self._properties.get("VerticalFlip")
+                    self._transform = self._build_transform(rotation, hflip, vflip)
+                    self._camera = temp_camera
+                    self._configs.clear()
+                    self._active_config = None
+                    LOG_CAMERA.info(
+                        "Picamera2 preparada: modelo=%s, rotación=%s",
+                        self._properties.get("Model", "desconocido"),
+                        rotation if rotation is not None else "sin especificar",
+                    )
+                    return temp_camera
+                except (RuntimeError, CameraUnavailableError) as exc:
+                    last_error = exc
+                    LOG_CAMERA.warning("Fallo al inicializar Picamera2 (intento %d): %s", attempts, exc)
+                    self._release_camera()
+                except Exception as exc:  # pragma: no cover - hardware specific failure
+                    last_error = exc
+                    LOG_CAMERA.error("Error inesperado al inicializar Picamera2: %s", exc, exc_info=True)
+                    self._release_camera()
+                    raise CameraUnavailableError(str(exc)) from exc
+                finally:
+                    if temp_camera is not None and temp_camera is not self._camera:
+                        try:
+                            temp_camera.close()
+                        except Exception:
+                            LOG_CAMERA.debug("Error al cerrar la cámara temporal", exc_info=True)
+
+            if attempts < 2:
+                time.sleep(0.3)
+
+        if last_error is not None:
+            message = str(last_error) or "No se pudo inicializar la cámara"
+            raise CameraUnavailableError(message) from last_error
+        raise CameraUnavailableError("No se pudo inicializar la cámara")
 
     @staticmethod
     def _resolve_rotation(value: Any) -> Optional[int]:
@@ -219,21 +263,26 @@ class Picamera2Service:
         LOG_CAMERA.error("%s: %s", message, exc, exc_info=True)
         self._safe_close()
 
-    def _safe_close(self) -> None:
+    def _release_camera(self) -> None:
         camera = self._camera
         self._camera = None
         self._configs.clear()
         self._active_config = None
+        self._properties = {}
+        self._transform = None
         if camera is None:
             return
         try:
             camera.stop()
         except Exception:
-            LOG_CAMERA.debug("Error al detener la cámara durante el cierre", exc_info=True)
+            LOG_CAMERA.debug("Error al detener la cámara durante la liberación", exc_info=True)
         try:
             camera.close()
         except Exception:
             LOG_CAMERA.debug("Error al cerrar la cámara", exc_info=True)
+
+    def _safe_close(self) -> None:
+        self._release_camera()
 
     # ---------- Public API ----------
     def get_camera_info(self) -> Dict[str, Any]:
@@ -241,7 +290,10 @@ class Picamera2Service:
             camera = self._ensure_camera()
             if not self._properties:
                 self._properties = dict(getattr(camera, "camera_properties", {}) or {})
-            return dict(self._properties)
+            snapshot = dict(self._properties)
+            if self._release_on_exit:
+                self._release_camera()
+            return snapshot
 
     def capture_bytes(self, full: bool = False, timeout_ms: int = 2000) -> bytes:
         deadline = time.monotonic() + max(timeout_ms, 1) / 1000.0
@@ -267,6 +319,9 @@ class Picamera2Service:
                         continue
                     self._handle_fatal_error("Fallo en la captura", exc)
                     raise CameraOperationError("Fallo en la captura") from exc
+                finally:
+                    if self._release_on_exit:
+                        self._release_camera()
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.25)

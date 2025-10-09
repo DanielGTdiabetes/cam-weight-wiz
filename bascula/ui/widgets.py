@@ -100,10 +100,16 @@ class TimerController:
     def _schedule_tick(self) -> None:
         try:
             self._timer_job = self._root.after(1000, self._tick)
+            LOGGER.debug(
+                "TimerController._schedule_tick: next tick programado (job=%s)", self._timer_job
+            )
         except Exception as exc:
             LOGGER.warning("TimerController._schedule_tick: after() falló (%s), reintentando", exc)
             try:
                 self._timer_job = self._root.after(1000, self._tick)
+                LOGGER.debug(
+                    "TimerController._schedule_tick: reintento exitoso (job=%s)", self._timer_job
+                )
             except Exception as retry_exc:
                 LOGGER.error(
                     "TimerController._schedule_tick: reintento de after() falló (%s)", retry_exc
@@ -335,6 +341,12 @@ class TimerWidget(ttk.Frame):
     # State handling
     # ------------------------------------------------------------------
     def _on_timer_state(self, timer_state: TimerState) -> None:
+        LOGGER.debug(
+            "TimerWidget._on_timer_state: active=%s remaining=%s completed_at=%s",
+            timer_state.active,
+            timer_state.remaining_seconds,
+            timer_state.completed_at,
+        )
         self.after(0, lambda: self._render_state(timer_state))
 
     def _render_state(self, timer_state: TimerState) -> None:
