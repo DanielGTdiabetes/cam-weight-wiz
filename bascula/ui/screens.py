@@ -40,7 +40,7 @@ class HomeScreen(ttk.Frame):
         self._state = state
         self._scale_service = scale_service
         self._timer_controller = timer_controller
-        self._tare_in_progress = False
+        self.taring = False
         self._tara_job: Optional[str] = None
         self._weight_subscription = self._state.subscribe_weight(self._on_weight_update)
         self._tare_subscription = self._state.subscribe_tare(self._on_tare_event)
@@ -73,10 +73,14 @@ class HomeScreen(ttk.Frame):
     # Event handlers
     # ------------------------------------------------------------------
     def _on_tare(self) -> None:
-        if self._tare_in_progress:
+        if self.taring:
             return
 
-        self._tare_in_progress = True
+        self.taring = True
+        try:
+            self._tare_button.state(["disabled"])
+        except Exception:
+            pass
         try:
             self._scale_service.tare()
         except Exception as exc:  # pragma: no cover - depends on hardware/service
@@ -87,7 +91,11 @@ class HomeScreen(ttk.Frame):
             self._state.record_tare_event()
             self._show_tara_message("Tara aplicada")
         finally:
-            self._tare_in_progress = False
+            self.taring = False
+            try:
+                self._tare_button.state(["!disabled"])
+            except Exception:
+                pass
 
     def _on_weight_update(self, weight_state: WeightState) -> None:
         self.after(0, lambda: self._render_weight(weight_state))

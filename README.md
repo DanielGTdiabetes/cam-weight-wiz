@@ -40,6 +40,34 @@ Tras el reinicio:
 - El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 - Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
 
+## Instalación limpia en Raspberry Pi 5
+
+1. Clona el repositorio:
+   ```bash
+   git clone https://github.com/DanielGTdiabetes/cam-weight-wiz
+   cd cam-weight-wiz
+   ```
+
+2. Ejecuta el instalador:
+
+   ```bash
+   sudo bash scripts/install-all.sh
+   ```
+
+3. Verifica el sistema:
+
+   ```bash
+   sudo bash /opt/bascula/check-install.sh
+   ```
+
+Requisitos:
+
+- Raspberry Pi 4 o 5 con dtoverlay=vc4-kms-v3d
+- Python ≥3.11
+- Nginx, Chromium, ALSA activos
+
+---
+
 ### Gráficos en Raspberry Pi 5
 
 Para Raspberry Pi 5 con Raspberry Pi OS Bookworm (64 bits) mantén el pipeline KMS limpio:
