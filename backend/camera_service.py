@@ -1,6 +1,7 @@
 """Thread-safe Picamera2 service for headless captures."""
 from __future__ import annotations
 
+import asyncio
 import atexit
 import errno
 import io
@@ -330,3 +331,25 @@ class Picamera2Service:
 def get_camera_service() -> Picamera2Service:
     """Return the singleton camera service."""
     return Picamera2Service.instance()
+
+
+async def capture_image(path: str) -> bool:
+    """Capture a JPEG image into ``path`` asynchronously returning success."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    service = get_camera_service()
+
+    def _capture() -> bool:
+        try:
+            result = service.capture_jpeg(str(target), full=False)
+        except CameraError as exc:
+            LOG_CAMERA.error("Error al capturar imagen en %s: %s", target, exc, exc_info=True)
+            return False
+        except Exception as exc:  # pragma: no cover - hardware dependent
+            LOG_CAMERA.exception("Error inesperado al capturar imagen en %s", target)
+            return False
+        return bool(result.get("ok", True))
+
+    return await asyncio.to_thread(_capture)

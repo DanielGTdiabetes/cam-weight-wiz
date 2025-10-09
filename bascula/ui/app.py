@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Optional
 
+from bascula.config import UIConfig
 from bascula.state import AppState
 from bascula.ui.screens import HomeScreen, ScaleServiceProtocol, ScanScreen
 from bascula.ui.widgets import SupportsBeep, TimerController
@@ -35,6 +36,7 @@ class BasculaApp(tk.Tk):
         *,
         audio_service: Optional[SupportsBeep] = None,
         app_state: Optional[AppState] = None,
+        ui_config: Optional[UIConfig] = None,
     ) -> None:
         super().__init__()
         AppUI.set_root(self)
@@ -43,7 +45,9 @@ class BasculaApp(tk.Tk):
 
         self.state_manager = app_state or AppState()
         self.scale_service = scale_service
-        self.timer_controller = TimerController(self, self.state_manager, audio_service)
+        self.ui_config = ui_config or UIConfig()
+        effective_audio = audio_service if (self.ui_config.audio_enabled and audio_service) else None
+        self.timer_controller = TimerController(self, self.state_manager, effective_audio)
 
         self._screens: dict[str, ttk.Frame] = {}
         self._build_ui()

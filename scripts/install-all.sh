@@ -20,6 +20,11 @@ warn() { log_warn "$@"; }
 err() { log_err "$@"; }
 fail() { log_err "$*"; exit 1; }
 
+SUDO_BIN=""
+if command -v sudo >/dev/null 2>&1; then
+  SUDO_BIN="sudo"
+fi
+
 disable_cloud_init() {
   local bootcfg_dir="/boot/firmware"
   local mark_file="${bootcfg_dir}/cloud-init.disabled"
@@ -996,16 +1001,33 @@ fi
 # Install base system packages
 log "[3/20] Instalando dependencias del sistema..."
 if [[ "${NET_OK}" -eq 1 ]]; then
+    if [[ -n "${SUDO_BIN}" ]]; then
+        ${SUDO_BIN} apt-get update
+    else
+        apt-get update
+    fi
+
+    if [[ -n "${SUDO_BIN}" ]]; then
+        ${SUDO_BIN} apt-get install -y \
+            nginx python3-venv python3-dev build-essential libcap-dev \
+            git jq curl unzip tesseract-ocr libtesseract-dev sox alsa-utils \
+            chromium xserver-xorg xinit openbox unclutter psmisc
+    else
+        apt-get install -y \
+            nginx python3-venv python3-dev build-essential libcap-dev \
+            git jq curl unzip tesseract-ocr libtesseract-dev sox alsa-utils \
+            chromium xserver-xorg xinit openbox unclutter psmisc
+    fi
+
     BASE_PACKAGES=(
-        git curl ca-certificates build-essential cmake pkg-config
-        python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial
+        ca-certificates cmake pkg-config python3 python3-pip python3-tk python3-numpy python3-serial
         python3-pil python3-pil.imagetk python3-xdg
-        x11-xserver-utils xserver-xorg-legacy xinit openbox xvfb libdrm-tests
+        x11-xserver-utils xserver-xorg-legacy xvfb libdrm-tests
         fonts-dejavu-core fonts-noto-core
         libjpeg-dev zlib1g-dev libpng-dev
-        alsa-utils pulseaudio sox ffmpeg
+        pulseaudio ffmpeg
         libzbar0 gpiod python3-rpi.gpio
-        network-manager dnsmasq-base dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
+        network-manager dnsmasq-base dnsutils sqlite3 tesseract-ocr-spa espeak-ng
         uuid-runtime
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
@@ -1033,6 +1055,44 @@ if [[ "${NET_OK}" -eq 1 ]]; then
 else
     warn "Sin red: omitiendo la instalación de dependencias base"
     warn "Instala manualmente python3-serial para el backend UART"
+fi
+
+log "Forzando configuración primaria KMS..."
+XORG_DIR="/etc/X11/xorg.conf.d"
+if [[ -n "${SUDO_BIN}" ]]; then
+  ${SUDO_BIN} mkdir -p "${XORG_DIR}"
+else
+  mkdir -p "${XORG_DIR}"
+fi
+XORG_CONF="${XORG_DIR}/10-primary-kms.conf"
+if [[ -n "${SUDO_BIN}" ]]; then
+  ${SUDO_BIN} tee "${XORG_CONF}" >/dev/null <<'EOF'
+Section "Device"
+  Identifier "VC4"
+  Driver "modesetting"
+  Option "AccelMethod" "glamor"
+  Option "PrimaryGPU" "true"
+  Option "kmsdev" "/dev/dri/card0"
+EndSection
+Section "Screen"
+  Identifier "Screen0"
+  Device "VC4"
+EndSection
+EOF
+else
+  tee "${XORG_CONF}" >/dev/null <<'EOF'
+Section "Device"
+  Identifier "VC4"
+  Driver "modesetting"
+  Option "AccelMethod" "glamor"
+  Option "PrimaryGPU" "true"
+  Option "kmsdev" "/dev/dri/card0"
+EndSection
+Section "Screen"
+  Identifier "Screen0"
+  Device "VC4"
+EndSection
+EOF
 fi
 
 CHROME_PKG=""
@@ -1768,68 +1828,46 @@ log "✓ Estructura OTA configurada"
 log "[12/20] Configurando entorno Python..."
 cd "${BASCULA_CURRENT_LINK}"
 if [[ ! -d ".venv" ]]; then
-  set +e
-  runuser -l "${TARGET_USER}" -c "python3 -m venv '${BASCULA_CURRENT_LINK}/.venv'"
-  create_rc=$?
-  set -e
-  if [[ ${create_rc} -ne 0 ]]; then
-    warn "No se pudo crear la venv como ${TARGET_USER}; intentando como root"
-    python3 -m venv .venv
-  fi
+  python3 -m venv .venv
 fi
+
 VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
-VENV_PY="${VENV_DIR}/bin/python"
-VENV_PIP="${VENV_DIR}/bin/pip"
 
-# Allow venv to see system packages (picamera2)
-VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
-if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
-  echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
+if [[ ! -f "${VENV_DIR}/bin/activate" ]]; then
+  fail "Entorno virtual inválido en ${VENV_DIR}"
 fi
+
+# shellcheck disable=SC1091
+source "${VENV_DIR}/bin/activate"
 
 export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BINARY=1
 export PIP_INDEX_URL="https://www.piwheels.org/simple"
 export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
 
-REQUIREMENTS_FILE="${BASCULA_CURRENT_LINK}/requirements.txt"
-
 if [[ "${NET_OK}" -eq 1 ]]; then
-  if ! sudo -H -u "${TARGET_USER}" env \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_ROOT_USER_ACTION=ignore \
-    PIP_PREFER_BINARY=1 \
-    PIP_INDEX_URL="${PIP_INDEX_URL}" \
-    PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
-    "${VENV_PY}" -m pip install --upgrade pip wheel setuptools; then
-    fail "No se pudo actualizar pip/wheel/setuptools en la venv"
-  fi
-  if [[ -f "${REQUIREMENTS_FILE}" ]]; then
-    if ! sudo -H -u "${TARGET_USER}" env \
-      PIP_DISABLE_PIP_VERSION_CHECK=1 \
-      PIP_ROOT_USER_ACTION=ignore \
-      PIP_PREFER_BINARY=1 \
-      PIP_INDEX_URL="${PIP_INDEX_URL}" \
-      PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
-      "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
-      fail "No se pudieron instalar las dependencias Python desde requirements.txt"
-    fi
+  pip install --upgrade pip
+  if [[ -f "requirements.txt" ]]; then
+    pip install -r requirements.txt
   else
-    fail "No se encontró ${REQUIREMENTS_FILE}; instala las dependencias manualmente"
+    warn "requirements.txt no encontrado en ${BASCULA_CURRENT_LINK}"
   fi
 else
-  warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
+  warn "Sin red: omitiendo actualización de pip y pip install -r requirements.txt"
 fi
 
-if ! sudo -H -u "${TARGET_USER}" "${VENV_PY}" - <<'PY'
+python - <<'PY'
 import rapidfuzz
 import fastapi
 import uvicorn
-print("py_deps_ok")
 PY
-then
-  err "[ERROR] Dependencias Python faltantes"
-  exit 1
+
+deactivate
+
+VENV_PY="${VENV_DIR}/bin/python"
+VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
+if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
+  echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
 fi
 
 log "✓ Entorno Python configurado"
@@ -2024,63 +2062,20 @@ fi
 
 # Install and configure Nginx
 log "[16/20] Instalando y configurando Nginx..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-  if ! apt-get install -y nginx; then
-    warn "No se pudo instalar Nginx"
-  fi
-else
-  warn "Sin red: omitiendo instalación de Nginx"
-fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
-cat > /etc/nginx/sites-available/bascula <<EOF
-server {
-    listen 80 default_server;
-    server_name _;
-    root ${BASCULA_CURRENT_LINK}/dist;
-    index index.html;
-
-    gzip on;
-    gzip_vary on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
-
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-
-    # API proxy to FastAPI backend
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080/;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header Host \$host;
-    }
-}
-EOF
-ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
-rm -f /etc/nginx/sites-enabled/default
+if [[ -n "${SUDO_BIN}" ]]; then
+  ${SUDO_BIN} cp "${PROJECT_ROOT}/nginx/bascula.conf" /etc/nginx/sites-available/bascula
+else
+  cp "${PROJECT_ROOT}/nginx/bascula.conf" /etc/nginx/sites-available/bascula
+fi
+if [[ -n "${SUDO_BIN}" ]]; then
+  ${SUDO_BIN} ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
+  ${SUDO_BIN} rm -f /etc/nginx/sites-enabled/default
+else
+  ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
+  rm -f /etc/nginx/sites-enabled/default
+fi
 nginx -t || warn "Configuración de Nginx con errores"
 systemctl_safe restart nginx
 systemctl_safe enable nginx
@@ -2294,6 +2289,20 @@ log "[20/20] Ajustando permisos finales..."
 install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /var/log/bascula
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}" /opt/ocr-service
 log "✓ Permisos ajustados"
+
+echo "== Post-install checks =="
+install -d -m 0755 "${BASCULA_ROOT}"
+cat >"${BASCULA_ROOT}/check-install.sh" <<'CHECK'
+#!/bin/bash
+echo "1) Verificando Nginx..."
+which nginx || echo "Nginx no instalado"
+echo "2) Verificando backend..."
+curl -s http://127.0.0.1:8080/health || echo "Backend no responde"
+echo "3) Verificando API cámara..."
+curl -s -X POST http://127.0.0.1:8080/api/camera/capture-to-file | jq .
+curl -sI http://127.0.0.1:8080/api/camera/last.jpg | grep -i 'Content-Type'
+CHECK
+chmod +x "${BASCULA_ROOT}/check-install.sh"
 
 post_install_hardware_checks
 

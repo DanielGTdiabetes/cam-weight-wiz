@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from backend.camera_service import (
+    capture_image,
     CameraBusyError,
     CameraOperationError,
     CameraTimeoutError,
@@ -82,58 +84,17 @@ def camera_test():
 
 
 @router.post("/capture-to-file")
-def camera_capture_to_file(full: bool = Query(False, description="Captura en resolución completa")):
+async def camera_capture_to_file():
     """Captura para depuración guardando la imagen en /tmp."""
-    filename = CAMERA_CAPTURE_PATH
-    filename.parent.mkdir(parents=True, exist_ok=True)
-    service = get_camera_service()
-    try:
-        result = service.capture_jpeg(str(filename), full=full)
-    except CameraBusyError as exc:
-        LOG.exception("La cámara está ocupada: %s", exc)
-        return _camera_error_response(409, "camera_busy", str(exc))
-    except CameraUnavailableError as exc:
-        LOG.exception("Cámara no disponible: %s", exc)
-        return _camera_error_response(503, "camera_unavailable", str(exc))
-    except CameraTimeoutError as exc:
-        LOG.exception("La captura superó el tiempo de espera: %s", exc)
-        return _camera_error_response(504, "camera_timeout", str(exc))
-    except CameraOperationError as exc:
-        LOG.exception("Error en la captura: %s", exc)
-        return _camera_error_response(500, "camera_failure", str(exc))
-    result["path"] = str(filename)
-    return result
+
+    path = str(CAMERA_CAPTURE_PATH)
+    ok = await capture_image(path)
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    return {"ok": ok, "path": path, "size": size}
 
 
-@router.get(
-    "/last.jpg",
-    responses={
-        200: {
-            "content": {
-                "image/jpeg": {
-                    "description": "Última captura de la cámara",
-                }
-            }
-        },
-    },
-)
-def camera_last_jpg():
-    try:
-        if not CAMERA_CAPTURE_PATH.exists():
-            raise HTTPException(status_code=404, detail="Not Found")
-
-        headers = {
-            "Cache-Control": "no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        }
-        return FileResponse(
-            CAMERA_CAPTURE_PATH,
-            media_type="image/jpeg",
-            headers=headers,
-        )
-    except HTTPException:
-        raise
-    except Exception as e:  # pragma: no cover - errores inesperados
-        LOG.exception("camera last.jpg: %s", e)
-        raise HTTPException(status_code=500, detail="Internal Server Error") from e
+@router.get("/last.jpg")
+async def camera_last_jpg():
+    if not CAMERA_CAPTURE_PATH.exists():
+        raise HTTPException(status_code=404, detail="No image captured")
+    return FileResponse(CAMERA_CAPTURE_PATH, media_type="image/jpeg")
