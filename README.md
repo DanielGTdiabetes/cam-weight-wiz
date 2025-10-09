@@ -40,6 +40,33 @@ Tras el reinicio:
 - El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 - Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
 
+### Raspberry Pi OS Lite: dependencias de UI
+
+En imágenes **Lite** (sin entorno gráfico), instala los componentes mínimos de Xorg y Chromium antes de lanzar la UI. El script `install-all.sh` ya lo hace de forma idempotente con un solo comando APT, pero puedes ejecutarlo manualmente si preparas la máquina a mano:
+
+```bash
+sudo apt-get update -y
+sudo apt-get install -y \
+  xserver-xorg xinit openbox chromium unclutter fonts-dejavu-core \
+  libxi6 libxrender1 libxrandr2 libgtk-3-0
+```
+
+Este bloque garantiza que existan Xorg, Openbox, Chromium y fuentes básicas en Raspberry Pi OS Lite sin entorno gráfico. 【F:scripts/install-all.sh†L2421-L2448】
+
+### Flujo de instalación y smoke checks
+
+El instalador crea la virtualenv del backend, instala requisitos (incluyendo opcionales de voz si existen), compila el frontend con `npm run build` y valida que la carpeta `dist/` exista antes de habilitar los servicios. 【F:scripts/install-all.sh†L2425-L2448】
+
+Tras completar `install-all.sh`, puedes repetir las mismas comprobaciones rápidas que ejecuta el script para asegurarte de que todo responde:
+
+```bash
+curl -s http://127.0.0.1:8080/api/health
+curl -sI http://127.0.0.1/ | head -n1
+tail -n 50 /var/log/bascula/ui.log
+```
+
+La primera petición comprueba que el backend FastAPI (`bascula-miniweb.service`) está en marcha; la segunda confirma que Nginx sirve la SPA en `/opt/bascula/current/dist`; la tercera revisa los últimos eventos del kiosk (`CHROME=… URL=…`) para diagnosticar problemas de arranque. 【F:scripts/install-all.sh†L2495-L2498】【F:scripts/start-kiosk.sh†L61-L83】
+
 ### Problema: “Fatal server error: no screens found”
 
 En Raspberry Pi 5 con Raspberry Pi OS Bookworm puede aparecer el error de Xorg `Fatal server error: no screens found` junto a `open /dev/dri/card1: No such file or directory`. 【F:scripts/install-all.sh†L624-L635】
