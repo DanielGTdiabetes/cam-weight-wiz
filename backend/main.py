@@ -17,7 +17,7 @@ from fastapi import (
 )
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Optional, Dict, Any, List, Union, Set
@@ -1458,11 +1458,12 @@ class SettingsTestOpenAIRequest(BaseModel):
 
 
 class SettingsTestNightscoutRequest(BaseModel):
-    nightscout_url: Optional[str] = None
-    nightscout_token: Optional[str] = None
+    nightscout_url: Optional[str] = Field(default=None, alias="url")
+    nightscout_token: Optional[str] = Field(default=None, alias="token")
 
     class Config:
         extra = "ignore"
+        allow_population_by_field_name = True
 
 
 _SECRET_PLACEHOLDER = "__stored__"
