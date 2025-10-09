@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
+from typing import Dict
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
@@ -17,6 +17,9 @@ from backend.camera_service import (
 )
 
 
+CAPTURE_PATH = Path("/tmp/camera-capture.jpg")
+
+
 router = APIRouter(prefix="/api/camera", tags=["camera"])
 
 LOG = logging.getLogger("bascula.camera.api")
@@ -27,6 +30,17 @@ def _camera_error_response(status_code: int, reason: str, message: str):
     return JSONResponse(detail, status_code=status_code)
 
 
+def _capture_payload(full: bool, size: int) -> Dict[str, object]:
+    return {"ok": True, "path": str(CAPTURE_PATH), "full": bool(full), "size": size}
+
+
+def _capture_size() -> int:
+    try:
+        return CAPTURE_PATH.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
 @router.get("/info")
 def camera_info():
     try:
@@ -35,11 +49,14 @@ def camera_info():
     except CameraUnavailableError as exc:
         LOG.exception("No hay cámara disponible: %s", exc)
         return _camera_error_response(503, "camera_unavailable", str(exc))
-    return {
+
+    response = _capture_payload(full=False, size=_capture_size())
+    response["camera"] = {
         "Model": properties.get("Model"),
         "Rotation": properties.get("Rotation"),
         "PixelArraySize": properties.get("PixelArraySize"),
     }
+    return response
 
 
 def _capture_bytes(full: bool, timeout_ms: int = 2000) -> bytes:
@@ -83,9 +100,9 @@ def camera_test():
 @router.post("/capture-to-file")
 def camera_capture_to_file(full: bool = Query(False, description="Captura en resolución completa")):
     """Captura para depuración guardando la imagen en /tmp."""
-    tmp_dir = Path(os.getenv("TMPDIR", "/tmp"))
+    tmp_dir = CAPTURE_PATH.parent
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    filename = tmp_dir / "camera-capture.jpg"
+    filename = CAPTURE_PATH
     service = get_camera_service()
     try:
         result = service.capture_jpeg(str(filename), full=full)
@@ -101,4 +118,6 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
     except CameraOperationError as exc:
         LOG.exception("Error en la captura: %s", exc)
         return _camera_error_response(500, "camera_failure", str(exc))
-    return result
+    payload = _capture_payload(full=full, size=int(result.get("size", 0)))
+    LOG.info("capture_to_file: saved %s size=%s full=%s", payload["path"], payload["size"], payload["full"])
+    return payload
