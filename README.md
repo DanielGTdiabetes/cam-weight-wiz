@@ -93,6 +93,17 @@ La miniweb en `:8080` expone tres endpoints REST para consultar el estado de la 
 
 Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
 
+La UI táctil se sirve desde `http://localhost` mediante Nginx. El bloque `location /api/` de `nginx/bascula.conf` actúa como proxy inverso hacia `http://127.0.0.1:8080/`, de modo que todas las llamadas `fetch('/api/...')` usan el mismo origen y no disparan CORS en Chromium kiosk. 【F:nginx/bascula.conf†L23-L44】
+
+Para validar el proxy y la captura desde el propio dispositivo:
+
+```bash
+curl -s -X POST http://localhost/api/camera/capture-to-file | jq .
+journalctl -u bascula-miniweb -n 50 --no-pager | grep 'POST /api/camera/capture-to-file' | tail -n 1
+```
+
+En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y muestra `/tmp/camera-capture.jpg?ts=<epoch_ms>` para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa.
+
 ## API de configuración de red
 
 La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo` ni edición manual de perfiles de NetworkManager:

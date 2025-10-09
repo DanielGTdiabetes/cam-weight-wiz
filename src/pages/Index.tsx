@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { MainMenu } from "@/components/MainMenu";
 import { ScaleView } from "@/pages/ScaleView";
-import { FoodScannerView } from "@/pages/FoodScannerView";
+import { ScannerView } from "@/pages/ScannerView";
 import { TimerFullView } from "@/pages/TimerFullView";
 import { RecipesView } from "@/pages/RecipesView";
 import { SettingsView } from "@/pages/SettingsView";
@@ -476,7 +476,7 @@ const Index = () => {
       case "scale":
         return <ScaleView onNavigate={handleNavigate} />;
       case "scanner":
-        return <FoodScannerView />;
+        return <ScannerView />;
       case "timer":
         return <TimerFullView onClose={handleBackToMenu} />;
       case "recipes":

@@ -8,6 +8,7 @@ import OfflineMode from "./pages/OfflineMode";
 import NotFound from "./pages/NotFound";
 import { MiniWebConfig } from "./pages/MiniWebConfig";
 import { APModeScreen } from "@/components/APModeScreen";
+import { ScannerView } from "./pages/ScannerView";
 
 const queryClient = new QueryClient();
 
@@ -24,6 +25,7 @@ const App = () => (
       >
         <Routes>
           <Route path="/" element={<Index />} />
+          <Route path="/scanner" element={<ScannerView />} />
           <Route path="/ap" element={<APModeScreen />} />
           <Route path="/config" element={<MiniWebConfig />} />
           <Route path="/offline" element={<OfflineMode />} />
