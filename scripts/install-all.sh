@@ -389,7 +389,7 @@ check_playback() {
     return
   fi
 
-  local cmd_bascula_out=(aplay -D bascula_out -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
+  local cmd_bascula_out=(aplay -D bascula_out -r 44100 -f S16_LE -c 2 -t raw -d 1 /dev/zero)
   if "${cmd_bascula_out[@]}"; then
     printf '[inst][ok] salida OK via bascula_out\n'
     return
@@ -403,7 +403,7 @@ check_playback() {
   fi
 
   warn "aplay falló via bascula_out tras reintento; probando hw:1,0"
-  local cmd_hw_fallback=(aplay -D hw:1,0 -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
+  local cmd_hw_fallback=(aplay -D hw:1,0 -r 44100 -f S16_LE -c 2 -t raw -d 1 /dev/zero)
   if "${cmd_hw_fallback[@]}"; then
     printf '[inst][ok] salida OK via hw:1,0 (fallback)\n'
     return
