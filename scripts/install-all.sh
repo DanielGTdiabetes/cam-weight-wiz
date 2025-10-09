@@ -2429,7 +2429,11 @@ if ! cd /opt/bascula/current; then
   exit 1
 fi
 
-python3 -m venv .venv || exit 1
+if [ -d .venv ]; then
+  python3 -m venv --upgrade .venv || exit 1
+else
+  python3 -m venv .venv || exit 1
+fi
 . .venv/bin/activate
 pip install --upgrade pip wheel || exit 1
 pip install -r requirements.txt || exit 1
