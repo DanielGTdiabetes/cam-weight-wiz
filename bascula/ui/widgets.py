@@ -33,10 +33,21 @@ class TimerController:
         state: AppState,
         audio_service: Optional[SupportsBeep] = None,
     ) -> None:
-        self._root = tk_root
+        if isinstance(tk_root, tk.Tk):
+            self._root = tk_root
+        else:
+            default_root = getattr(tk, "_default_root", None)
+            if isinstance(default_root, tk.Tk):
+                self._root = default_root
+            else:
+                try:
+                    self._root = tk_root.winfo_toplevel()
+                except Exception:
+                    self._root = tk_root
         self._state = state
         self._audio_service = audio_service
         self._timer_job: Optional[str] = None
+        self._last_notified_completion: Optional[float] = None
 
     def start(self, seconds: int) -> None:
         duration = max(0, int(seconds))
@@ -45,7 +56,9 @@ class TimerController:
             self._state.stop_timer()
             return
         self._state.start_timer(duration)
-        self._timer_job = self._root.after(1000, self._tick)
+        self._last_notified_completion = None
+        LOGGER.debug("TimerController.start: iniciando cuenta atrás de %s segundos", duration)
+        self._schedule_tick()
 
     def cancel(self) -> None:
         if self._timer_job is not None:
@@ -55,6 +68,7 @@ class TimerController:
                 pass
             self._timer_job = None
         self._state.stop_timer()
+        self._last_notified_completion = None
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -62,11 +76,39 @@ class TimerController:
     def _tick(self) -> None:
         remaining = self._state.decrement_timer()
         if remaining > 0:
-            self._timer_job = self._root.after(1000, self._tick)
+            LOGGER.debug("TimerController._tick: quedan %s segundos", remaining)
+            self._schedule_tick()
             return
 
         self._timer_job = None
+        timer_state = self._state.get_timer_state()
+        self._last_notified_completion = timer_state.completed_at
+        LOGGER.debug("TimerController._tick: temporizador completado")
         self._play_beep()
+
+    def notify_completed(self, completed_at: Optional[float]) -> None:
+        """Trigger completion feedback when a new completion timestamp arrives."""
+
+        if not completed_at:
+            return
+        if self._last_notified_completion == completed_at:
+            return
+        self._last_notified_completion = completed_at
+        LOGGER.debug("TimerController.notify_completed: beep solicitado por UI")
+        self._play_beep()
+
+    def _schedule_tick(self) -> None:
+        try:
+            self._timer_job = self._root.after(1000, self._tick)
+        except Exception as exc:
+            LOGGER.warning("TimerController._schedule_tick: after() falló (%s), reintentando", exc)
+            try:
+                self._timer_job = self._root.after(1000, self._tick)
+            except Exception as retry_exc:
+                LOGGER.error(
+                    "TimerController._schedule_tick: reintento de after() falló (%s)", retry_exc
+                )
+                self._timer_job = None
 
     def _play_beep(self) -> None:
         played = False
@@ -320,6 +362,7 @@ class TimerWidget(ttk.Frame):
 
         if timer_state.completed_at and timer_state.completed_at != self._last_completion:
             self._last_completion = timer_state.completed_at
+            self._controller.notify_completed(timer_state.completed_at)
             self._show_finished_message()
         elif not timer_state.completed_at:
             self._last_completion = None
