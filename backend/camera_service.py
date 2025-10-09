@@ -148,11 +148,15 @@ class Picamera2Service:
                     return temp_camera
                 except (RuntimeError, CameraUnavailableError) as exc:
                     last_error = exc
-                    LOG_CAMERA.warning("Fallo al inicializar Picamera2 (intento %d): %s", attempts, exc)
+                    LOG_CAMERA.exception(
+                        "Fallo al inicializar Picamera2 (intento %d): %s",
+                        attempts,
+                        exc,
+                    )
                     self._release_camera()
                 except Exception as exc:  # pragma: no cover - hardware specific failure
                     last_error = exc
-                    LOG_CAMERA.error("Error inesperado al inicializar Picamera2: %s", exc, exc_info=True)
+                    LOG_CAMERA.exception("Error inesperado al inicializar Picamera2: %s", exc)
                     self._release_camera()
                     raise CameraUnavailableError(str(exc)) from exc
                 finally:
@@ -187,16 +191,14 @@ class Picamera2Service:
             return self._configs[key]
         size = (4608, 2592) if full else (2304, 1296)
         transform = self._transform or libcamera.Transform()
-        if full:
-            config = camera.create_still_configuration(
-                main={"size": size, "format": "RGB888"},
-                transform=transform,
-            )
-        else:
-            config = camera.create_preview_configuration(
-                main={"size": size, "format": "RGB888"},
-                transform=transform,
-            )
+        config = camera.create_still_configuration(
+            main={"size": size, "format": "RGB888"},
+            raw=None,
+            lores=None,
+            buffer_count=1,
+            transform=transform,
+            display=None,
+        )
         self._configs[key] = config
         LOG_CAMERA.debug("Configuración creada para %s: %s", key, size)
         return config
@@ -237,7 +239,7 @@ class Picamera2Service:
         return "device or resource busy" in message or "ebusy" in message
 
     def _handle_fatal_error(self, message: str, exc: BaseException) -> None:
-        LOG_CAMERA.error("%s: %s", message, exc, exc_info=True)
+        LOG_CAMERA.exception("%s: %s", message, exc)
         self._safe_close()
 
     def _release_camera(self) -> None:

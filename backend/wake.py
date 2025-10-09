@@ -171,6 +171,8 @@ class WakeListener:
         self._frame_samples = _compute_frame_samples(self._sample_rate)
         self._frame_bytes = self._frame_samples * 2
         self._set_sample_rate(self._configured_sample_rate)
+        self._resolved_mic_device: Optional[str] = None
+        self._usb_hw_fallback: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -216,6 +218,7 @@ class WakeListener:
                 self._mic_preflight_ok = None
                 self._audio_failure_reported = False
                 self._last_audio_failure_reason = None
+                self._resolved_mic_device = None
             else:
                 self.running = False
         if not value:
@@ -368,39 +371,49 @@ class WakeListener:
             self._recognizer = None
 
     def _open_audio_source(self) -> Optional[_BaseAudioSource]:
-        mic_device = os.getenv(MIC_DEVICE_ENV, DEFAULT_MIC_DEVICE)
+        preferred = os.getenv(MIC_DEVICE_ENV, DEFAULT_MIC_DEVICE) or DEFAULT_MIC_DEVICE
+        mic_device = preferred.strip() or DEFAULT_MIC_DEVICE
         if shutil.which("arecord"):
-            if self._mic_preflight_ok is None:
-                ok, message, active_sample_rate = self._run_preflight_check(mic_device)
-                if not ok:
+            needs_resolution = self._mic_preflight_ok is None
+            if self._resolved_mic_device is None and mic_device:
+                needs_resolution = True
+            if self._resolved_mic_device and self._resolved_mic_device != mic_device:
+                needs_resolution = True
+
+            if needs_resolution:
+                resolved_device, message, active_sample_rate = self._resolve_arecord_device(mic_device)
+                if not resolved_device:
                     warning = (
-                        f"arecord pre-check falló para {mic_device}: {message or 'error desconocido'}"
+                        message
+                        or f"arecord pre-check falló para {mic_device}: error desconocido"
                     )
                     LOG_WAKE.warning("[wake] %s", warning)
                     self._mic_preflight_ok = False
                     self._last_audio_failure_reason = warning
                     return None
+                self._resolved_mic_device = resolved_device
                 self._set_sample_rate(active_sample_rate)
                 self._mic_preflight_ok = True
-            if self._mic_preflight_ok is False:
+
+            if self._mic_preflight_ok is False or self._resolved_mic_device is None:
                 return None
-            if self._mic_preflight_ok:
-                try:
-                    source = _ARecordSource(mic_device, self._sample_rate, self._frame_bytes)
-                    with self._audio_lock:
-                        self._active_audio_source = source
-                    self._current_source_name = "arecord"
-                    self._last_audio_failure_reason = None
-                    LOG_WAKE.info(
-                        "[wake] Wake mic device %s @%d Hz",
-                        mic_device,
-                        self._sample_rate,
-                    )
-                    return source
-                except Exception as exc:
-                    message = f"arecord no disponible ({mic_device}): {exc}"
-                    self._record_error(message)
-                    self._last_audio_failure_reason = message
+
+            try:
+                source = _ARecordSource(self._resolved_mic_device, self._sample_rate, self._frame_bytes)
+                with self._audio_lock:
+                    self._active_audio_source = source
+                self._current_source_name = "arecord"
+                self._last_audio_failure_reason = None
+                LOG_WAKE.info(
+                    "[wake] Wake mic device %s @%d Hz",
+                    self._resolved_mic_device,
+                    self._sample_rate,
+                )
+                return source
+            except Exception as exc:
+                message = f"arecord no disponible ({self._resolved_mic_device}): {exc}"
+                self._record_error(message)
+                self._last_audio_failure_reason = message
         else:
             LOG_WAKE.warning("[wake] arecord not found, falling back to sounddevice")
             self._last_audio_failure_reason = "arecord no encontrado"
@@ -423,26 +436,83 @@ class WakeListener:
             self._last_audio_failure_reason = "sounddevice no instalado"
         return None
 
-    def _run_preflight_check(self, mic_device: str) -> Tuple[bool, Optional[str], int]:
+    def _resolve_arecord_device(self, mic_device: str) -> Tuple[Optional[str], Optional[str], int]:
+        candidates: List[str] = []
+        sanitized = mic_device.strip() or DEFAULT_MIC_DEVICE
+        candidates.append(sanitized)
+        if self._resolved_mic_device and self._resolved_mic_device not in candidates:
+            candidates.append(self._resolved_mic_device)
+
+        fallback = self._discover_usb_hw_device()
+        if fallback and fallback not in candidates:
+            candidates.append(fallback)
+
         configured_rate = self._configured_sample_rate
-        ok, message = _ARecordSource.preflight_check(mic_device, configured_rate)
-        if ok:
-            return True, None, configured_rate
+        rates = [configured_rate]
+        if DEFAULT_SAMPLE_RATE not in rates:
+            rates.append(DEFAULT_SAMPLE_RATE)
 
-        if configured_rate != DEFAULT_SAMPLE_RATE:
-            LOG_WAKE.warning(
-                "[wake] Fallo %s, usando %s por compatibilidad",
-                _format_sample_rate(configured_rate),
-                _format_sample_rate(DEFAULT_SAMPLE_RATE),
-            )
-            fallback_ok, fallback_message = _ARecordSource.preflight_check(
-                mic_device, DEFAULT_SAMPLE_RATE
-            )
-            if fallback_ok:
-                return True, None, DEFAULT_SAMPLE_RATE
-            message = fallback_message or message
+        errors: List[str] = []
+        for device in candidates:
+            for rate in rates:
+                ok, message = _ARecordSource.preflight_check(device, rate)
+                if ok:
+                    if device != sanitized:
+                        LOG_WAKE.warning(
+                            "[wake] Fallback a micrófono %s tras fallo con %s",
+                            device,
+                            sanitized,
+                        )
+                    if rate != configured_rate:
+                        LOG_WAKE.warning(
+                            "[wake] Fallback a %s para %s",
+                            _format_sample_rate(rate),
+                            device,
+                        )
+                    return device, None, rate
+                if message:
+                    errors.append(f"{device}@{_format_sample_rate(rate)}: {message}")
 
-        return False, message, configured_rate
+        combined = "; ".join(errors) if errors else None
+        return None, combined, configured_rate
+
+    def _discover_usb_hw_device(self) -> Optional[str]:
+        if self._usb_hw_fallback is not None:
+            return self._usb_hw_fallback
+        if not shutil.which("arecord"):
+            return None
+        try:
+            result = subprocess.run(
+                ["arecord", "-l"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            self._usb_hw_fallback = None
+            return None
+
+        for line in result.stdout.splitlines():
+            if "card" not in line or "device" not in line:
+                continue
+            match = re.search(r"card\s+(\d+).*device\s+(\d+)", line)
+            if not match:
+                continue
+            description = line.lower()
+            if "usb" in description:
+                card = match.group(1)
+                device = match.group(2)
+                self._usb_hw_fallback = f"hw:{card},{device}"
+                LOG_WAKE.info(
+                    "[wake] Detectado micrófono USB: %s (%s)",
+                    self._usb_hw_fallback,
+                    line.strip(),
+                )
+                return self._usb_hw_fallback
+
+        self._usb_hw_fallback = None
+        return None
 
     def _handle_audio_unavailable(self) -> None:
         if self._audio_failure_reported:
