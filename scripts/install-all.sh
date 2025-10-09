@@ -21,15 +21,20 @@ err() { log_err "$@"; }
 fail() { log_err "$*"; exit 1; }
 
 try_or_warn() {
-  local description="$1"
-  local command="$2"
-  log "[check] ${description}"
-  if bash -lc "$command"; then
-    log "[check][ok] ${description}"
+  local label="$1"
+  shift || true
+  local command="$*"
+  log "[check] ${label}"
+  if [[ -z "${command}" ]]; then
+    log_warn "${label} sin comando para ejecutar"
+    return 1
+  fi
+  if bash -lc "${command}"; then
+    log "[check][ok] ${label}"
     return 0
   fi
   local status=$?
-  log_warn "${description} falló (status ${status}). Comando: ${command}"
+  log_warn "${label} falló (status ${status}). Comando: ${command}"
   return ${status}
 }
 
@@ -2413,6 +2418,43 @@ else
 fi
 log "✓ tmpfiles configurado"
 
+# Lite UI dependencies (Xorg + Chromium kiosk)
+log "Instalando dependencias mínimas de Xorg y Chromium..."
+try_or_warn "apt Xorg & kiosk" "sudo apt-get update -y && sudo apt-get install -y xserver-xorg xinit openbox chromium unclutter fonts-dejavu-core libxi6 libxrender1 libxrandr2 libgtk-3-0"
+
+# Ensure Python virtual environment and backend dependencies
+log "Preparando entorno Python en /opt/bascula/current..."
+if ! cd /opt/bascula/current; then
+  echo "[ERR] no se encontró /opt/bascula/current" >&2
+  exit 1
+fi
+
+python3 -m venv .venv || exit 1
+. .venv/bin/activate
+pip install --upgrade pip wheel || exit 1
+pip install -r requirements.txt || exit 1
+if [ -f requirements-voice.txt ]; then pip install -r requirements-voice.txt || true; fi
+.venv/bin/uvicorn --version >/dev/null 2>&1 || { echo "[ERR] uvicorn no instalado en .venv"; exit 1; }
+
+# Build frontend assets
+log "Compilando frontend..."
+if command -v npm >/dev/null 2>&1; then
+  npm ci --prefer-offline || { echo "[ERR] npm ci falló"; exit 1; }
+  npm run build || { echo "[ERR] npm run build falló"; exit 1; }
+else
+  echo "[ERR] npm no disponible; instala Node/NPM antes de construir"
+  exit 1
+fi
+[ -d "/opt/bascula/current/dist" ] || { echo "[ERR] dist/ no generado"; exit 1; }
+
+# Runtime directories for captures served by Nginx
+install -d -o pi -g www-data -m 0755 /run/bascula
+install -d -o pi -g www-data -m 02770 /run/bascula/captures
+usermod -aG www-data pi || true
+
+deactivate >/dev/null 2>&1 || true
+cd - >/dev/null 2>&1 || true
+
 # Final permissions
 log "[20/20] Ajustando permisos finales..."
 install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /var/log/bascula
@@ -2433,16 +2475,27 @@ fi
 
 # Asegurar servicios principales activos
 if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-  if ! systemctl daemon-reload; then
+  if ! sudo systemctl daemon-reload; then
     warn "systemctl daemon-reload falló"
   fi
-  systemctl enable bascula-miniweb.service || warn "No se pudo habilitar bascula-miniweb.service"
-  systemctl enable bascula-ui.service || warn "No se pudo habilitar bascula-ui.service"
-  systemctl restart bascula-miniweb.service || warn "No se pudo reiniciar bascula-miniweb.service"
-  systemctl restart bascula-ui.service || warn "No se pudo reiniciar bascula-ui.service"
+  if ! sudo systemctl enable --now bascula-miniweb.service; then
+    warn "No se pudo habilitar/iniciar bascula-miniweb.service"
+  fi
+  sleep 2
+  if ! sudo systemctl enable bascula-ui.service; then
+    warn "No se pudo habilitar bascula-ui.service"
+  fi
+  if ! sudo systemctl restart bascula-ui.service; then
+    warn "No se pudo reiniciar bascula-ui.service"
+  fi
 else
   warn "systemd no disponible o ALLOW_SYSTEMD!=1; omitiendo enable/restart finales"
 fi
+
+# Smoke checks
+try_or_warn "miniweb alive" "curl -s http://127.0.0.1:8080/api/health"
+try_or_warn "nginx root" "curl -sI http://127.0.0.1/ | head -n1"
+try_or_warn "ui kiosk log" "tail -n 50 /var/log/bascula/ui.log"
 
 # Final message
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"

@@ -2,6 +2,7 @@
 Description=Bascula Mini-Web Backend
 After=NetworkManager.service NetworkManager-wait-online.service bascula-ap-ensure.service
 Wants=NetworkManager-wait-online.service
+ConditionPathExists=/opt/bascula/current/.venv/bin/uvicorn
 
 [Service]
 Type=simple
@@ -9,11 +10,12 @@ User=pi
 Group=pi
 WorkingDirectory=/opt/bascula/current
 Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
 Environment=BASCULA_CFG_DIR=/home/pi/.bascula
 Environment=BASCULA_CAM_RELEASE_ON_EXIT=true
 Environment=BASCULA_CAPTURES_DIR=/run/bascula/captures
 ExecStartPre=-/usr/bin/nm-online -s -q -t 25
-ExecStart=/opt/bascula/current/.venv/bin/python -m uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
+ExecStart=/opt/bascula/current/.venv/bin/uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=2s
 

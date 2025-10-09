@@ -77,6 +77,8 @@ fi
 
 CHROME_BIN="$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || command -v ${CHROME_PKG:-chromium} 2>/dev/null || echo chromium)"
 
+log "CHROME=${CHROME_BIN} URL=${TARGET_URL}"
+
 exec "${CHROME_BIN}" \
   --kiosk \
   --noerrdialogs \
