@@ -4,41 +4,65 @@ import "./index.css";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // Check for service worker update failures
-if ("serviceWorker" in navigator) {
+if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("message", (event) => {
-    if (event.data.type === "UPDATE_FAILED") {
-      console.error("Service Worker update failed:", event.data.error);
-      localStorage.setItem("recovery_mode", "true");
-      localStorage.setItem(
-        "update_error",
-        JSON.stringify({
-          error: event.data.error,
-          timestamp: new Date().toISOString(),
-        })
-      );
+    const payload = event?.data ?? {};
+
+    if (payload.type === "UPDATE_FAILED") {
+      console.error("Service Worker update failed:", payload.error);
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem("recovery_mode", "true");
+        localStorage.setItem(
+          "update_error",
+          JSON.stringify({
+            error: payload.error,
+            timestamp: new Date().toISOString(),
+          })
+        );
+      }
       // Reload to trigger recovery mode
-      window.location.reload();
-    } else if (event.data.type === "UPDATE_SUCCESS") {
-      console.log("Service Worker updated successfully:", event.data.version);
+      if (typeof window !== "undefined") {
+        window.location.reload();
+      }
+    } else if (payload.type === "UPDATE_SUCCESS") {
+      console.log("Service Worker updated successfully:", payload.version);
       // Clear any recovery flags
-      localStorage.removeItem("recovery_mode");
-      localStorage.removeItem("update_error");
+      if (typeof localStorage !== "undefined") {
+        localStorage.removeItem("recovery_mode");
+        localStorage.removeItem("update_error");
+      }
     }
   });
 
-  // Check if there's a pending recovery flag from service worker cache
-  caches.open("recovery-cache").then((cache) => {
-    cache.match("/recovery-flag").then((response) => {
-      if (response) {
-        response.json().then((data) => {
-          if (data.failed) {
-            localStorage.setItem("recovery_mode", "true");
-            window.location.reload();
+  if (typeof caches !== "undefined") {
+    // Check if there's a pending recovery flag from service worker cache
+    caches
+      .open("recovery-cache")
+      .then((cache) =>
+        cache.match("/recovery-flag").then((response) => {
+          if (!response) {
+            return;
           }
-        });
-      }
-    });
-  });
+
+          return response
+            .json()
+            .then((data) => {
+              if (data?.failed && typeof localStorage !== "undefined") {
+                localStorage.setItem("recovery_mode", "true");
+                if (typeof window !== "undefined") {
+                  window.location.reload();
+                }
+              }
+            })
+            .catch((error) => {
+              console.error("Failed to parse recovery flag", error);
+            });
+        })
+      )
+      .catch((error) => {
+        console.error("Failed to check recovery cache", error);
+      });
+  }
 }
 
 createRoot(document.getElementById("root")!).render(
