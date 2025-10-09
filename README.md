@@ -40,6 +40,35 @@ Tras el reinicio:
 - El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 - Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
 
+### Problema: “Fatal server error: no screens found”
+
+En Raspberry Pi 5 con Raspberry Pi OS Bookworm puede aparecer el error de Xorg `Fatal server error: no screens found` junto a `open /dev/dri/card1: No such file or directory`. 【F:scripts/install-all.sh†L624-L635】
+
+1. Verifica si el driver KMS creó los nodos DRM:
+
+   ```bash
+   ls -l /dev/dri
+   ```
+
+   Si el directorio no existe, el overlay KMS adecuado no está cargado. 【F:scripts/install-all.sh†L624-L635】【F:scripts/test-x-kms.sh†L1-L13】
+
+2. Comprueba el overlay configurado en `/boot/firmware/config.txt` (o `/boot/config.txt` según la imagen). Para Raspberry Pi 5 debe existir la línea:
+
+   ```ini
+   dtoverlay=vc4-kms-v3d-pi5
+   ```
+
+   En Raspberry Pi 4 se debe usar `dtoverlay=vc4-kms-v3d`.
+
+3. Si falta el overlay, añade la línea y reinicia:
+
+   ```bash
+   echo 'dtoverlay=vc4-kms-v3d-pi5' | sudo tee -a /boot/firmware/config.txt
+   sudo reboot
+   ```
+
+   Tras el reinicio, confirma que `/dev/dri/card0` y `/dev/dri/renderD128` existen antes de iniciar `bascula-ui.service`. 【F:scripts/install-all.sh†L624-L635】
+
 ### Configuración de audio (HifiBerry + micro USB)
 
 El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (dsnoop a 48 kHz → plug `bascula_mix_in`) y mezclar la salida HifiBerry mediante `dmix` (`bascula_out`). 【F:scripts/install-all.sh†L212-L314】

@@ -20,6 +20,9 @@ warn() { log_warn "$@"; }
 err() { log_err "$@"; }
 fail() { log_err "$*"; exit 1; }
 
+OVERLAY_ADDED=0
+INSTALL_LOG=""
+
 disable_cloud_init() {
   local bootcfg_dir="/boot/firmware"
   local mark_file="${bootcfg_dir}/cloud-init.disabled"
@@ -618,6 +621,20 @@ EOF
       log_warn "curl no disponible para verificar miniweb"
     fi
 
+    if [[ -x "${SCRIPT_DIR}/test-x-kms.sh" ]]; then
+      log "Ejecutando verificación KMS (/dev/dri)..."
+      "${SCRIPT_DIR}/test-x-kms.sh"
+    else
+      warn "scripts/test-x-kms.sh no disponible o sin permisos de ejecución"
+    fi
+
+    # Confirmar presencia de /dev/dri (necesario para X/Chromium)
+    if [ ! -d /dev/dri ]; then
+      echo "[inst][error] No se detecta /dev/dri; probablemente falta el overlay KMS."
+      echo "[inst][hint] Revisa /boot/firmware/config.txt y asegúrate de tener dtoverlay=vc4-kms-v3d-pi5"
+      exit 1
+    fi
+
     if ! systemctl enable bascula-ui.service; then
       log_err "No se pudo habilitar bascula-ui.service"
       systemctl status bascula-ui.service --no-pager || true
@@ -753,6 +770,7 @@ CFG_PATH="${CFG_DIR}/config.json"
 STATE_DIR="/var/lib/bascula"
 STATE_FILE="${STATE_DIR}/scale.json"
 LOG_DIR="/var/log/bascula"
+INSTALL_LOG="${LOG_DIR}/install.log"
 
 AP_IFACE="wlan0"
 AP_GATEWAY="192.168.4.1"
@@ -976,9 +994,12 @@ chown "${TARGET_USER}:${TARGET_GROUP}" "${STATE_FILE}" 2>/dev/null || true
 
 mkdir -p "${LOG_DIR}"
 touch "${LOG_DIR}/app.log"
+touch "${INSTALL_LOG}"
 chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}" 2>/dev/null || true
 chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}/app.log" 2>/dev/null || true
+chown "${TARGET_USER}:${TARGET_GROUP}" "${INSTALL_LOG}" 2>/dev/null || true
 chmod 664 "${LOG_DIR}/app.log" 2>/dev/null || true
+chmod 664 "${INSTALL_LOG}" 2>/dev/null || true
 
 # Ensure NetworkManager service is enabled and running
 log "[3a/20] Reinstalando NetworkManager..."
@@ -1133,6 +1154,30 @@ ensure_enable_uart "${CONF}"
 
 configure_hifiberry_audio
 configure_usb_microphone
+
+# --- KMS check (Pi5) ---
+if grep -q "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null; then
+  CONFIG_FILE="${BOOTDIR}/config.txt"
+  if [[ ! -f "${CONFIG_FILE}" ]]; then
+    echo "[inst][warn] ${CONFIG_FILE} no existe; no se puede insertar overlay vc4-kms-v3d-pi5"
+  elif ! grep -qE "^dtoverlay=vc4-kms-v3d-pi5" "${CONFIG_FILE}"; then
+    echo "[inst][warn] Overlay vc4-kms-v3d-pi5 ausente; insertando..."
+    if printf '%s\n' "dtoverlay=vc4-kms-v3d-pi5" >> "${CONFIG_FILE}"; then
+      overlay_added_msg="[inst][info] Overlay añadido; se aplicará tras reinicio."
+      echo "${overlay_added_msg}"
+      OVERLAY_ADDED=1
+      if [[ -n "${INSTALL_LOG}" ]]; then
+        printf '%s\n' "${overlay_added_msg}" >> "${INSTALL_LOG}" 2>/dev/null || true
+      fi
+    else
+      echo "[inst][error] No se pudo escribir dtoverlay=vc4-kms-v3d-pi5 en ${CONFIG_FILE}"
+    fi
+  else
+    echo "[inst][ok] Overlay vc4-kms-v3d-pi5 ya presente."
+  fi
+else
+  echo "[inst][info] Dispositivo no Pi5; se omite overlay KMS."
+fi
 
 # Disable Bluetooth UART
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
@@ -2226,6 +2271,16 @@ if [[ ${SERVICES_INSTALLED} -eq 1 && "${HAS_SYSTEMD}" -eq 1 ]]; then
   else
     err "[ERROR] No se pudo reiniciar bascula-miniweb"
     exit 1
+  fi
+fi
+
+if [[ ${OVERLAY_ADDED} -eq 1 && -n "${INSTALL_LOG}" ]]; then
+  if grep -q "Overlay añadido" "${INSTALL_LOG}" 2>/dev/null; then
+    echo "[inst][info] Reiniciando para aplicar vc4-kms-v3d-pi5..."
+    if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+      systemctl disable bascula-ui.service 2>/dev/null || true
+    fi
+    reboot
   fi
 fi
 # --- Fin bloque ---
