@@ -243,7 +243,7 @@ pcm.raw_mic {
   device 0
 }
 
-# dsnoop al RATIO NATIVO del USB (48 kHz)
+# dsnoop al RATIO NATIVO del USB (48 kHz por defecto; ajusta si tu mic usa otra tasa)
 pcm.dsnoop_mic {
   type dsnoop
   ipc_key 2048
@@ -266,8 +266,10 @@ pcm.soft_mic {
     name "SoftMicGain"
     card 0
   }
+  use_dB yes
   min_dB -30.0
-  max_dB +30.0
+  max_dB +20.0
+  resolution 100
 }
 
 # EXPOSICIÓN PARA LAS APPS con re-muestreo automático
@@ -308,6 +310,7 @@ EOF
   if command -v amixer >/dev/null 2>&1; then
     amixer -c 0 sset 'Mic' 16 cap >/dev/null 2>&1 || true
     amixer -c 0 sset 'Auto Gain Control' on >/dev/null 2>&1 || true
+    amixer -c 0 sset 'SoftMicGain' 10dB >/dev/null 2>&1 || true
   fi
 
   printf '[inst][info] SoftMicGain disponible (softvol). Ajustable desde alsamixer (F6->card 0) si fuera necesario.\n'
