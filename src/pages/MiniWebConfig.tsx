@@ -189,6 +189,37 @@ export const MiniWebConfig = () => {
     [apiOrigin],
   );
 
+  const nightscoutStatus = useMemo(() => {
+    if (!settings) {
+      return { text: "No configurado", tone: "warning" as const };
+    }
+
+    const nightscoutSection =
+      settings && typeof settings.nightscout === "object"
+        ? (settings.nightscout as Record<string, unknown>)
+        : null;
+
+    const urlCandidate = safeString(
+      (nightscoutSection?.url as string | undefined) ??
+        (settings.nightscout_url as string | undefined) ??
+        settings.diabetes?.nightscout_url,
+    );
+
+    const hasToken =
+      nightscoutSection?.hasToken === true ||
+      safeString(
+        (nightscoutSection?.token as string | undefined) ??
+          (settings.nightscout_token as string | undefined) ??
+          settings.diabetes?.nightscout_token,
+      ).trim().length > 0;
+
+    if (urlCandidate.trim().length > 0 && hasToken) {
+      return { text: "Configurado correctamente", tone: "success" as const };
+    }
+
+    return { text: "No configurado", tone: "warning" as const };
+  }, [settings]);
+
   const addToast = useCallback(
     (type: ToastLevel, title: string, description?: string) => {
       pushToast({ type, title, description });
@@ -214,6 +245,7 @@ export const MiniWebConfig = () => {
       }
 
       const nightscoutUrlInfo = resolveSecretFromSettings(payload, [
+        { path: (data) => data?.nightscout?.url },
         { path: (data) => data?.diabetes?.nightscout_url },
         { path: (data) => data?.nightscout_url },
         {
@@ -223,12 +255,31 @@ export const MiniWebConfig = () => {
               : undefined,
         },
       ]);
-      setNightscoutUrlStored(nightscoutUrlInfo.stored);
+      const nightscoutSection =
+        payload && typeof payload?.nightscout === "object"
+          ? (payload.nightscout as Record<string, unknown>)
+          : null;
+      const sectionUrl =
+        typeof nightscoutSection?.url === "string"
+          ? (nightscoutSection.url as string)
+          : "";
+      const sectionToken =
+        typeof nightscoutSection?.token === "string"
+          ? (nightscoutSection.token as string)
+          : "";
+      const sectionHasToken = nightscoutSection?.hasToken === true;
+
+      const hasStoredUrl = nightscoutUrlInfo.stored || sectionUrl.trim().length > 0;
+      setNightscoutUrlStored(hasStoredUrl);
       if (!nightscoutUrlEditedRef.current) {
-        setNightscoutUrl(nightscoutUrlInfo.stored ? "" : nightscoutUrlInfo.value);
+        const resolvedUrl = nightscoutUrlInfo.stored
+          ? ""
+          : sectionUrl.trim() || nightscoutUrlInfo.value;
+        setNightscoutUrl(resolvedUrl);
       }
 
       const nightscoutTokenInfo = resolveSecretFromSettings(payload, [
+        { path: (data) => data?.nightscout?.token },
         { path: (data) => data?.diabetes?.nightscout_token },
         { path: (data) => data?.nightscout_token },
         {
@@ -238,9 +289,16 @@ export const MiniWebConfig = () => {
               : undefined,
         },
       ]);
-      setNightscoutTokenStored(nightscoutTokenInfo.stored);
+      const hasStoredToken = nightscoutTokenInfo.stored || sectionHasToken;
+      setNightscoutTokenStored(hasStoredToken);
       if (!nightscoutTokenEditedRef.current) {
-        setNightscoutToken(nightscoutTokenInfo.stored ? "" : nightscoutTokenInfo.value);
+        if (nightscoutTokenInfo.stored) {
+          setNightscoutToken("");
+        } else if (sectionToken && sectionToken !== "__stored__") {
+          setNightscoutToken(sectionToken);
+        } else {
+          setNightscoutToken(nightscoutTokenInfo.value);
+        }
       }
     },
     [],
@@ -525,18 +583,18 @@ export const MiniWebConfig = () => {
     try {
       const trimmedUrl = nightscoutUrl.trim();
       const trimmedToken = nightscoutToken.trim();
-      const payload: { diabetes: Record<string, string | undefined> } = {
-        diabetes: {
-          nightscout_url: trimmedUrl || undefined,
+      const payload: { nightscout: Record<string, string | undefined> } = {
+        nightscout: {
+          url: trimmedUrl || undefined,
         },
       };
 
       if (nightscoutTokenEditedRef.current) {
-        payload.diabetes.nightscout_token = trimmedToken === "" ? "" : trimmedToken;
+        payload.nightscout.token = trimmedToken === "" ? "" : trimmedToken;
       } else if (nightscoutTokenStored) {
-        payload.diabetes.nightscout_token = "__stored__";
+        payload.nightscout.token = "__stored__";
       } else if (trimmedToken) {
-        payload.diabetes.nightscout_token = trimmedToken;
+        payload.nightscout.token = trimmedToken;
       }
 
       const response = await fetch(buildUrl("/api/settings"), {
@@ -584,8 +642,8 @@ export const MiniWebConfig = () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          nightscout_url: nightscoutUrl.trim() || undefined,
-          nightscout_token: nightscoutToken.trim() || undefined,
+          url: nightscoutUrl.trim() || undefined,
+          token: nightscoutToken.trim() || undefined,
         }),
       });
       const data = await readJson(response);
@@ -892,6 +950,16 @@ export const MiniWebConfig = () => {
               <CardDescription>Configura la URL y token de acceso.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
+              <div
+                className={cn(
+                  "text-sm font-medium",
+                  nightscoutStatus.tone === "success"
+                    ? "text-emerald-600"
+                    : "text-muted-foreground",
+                )}
+              >
+                {nightscoutStatus.text}
+              </div>
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-sm">
                   <Label htmlFor="nightscout-url">URL</Label>

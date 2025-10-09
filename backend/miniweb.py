@@ -408,33 +408,44 @@ def _extract_nightscout_credentials(config: Optional[Dict[str, Any]]) -> Tuple[s
     url = ""
     token = ""
 
-    raw_url = config.get("nightscout_url")
-    raw_token = config.get("nightscout_token")
-
-    if isinstance(raw_url, str):
-        url = raw_url.strip()
-    if isinstance(raw_token, str):
-        token = raw_token.strip()
-
     nightscout_section = config.get("nightscout")
     if isinstance(nightscout_section, dict):
         section_url = nightscout_section.get("url")
         section_token = nightscout_section.get("token") or nightscout_section.get("api_token")
-        if not url and isinstance(section_url, str):
+        if isinstance(section_url, str):
             url = section_url.strip()
-        if not token and isinstance(section_token, str):
+        if isinstance(section_token, str):
             token = section_token.strip()
+
+    if not url:
+        raw_url = config.get("nightscout_url")
+        if isinstance(raw_url, str):
+            url = raw_url.strip()
+
+    if not token:
+        raw_token = config.get("nightscout_token")
+        if isinstance(raw_token, str):
+            token = raw_token.strip()
 
     diabetes = config.get("diabetes")
     if isinstance(diabetes, dict):
-        if not url and isinstance(diabetes.get("ns_url"), str):
-            url = diabetes["ns_url"].strip()
-        if not url and isinstance(diabetes.get("nightscout_url"), str):
-            url = diabetes["nightscout_url"].strip()
-        if not token and isinstance(diabetes.get("ns_token"), str):
-            token = diabetes["ns_token"].strip()
-        if not token and isinstance(diabetes.get("nightscout_token"), str):
-            token = diabetes["nightscout_token"].strip()
+        if not url:
+            if isinstance(diabetes.get("nightscout_url"), str):
+                url = diabetes["nightscout_url"].strip()
+            elif isinstance(diabetes.get("ns_url"), str):
+                url = diabetes["ns_url"].strip()
+        if not token:
+            if isinstance(diabetes.get("nightscout_token"), str):
+                token = diabetes["nightscout_token"].strip()
+            elif isinstance(diabetes.get("ns_token"), str):
+                token = diabetes["ns_token"].strip()
+
+    integrations = config.get("integrations")
+    if isinstance(integrations, dict):
+        if not url and isinstance(integrations.get("nightscout_url"), str):
+            url = integrations["nightscout_url"].strip()
+        if not token and isinstance(integrations.get("nightscout_token"), str):
+            token = integrations["nightscout_token"].strip()
 
     return url, token
 
@@ -470,19 +481,20 @@ def _store_nightscout_url(config: Dict[str, Any], raw_value: Any) -> Tuple[bool,
     diabetes_cfg = config.get("diabetes")
     if not isinstance(diabetes_cfg, dict):
         diabetes_cfg = {}
-    if diabetes_cfg.get("ns_url") != desired_url:
-        diabetes_cfg["ns_url"] = desired_url
-        changed = True
-    if diabetes_cfg.get("nightscout_url") != desired_url:
-        diabetes_cfg["nightscout_url"] = desired_url
+    removed_keys = False
+    for legacy_key in ("nightscout_url", "ns_url"):
+        if legacy_key in diabetes_cfg:
+            diabetes_cfg.pop(legacy_key, None)
+            removed_keys = True
+    if removed_keys:
         changed = True
     config["diabetes"] = diabetes_cfg
 
     integrations_cfg = config.get("integrations")
     if not isinstance(integrations_cfg, dict):
         integrations_cfg = {}
-    if integrations_cfg.get("nightscout_url") != desired_url:
-        integrations_cfg["nightscout_url"] = desired_url
+    if "nightscout_url" in integrations_cfg:
+        integrations_cfg.pop("nightscout_url", None)
         changed = True
     config["integrations"] = integrations_cfg
 
@@ -515,19 +527,20 @@ def _store_nightscout_token(config: Dict[str, Any], raw_value: Any) -> Tuple[boo
     diabetes_cfg = config.get("diabetes")
     if not isinstance(diabetes_cfg, dict):
         diabetes_cfg = {}
-    if diabetes_cfg.get("ns_token") != desired_token:
-        diabetes_cfg["ns_token"] = desired_token
-        changed = True
-    if diabetes_cfg.get("nightscout_token") != desired_token:
-        diabetes_cfg["nightscout_token"] = desired_token
+    removed_keys = False
+    for legacy_key in ("nightscout_token", "ns_token"):
+        if legacy_key in diabetes_cfg:
+            diabetes_cfg.pop(legacy_key, None)
+            removed_keys = True
+    if removed_keys:
         changed = True
     config["diabetes"] = diabetes_cfg
 
     integrations_cfg = config.get("integrations")
     if not isinstance(integrations_cfg, dict):
         integrations_cfg = {}
-    if integrations_cfg.get("nightscout_token") != desired_token:
-        integrations_cfg["nightscout_token"] = desired_token
+    if "nightscout_token" in integrations_cfg:
+        integrations_cfg.pop("nightscout_token", None)
         changed = True
     config["integrations"] = integrations_cfg
 
@@ -642,21 +655,20 @@ def _build_settings_payload(config: Dict[str, Any]) -> Dict[str, Any]:
     openai_masked = SECRET_PLACEHOLDER if openai_key else ""
     payload["openai"] = {"hasKey": bool(openai_key), "apiKey": openai_masked}
 
-    nightscout_url_masked = SECRET_PLACEHOLDER if nightscout_url else ""
     nightscout_token_masked = SECRET_PLACEHOLDER if nightscout_token else ""
     payload["nightscout"] = {
-        "url": nightscout_url_masked,
+        "url": nightscout_url,
         "token": nightscout_token_masked,
         "hasToken": bool(nightscout_token),
     }
-    payload["nightscout_url"] = nightscout_url_masked
+    payload["nightscout_url"] = nightscout_url
     payload["nightscout_token"] = nightscout_token_masked
 
     integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
     integrations = {
         key: value
         for key, value in integrations_cfg.items()
-        if key not in {"openai_api_key", "chatgpt_api_key", "nightscout_token"}
+        if key not in {"openai_api_key", "chatgpt_api_key", "nightscout_token", "nightscout_url"}
     }
     payload["integrations"] = integrations
 
@@ -777,37 +789,47 @@ def _migrate_legacy_nightscout(config: Dict[str, Any]) -> bool:
     final_url = _first_non_empty([current_url, section_url, *legacy_urls])
     final_token = _first_non_empty([current_token, section_token, *legacy_tokens])
 
-    if final_url != current_url:
+    if config.get("nightscout_url") != final_url:
         config["nightscout_url"] = final_url
         changed = True
-    if final_token != current_token:
+    if config.get("nightscout_token") != final_token:
         config["nightscout_token"] = final_token
         changed = True
 
     nightscout_cfg = current_section if isinstance(current_section, dict) else {}
+    api_token = nightscout_cfg.get("api_token") if isinstance(nightscout_cfg, dict) else None
     if nightscout_cfg.get("url") != final_url:
         nightscout_cfg["url"] = final_url
         changed = True
     if nightscout_cfg.get("token") != final_token:
         nightscout_cfg["token"] = final_token
         changed = True
+    if api_token is not None and nightscout_cfg.get("token") == final_token:
+        nightscout_cfg.pop("api_token", None)
+        changed = True
     config["nightscout"] = nightscout_cfg
 
     diabetes_cfg = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
-    if diabetes_cfg.get("ns_url") != final_url:
-        diabetes_cfg["ns_url"] = final_url
+    removed_diabetes = False
+    for legacy_key in ("nightscout_url", "nightscout_token", "ns_url", "ns_token"):
+        if legacy_key in diabetes_cfg:
+            diabetes_cfg.pop(legacy_key, None)
+            removed_diabetes = True
+    if removed_diabetes:
         changed = True
-    if diabetes_cfg.get("ns_token") != final_token:
-        diabetes_cfg["ns_token"] = final_token
+    desired_enabled = bool(final_url)
+    if diabetes_cfg.get("diabetes_enabled") != desired_enabled:
+        diabetes_cfg["diabetes_enabled"] = desired_enabled
         changed = True
     config["diabetes"] = diabetes_cfg
 
     integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
-    if integrations_cfg.get("nightscout_url") != final_url:
-        integrations_cfg["nightscout_url"] = final_url
-        changed = True
-    if integrations_cfg.get("nightscout_token") != final_token:
-        integrations_cfg["nightscout_token"] = final_token
+    removed_integrations = False
+    for legacy_key in ("nightscout_url", "nightscout_token"):
+        if legacy_key in integrations_cfg:
+            integrations_cfg.pop(legacy_key, None)
+            removed_integrations = True
+    if removed_integrations:
         changed = True
     config["integrations"] = integrations_cfg
 
@@ -4103,7 +4125,7 @@ async def update_settings(request: Request):
 
         enabled_changed, enabled_value = _set_diabetes_enabled(config, bool(final_url))
 
-        diabetes_cfg_state = config.get("diabetes")
+        diabetes_cfg_state = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
         if isinstance(diabetes_cfg_state, dict):
             raw_enabled = diabetes_cfg_state.get("diabetes_enabled")
             if isinstance(raw_enabled, bool):
@@ -4111,16 +4133,15 @@ async def update_settings(request: Request):
             else:
                 enabled_value = bool(raw_enabled)
         else:
+            diabetes_cfg_state = {}
             enabled_value = bool(final_url)
+        diabetes_cfg_state["diabetes_enabled"] = enabled_value
+        config["diabetes"] = diabetes_cfg_state
 
-        diabetes_updates = updates.get("diabetes")
-        if not isinstance(diabetes_updates, dict):
-            diabetes_updates = {}
-        diabetes_updates["nightscout_url"] = final_url
-        diabetes_updates["nightscout_token"] = final_token
-        diabetes_updates["diabetes_enabled"] = enabled_value
-        updates["diabetes"] = diabetes_updates
+        updates["diabetes"] = deepcopy(diabetes_cfg_state)
 
+        nightscout_cfg_state = config.get("nightscout") if isinstance(config.get("nightscout"), dict) else {}
+        updates["nightscout"] = deepcopy(nightscout_cfg_state)
         updates["nightscout_url"] = final_url
         updates["nightscout_token"] = final_token
 
@@ -4136,9 +4157,6 @@ async def update_settings(request: Request):
 
     if payload.diabetes is not None:
         legacy = payload.diabetes
-        diabetes_updates = updates.get("diabetes")
-        if not isinstance(diabetes_updates, dict):
-            diabetes_updates = {}
 
         previous_url, previous_token = _extract_nightscout_credentials(config)
         final_url = previous_url
@@ -4171,7 +4189,7 @@ async def update_settings(request: Request):
         if legacy.diabetes_enabled is not None:
             enabled_changed_local, _ = _set_diabetes_enabled(config, legacy.diabetes_enabled)
 
-        diabetes_cfg_state = config.get("diabetes")
+        diabetes_cfg_state = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
         if isinstance(diabetes_cfg_state, dict):
             raw_enabled = diabetes_cfg_state.get("diabetes_enabled")
             if isinstance(raw_enabled, bool):
@@ -4179,13 +4197,15 @@ async def update_settings(request: Request):
             else:
                 enabled_value = bool(raw_enabled)
         else:
+            diabetes_cfg_state = {}
             enabled_value = bool(final_url)
+        diabetes_cfg_state["diabetes_enabled"] = enabled_value
+        config["diabetes"] = diabetes_cfg_state
 
-        diabetes_updates["nightscout_url"] = final_url
-        diabetes_updates["nightscout_token"] = final_token
-        diabetes_updates["diabetes_enabled"] = enabled_value
-        updates["diabetes"] = diabetes_updates
+        updates["diabetes"] = deepcopy(diabetes_cfg_state)
 
+        nightscout_cfg_state = config.get("nightscout") if isinstance(config.get("nightscout"), dict) else {}
+        updates["nightscout"] = deepcopy(nightscout_cfg_state)
         updates["nightscout_url"] = final_url
         updates["nightscout_token"] = final_token
 
@@ -4482,12 +4502,22 @@ async def _execute_nightscout_test_request(url: str, token: str) -> Tuple[int, D
         return 422, {"ok": False, "status": 422, "message": "missing_url"}
 
     normalized_url = url.rstrip("/")
-    headers = {"API-SECRET": token} if token else {}
+    token_value = token.strip()
+    headers: Dict[str, str] = {}
+    params: Dict[str, str] = {}
+
+    if token_value:
+        lower_token = token_value.lower()
+        if lower_token.startswith("ns-") or lower_token.startswith("api-"):
+            headers["Authorization"] = f"Bearer {token_value}"
+        else:
+            params["token"] = token_value
+
     endpoint = f"{normalized_url}/api/v1/status.json"
 
     try:
         async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
-            response = await client.get(endpoint, headers=headers)
+            response = await client.get(endpoint, headers=headers, params=params or None)
     except httpx.TimeoutException:
         return 504, {"ok": False, "status": 504, "message": "timeout"}
     except httpx.RequestError as exc:
@@ -4500,7 +4530,24 @@ async def _execute_nightscout_test_request(url: str, token: str) -> Tuple[int, D
         payload = response.text
 
     if response.is_success:
-        return status_code, {"ok": True, "status": status_code, "details": payload}
+        payload_ok = False
+        if isinstance(payload, dict):
+            status_field = payload.get("status")
+            name_field = payload.get("name")
+            if isinstance(status_field, str) and status_field.strip().lower() == "ok":
+                payload_ok = True
+            elif isinstance(name_field, str) and name_field.strip():
+                payload_ok = True
+
+        if payload_ok:
+            return 200, {"ok": True, "status": status_code, "details": payload}
+
+        return 502, {
+            "ok": False,
+            "status": status_code,
+            "details": payload,
+            "message": "unexpected_response",
+        }
 
     return status_code, {"ok": False, "status": status_code, "details": payload, "message": "http_error"}
 

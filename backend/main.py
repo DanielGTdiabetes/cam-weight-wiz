@@ -100,33 +100,37 @@ def _get_nightscout_credentials(config: Dict[str, Any]) -> tuple[str, str]:
     url = ""
     token = ""
 
-    raw_url = config.get("nightscout_url")
-    raw_token = config.get("nightscout_token")
-
-    if isinstance(raw_url, str):
-        url = raw_url.strip()
-    if isinstance(raw_token, str):
-        token = raw_token.strip()
-
     nightscout_section = config.get("nightscout")
     if isinstance(nightscout_section, dict):
         section_url = nightscout_section.get("url")
         section_token = nightscout_section.get("token") or nightscout_section.get("api_token")
-        if not url and isinstance(section_url, str):
+        if isinstance(section_url, str):
             url = section_url.strip()
-        if not token and isinstance(section_token, str):
+        if isinstance(section_token, str):
             token = section_token.strip()
+
+    if not url:
+        raw_url = config.get("nightscout_url")
+        if isinstance(raw_url, str):
+            url = raw_url.strip()
+
+    if not token:
+        raw_token = config.get("nightscout_token")
+        if isinstance(raw_token, str):
+            token = raw_token.strip()
 
     diabetes = config.get("diabetes")
     if isinstance(diabetes, dict):
-        if not url and isinstance(diabetes.get("nightscout_url"), str):
-            url = diabetes["nightscout_url"].strip()
-        if not token and isinstance(diabetes.get("nightscout_token"), str):
-            token = diabetes["nightscout_token"].strip()
-        if not url and isinstance(diabetes.get("ns_url"), str):
-            url = diabetes["ns_url"].strip()
-        if not token and isinstance(diabetes.get("ns_token"), str):
-            token = diabetes["ns_token"].strip()
+        if not url:
+            if isinstance(diabetes.get("nightscout_url"), str):
+                url = diabetes["nightscout_url"].strip()
+            elif isinstance(diabetes.get("ns_url"), str):
+                url = diabetes["ns_url"].strip()
+        if not token:
+            if isinstance(diabetes.get("nightscout_token"), str):
+                token = diabetes["nightscout_token"].strip()
+            elif isinstance(diabetes.get("ns_token"), str):
+                token = diabetes["ns_token"].strip()
 
     integrations = config.get("integrations")
     if isinstance(integrations, dict):
@@ -655,34 +659,33 @@ def _migrate_legacy_nightscout(config: Dict[str, Any]) -> bool:
     final_url = _first_non_empty([current_url, section_url, *legacy_urls])
     final_token = _first_non_empty([current_token, section_token, *legacy_tokens])
 
-    if final_url != current_url:
+    if config.get("nightscout_url") != final_url:
         config["nightscout_url"] = final_url
         changed = True
-    if final_token != current_token:
+    if config.get("nightscout_token") != final_token:
         config["nightscout_token"] = final_token
         changed = True
 
     nightscout_cfg = current_section if isinstance(current_section, dict) else {}
+    api_token = nightscout_cfg.get("api_token") if isinstance(nightscout_cfg, dict) else None
     if nightscout_cfg.get("url") != final_url:
         nightscout_cfg["url"] = final_url
         changed = True
     if nightscout_cfg.get("token") != final_token:
         nightscout_cfg["token"] = final_token
         changed = True
+    if api_token is not None and nightscout_cfg.get("token") == final_token:
+        nightscout_cfg.pop("api_token", None)
+        changed = True
     config["nightscout"] = nightscout_cfg
 
     diabetes_cfg = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
-    if diabetes_cfg.get("ns_url") != final_url:
-        diabetes_cfg["ns_url"] = final_url
-        changed = True
-    if diabetes_cfg.get("ns_token") != final_token:
-        diabetes_cfg["ns_token"] = final_token
-        changed = True
-    if diabetes_cfg.get("nightscout_url") != final_url:
-        diabetes_cfg["nightscout_url"] = final_url
-        changed = True
-    if diabetes_cfg.get("nightscout_token") != final_token:
-        diabetes_cfg["nightscout_token"] = final_token
+    removed_diabetes = False
+    for legacy_key in ("nightscout_url", "nightscout_token", "ns_url", "ns_token"):
+        if legacy_key in diabetes_cfg:
+            diabetes_cfg.pop(legacy_key, None)
+            removed_diabetes = True
+    if removed_diabetes:
         changed = True
     desired_enabled = bool(final_url)
     if diabetes_cfg.get("diabetes_enabled") != desired_enabled:
@@ -691,20 +694,14 @@ def _migrate_legacy_nightscout(config: Dict[str, Any]) -> bool:
     config["diabetes"] = diabetes_cfg
 
     integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
-    if integrations_cfg.get("nightscout_url") != final_url:
-        integrations_cfg["nightscout_url"] = final_url
-        changed = True
-    if integrations_cfg.get("nightscout_token") != final_token:
-        integrations_cfg["nightscout_token"] = final_token
+    removed_integrations = False
+    for legacy_key in ("nightscout_url", "nightscout_token"):
+        if legacy_key in integrations_cfg:
+            integrations_cfg.pop(legacy_key, None)
+            removed_integrations = True
+    if removed_integrations:
         changed = True
     config["integrations"] = integrations_cfg
-
-    if config.get("nightscout_url") != final_url:
-        config["nightscout_url"] = final_url
-        changed = True
-    if config.get("nightscout_token") != final_token:
-        config["nightscout_token"] = final_token
-        changed = True
 
     return changed
 

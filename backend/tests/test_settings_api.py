@@ -90,8 +90,11 @@ def test_legacy_payload_is_normalized(settings_service):
 
     config = read_config(config_path)
     assert config.get("network", {}).get("openai_api_key") == "sk-test"
-    assert config.get("diabetes", {}).get("nightscout_url") == "https://example.com"
-    assert config.get("diabetes", {}).get("nightscout_token") == "secret"
+    nightscout_cfg = config.get("nightscout", {})
+    assert nightscout_cfg.get("url") == "https://example.com"
+    assert nightscout_cfg.get("token") == "secret"
+    assert "nightscout_url" not in config.get("diabetes", {})
+    assert "nightscout_token" not in config.get("diabetes", {})
 
 
 def test_placeholder_keeps_existing_secret(settings_service):
@@ -118,8 +121,9 @@ def test_placeholder_keeps_existing_secret(settings_service):
 
     config = read_config(config_path)
     assert config.get("network", {}).get("openai_api_key") == "sk-live"
-    assert config.get("diabetes", {}).get("nightscout_url") == "https://ns.example"
-    assert config.get("diabetes", {}).get("nightscout_token") == "tok"
+    nightscout_cfg = config.get("nightscout", {})
+    assert nightscout_cfg.get("url") == "https://ns.example"
+    assert nightscout_cfg.get("token") == "tok"
 
 
 def test_get_masks_secret_values(settings_service):
@@ -135,8 +139,9 @@ def test_get_masks_secret_values(settings_service):
 
     payload = service.get_for_client(include_secrets=False)
     assert payload.get("network", {}).get("openai_api_key") == _SECRET_PLACEHOLDER
-    assert payload.get("diabetes", {}).get("nightscout_url") == _SECRET_PLACEHOLDER
-    assert payload.get("diabetes", {}).get("nightscout_token") == _SECRET_PLACEHOLDER
+    nightscout_payload = payload.get("nightscout", {})
+    assert nightscout_payload.get("url") == "https://mask"
+    assert nightscout_payload.get("token") == _SECRET_PLACEHOLDER
 
 
 def test_default_sound_enabled_is_true(settings_service):
@@ -225,11 +230,12 @@ def test_post_settings_accepts_legacy_diabetes_payload(api_client, tmp_path: Pat
     assert response.status_code == 200
 
     config = read_config(service.config_path)
-    assert config.get("nightscout_url") == "https://legacy.example"
-    assert config.get("nightscout_token") == "TOK123"
+    nightscout_cfg = config.get("nightscout", {})
+    assert nightscout_cfg.get("url") == "https://legacy.example"
+    assert nightscout_cfg.get("token") == "TOK123"
     diabetes_cfg = config.get("diabetes", {})
-    assert diabetes_cfg.get("nightscout_url") == "https://legacy.example"
-    assert diabetes_cfg.get("nightscout_token") == "TOK123"
+    assert "nightscout_url" not in diabetes_cfg
+    assert "nightscout_token" not in diabetes_cfg
     assert diabetes_cfg.get("diabetes_enabled") is True
 
 
@@ -253,7 +259,7 @@ def test_get_settings_masks_legacy_diabetes_values(api_client, tmp_path: Path, m
     assert response.status_code == 200
     payload = response.json()
 
-    diabetes_payload = payload.get("diabetes", {})
-    assert diabetes_payload.get("nightscout_url") == "__stored__"
-    assert diabetes_payload.get("nightscout_token") == "__stored__"
+    nightscout_payload = payload.get("nightscout", {})
+    assert nightscout_payload.get("url") == "https://legacy.example"
+    assert nightscout_payload.get("token") == _SECRET_PLACEHOLDER
     assert payload.get("ui", {}).get("offline_mode") is False
