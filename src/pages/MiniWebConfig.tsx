@@ -446,8 +446,14 @@ export const MiniWebConfig = () => {
         return;
       }
       const data = payload as Record<string, unknown>;
-      const size = typeof data.size === "number" ? data.size : 0;
-      addToast("success", "Cámara OK", `Cámara OK (${size} bytes)`);
+      const message =
+        typeof data.message === "string" && data.message.trim().length > 0
+          ? (data.message as string)
+          : null;
+      const size = typeof data.size === "number" ? (data.size as number) : null;
+      const successText =
+        message ?? (size !== null ? `Cámara OK (${size} bytes)` : "Captura de cámara exitosa.");
+      addToast("success", "Cámara OK", successText);
       setCameraError(null);
     } catch (error) {
       const message = "No se pudo ejecutar la prueba de cámara.";

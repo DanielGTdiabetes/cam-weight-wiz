@@ -76,7 +76,8 @@ def camera_test():
         return JSONResponse(payload, status_code=exc.status_code)
     if not data:
         return JSONResponse({"ok": False, "error": "camera_failure"}, status_code=500)
-    return {"ok": True, "size": len(data)}
+    LOG.info("/api/camera/test capturó %d bytes", len(data))
+    return {"ok": True, "message": "Captura exitosa", "size": len(data)}
 
 
 @router.post("/capture-to-file")
