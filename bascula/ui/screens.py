@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
+from pathlib import Path
 from typing import Optional, Protocol
 
 import tkinter as tk
 from tkinter import ttk
+
+import requests
+from PIL import Image, ImageTk
 
 from bascula.state import AppState, WeightState
 from bascula.ui.widgets import TimerController, TimerWidget
@@ -155,6 +161,9 @@ class ScanScreen(ttk.Frame):
         super().__init__(parent, padding=24)
         self._state = state
         self._timer_controller = timer_controller
+        self._preview_photo: Optional[ImageTk.PhotoImage] = None
+        self._current_capture: Optional[str] = None
+        self._capture_in_progress = False
 
         header = ttk.Label(self, text="Escáner de alimentos", font=("Segoe UI", 22, "bold"))
         header.pack(anchor="w")
@@ -175,11 +184,130 @@ class ScanScreen(ttk.Frame):
         self._timer_widget = TimerWidget(timer_frame, self._state, self._timer_controller)
         self._timer_widget.pack(pady=(8, 0))
 
-        placeholder = ttk.Label(
-            self,
-            text="(Componentes de escaneo se integran aquí)",
-            foreground="#6b7280",
-            font=("Segoe UI", 11, "italic"),
+        capture_frame = ttk.Frame(self)
+        capture_frame.pack(fill="x", pady=(24, 12))
+
+        self._capture_button = ttk.Button(
+            capture_frame,
+            text="Activar cámara",
+            command=self._handle_capture,
+            width=18,
         )
-        placeholder.pack(anchor="center", pady=(24, 0))
+        self._capture_button.pack(side="left")
+
+        self._status_label = ttk.Label(
+            capture_frame,
+            text="Pulsa \"Activar cámara\" para capturar",
+            foreground="#2563eb",
+            font=("Segoe UI", 10),
+        )
+        self._status_label.pack(side="left", padx=(12, 0))
+
+        preview_frame = ttk.Frame(self, borderwidth=1, relief="solid", padding=8)
+        preview_frame.pack(fill="both", expand=True)
+
+        self._image_label = ttk.Label(
+            preview_frame,
+            text="Cámara no disponible. Revisa conexión o permisos.",
+            justify="center",
+            anchor="center",
+            font=("Segoe UI", 11),
+            foreground="#6b7280",
+            wraplength=480,
+        )
+        self._image_label.pack(fill="both", expand=True)
+
+        self._image_caption = ttk.Label(
+            self,
+            text="",
+            font=("Segoe UI", 9, "italic"),
+            foreground="#6b7280",
+        )
+        self._image_caption.pack(anchor="w", pady=(6, 0))
+
+    def _set_status(self, message: str, *, error: bool = False) -> None:
+        colour = "#dc2626" if error else "#2563eb"
+        self._status_label.configure(text=message, foreground=colour)
+
+    def _handle_capture(self) -> None:
+        if self._capture_in_progress:
+            return
+
+        self._capture_in_progress = True
+        self._capture_button.state(["disabled"])
+        self._set_status("Capturando imagen…")
+
+        def worker() -> None:
+            try:
+                response = requests.post(
+                    "http://localhost:8080/api/camera/capture-to-file",
+                    timeout=10,
+                )
+                response.raise_for_status()
+                data = response.json()
+            except Exception as exc:  # pragma: no cover - network/hardware path
+                LOGGER.exception("Error al contactar la API de cámara: %s", exc)
+                self.after(0, lambda: self._on_capture_failure("Cámara no disponible. Revisa conexión o permisos."))
+                return
+
+            if not data.get("ok"):
+                LOGGER.warning("La API de cámara devolvió error: %s", data)
+                self.after(0, lambda: self._on_capture_failure("Error al capturar imagen"))
+                return
+
+            path = data.get("path")
+            if not isinstance(path, str) or not path:
+                LOGGER.warning("Ruta de captura inválida en respuesta: %s", data)
+                self.after(0, lambda: self._on_capture_failure("Error al capturar imagen"))
+                return
+
+            size = int(data.get("size") or 0)
+            timestamp = int(time.time() * 1000)
+            self.after(0, lambda: self._on_capture_success(path, size, timestamp))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_capture_success(self, path: str, size: int, timestamp: int) -> None:
+        self._capture_in_progress = False
+        self._capture_button.state(["!disabled"])
+        self._set_status(f"Imagen actualizada ({size} bytes)", error=False)
+        self._current_capture = f"{path}?t={timestamp}"
+        self._load_preview(Path(path))
+
+    def _on_capture_failure(self, message: str) -> None:
+        self._capture_in_progress = False
+        self._capture_button.state(["!disabled"])
+        self._set_status(message, error=True)
+        if self._preview_photo is None:
+            self._image_label.configure(
+                text="Cámara no disponible. Revisa conexión o permisos.",
+                image="",
+            )
+            self._image_caption.configure(text="")
+
+    def _load_preview(self, path: Path) -> None:
+        try:
+            with Image.open(path) as img:
+                image = img.copy()
+        except Exception as exc:  # pragma: no cover - depends on filesystem
+            LOGGER.exception("No se pudo cargar la imagen capturada: %s", exc)
+            self._preview_photo = None
+            self._image_label.configure(
+                text="No se pudo cargar la imagen capturada.",
+                image="",
+                foreground="#dc2626",
+            )
+            return
+
+        image.thumbnail((640, 360))
+        photo = ImageTk.PhotoImage(image)
+        self._preview_photo = photo
+        self._image_label.configure(image=photo, text="", foreground="#111827")
+        if self._current_capture:
+            self._image_caption.configure(text=f"Vista previa: {self._current_capture}")
+        else:
+            self._image_caption.configure(text="")
+
+        # Asegura que la imagen se refresque incluso si Tkinter cachea recursos.
+        self._image_label.after(0, lambda: self._image_label.configure(image=photo))
 
