@@ -81,6 +81,16 @@ if command -v alsactl >/dev/null 2>&1; then
   alsactl store || true
 fi
 
+echo "[+] Instalando dependencias de cámara (Picamera2/libcamera)"
+apt-get install -y rpicam-apps python3-picamera2 python3-pil python3-numpy
+
+if id pi >/dev/null 2>&1; then
+  echo "[+] Añadiendo usuario pi al grupo video"
+  usermod -aG video pi
+else
+  echo "[WARN] Usuario pi no encontrado; omitiendo alta en grupo video"
+fi
+
 echo "[+] Verificando MIC (arecord a 16 kHz vía bascula_mix_in)"
 if command -v arecord >/dev/null 2>&1; then
   if arecord -q -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 /tmp/alsa_mic_test.wav; then

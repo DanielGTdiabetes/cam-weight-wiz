@@ -9,15 +9,11 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, TYPE_CHECKING
-
-from PIL import Image
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 try:  # pragma: no cover - dependency available only on target device
-    from picamera2 import Picamera2, libcamera
-except ImportError:  # pragma: no cover - runtime fallback when camera lib missing
-    Picamera2 = None  # type: ignore[misc]
-
+    import libcamera  # type: ignore[import]
+except ImportError:  # pragma: no cover - runtime fallback when libcamera is missing
     class _TransformStub:  # type: ignore[misc,override]
         """Fallback Transform stub used when libcamera is unavailable."""
 
@@ -25,16 +21,26 @@ except ImportError:  # pragma: no cover - runtime fallback when camera lib missi
             self.args = args
             self.kwargs = kwargs
 
-        def __mul__(self, other: Any) -> "_TransformStub":
-            other_args = getattr(other, "args", ())
-            other_kwargs = getattr(other, "kwargs", {})
-            merged_kwargs = {**self.kwargs, **other_kwargs}
-            return _TransformStub(*self.args, *other_args, **merged_kwargs)
-
     class _LibcameraStub:  # type: ignore[misc,override]
         Transform = _TransformStub
 
-    libcamera = _LibcameraStub()  # type: ignore[misc]
+    libcamera = _LibcameraStub()  # type: ignore[misc,assignment]
+
+from PIL import Image
+
+try:  # pragma: no cover - dependency available only on target device
+    from picamera2 import Picamera2
+except ImportError:  # pragma: no cover - runtime fallback when camera lib missing
+    Picamera2 = None  # type: ignore[misc]
+
+
+def _build_transform(rotation: int = 0) -> libcamera.Transform:
+    """Return a safe transform without chained multiplications."""
+
+    r = int(rotation or 0)
+    if r % 360 == 180:
+        return libcamera.Transform(hflip=False, vflip=True)
+    return libcamera.Transform()
 
 
 if TYPE_CHECKING:  # pragma: no cover - typing helper
@@ -130,9 +136,7 @@ class Picamera2Service:
                     temp_camera = Picamera2()
                     self._properties = dict(getattr(temp_camera, "camera_properties", {}) or {})
                     rotation = self._resolve_rotation(self._properties.get("Rotation"))
-                    hflip = self._properties.get("HorizontalFlip")
-                    vflip = self._properties.get("VerticalFlip")
-                    self._transform = self._build_transform(rotation, hflip, vflip)
+                    self._transform = _build_transform(rotation or 0)
                     self._camera = temp_camera
                     self._configs.clear()
                     self._active_config = None
@@ -174,41 +178,6 @@ class Picamera2Service:
                 return rotation
         return None
 
-    def _build_transform(
-        self,
-        rotation: Optional[int],
-        hflip: Any = False,
-        vflip: Any = False,
-    ) -> LibcameraTransform:
-        rotate = 0
-        if rotation is not None:
-            try:
-                candidate = int(rotation)
-            except (TypeError, ValueError):
-                candidate = 0
-            if candidate in {0, 90, 180, 270}:
-                rotate = candidate
-        hflip_flag = bool(hflip)
-        vflip_flag = bool(vflip)
-        transform: LibcameraTransform = libcamera.Transform(
-            hflip=hflip_flag,
-            vflip=vflip_flag,
-        )
-        if rotate:
-            transform = transform * libcamera.Transform(rotation=rotate)
-        if rotate == 0 and not hflip_flag and not vflip_flag:
-            LOG_CAMERA.info("camera transform: identity")
-        elif rotate == 180 and hflip_flag and vflip_flag:
-            LOG_CAMERA.info("camera transform: hflip+vflip (rotation 180)")
-        else:
-            LOG_CAMERA.info(
-                "camera transform: rotate=%d, hflip=%s, vflip=%s",
-                rotate,
-                hflip_flag,
-                vflip_flag,
-            )
-        return transform
-
     def _config_key(self, full: bool) -> str:
         return "full" if full else "fast"
 
@@ -219,9 +188,15 @@ class Picamera2Service:
         size = (4608, 2592) if full else (2304, 1296)
         transform = self._transform or libcamera.Transform()
         if full:
-            config = camera.create_still_configuration(main={"size": size}, transform=transform)
+            config = camera.create_still_configuration(
+                main={"size": size, "format": "RGB888"},
+                transform=transform,
+            )
         else:
-            config = camera.create_preview_configuration(main={"size": size}, transform=transform)
+            config = camera.create_preview_configuration(
+                main={"size": size, "format": "RGB888"},
+                transform=transform,
+            )
         self._configs[key] = config
         LOG_CAMERA.debug("Configuración creada para %s: %s", key, size)
         return config
@@ -248,6 +223,8 @@ class Picamera2Service:
             except Exception:
                 LOG_CAMERA.debug("Error al detener la cámara", exc_info=True)
         image = Image.fromarray(array)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
         buffer = io.BytesIO()
         image.save(buffer, format="JPEG", quality=90)
         return buffer.getvalue()
@@ -310,6 +287,11 @@ class Picamera2Service:
                     )
                     return data
                 except Exception as exc:
+                    LOG_CAMERA.exception(
+                        "Error en la captura (%s): %s",
+                        type(exc).__name__,
+                        exc,
+                    )
                     last_error = exc
                     if self._is_busy_error(exc):
                         LOG_CAMERA.warning("Cámara ocupada, reintento %d/3", attempts)
