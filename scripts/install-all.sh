@@ -160,6 +160,66 @@ ensure_bootcfg_line() {
   fi
 }
 
+sanitize_pi5_kms_overlays() {
+  local bootcfg="$1"
+  local tmp_file
+
+  if [[ ${IS_PI5:-0} -ne 1 ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "${bootcfg}" ]]; then
+    warn "Pi 5 detectado pero ${bootcfg} no existe para sanear overlays"
+    return 1
+  fi
+
+  tmp_file="${bootcfg}.pi5kms.$$"
+  if awk 'BEGIN {IGNORECASE=1; has_pi5=0}
+    {
+      line=$0
+      trimmed=line
+      gsub(/^[ \t]+|[ \t]+$/, "", trimmed)
+      if (trimmed ~ /^dtoverlay=vc4-kms-v3d-pi5(,|$)/) {
+        if (!has_pi5) {
+          has_pi5=1
+          print line
+        }
+        next
+      }
+      if (trimmed ~ /^disable_fw_kms_setup=1( |$|#)/) {
+        next
+      }
+      if (trimmed ~ /^dtoverlay=vc4-kms-v3d(,|$)/) {
+        next
+      }
+      if (trimmed ~ /^dtoverlay=vc4-fkms-v3d(,|$)/) {
+        next
+      }
+      print line
+    }
+    END {
+      if (!has_pi5) {
+        print "dtoverlay=vc4-kms-v3d-pi5"
+      }
+    }
+  ' "${bootcfg}" > "${tmp_file}"; then
+    if [[ -s "${tmp_file}" ]]; then
+      mv "${tmp_file}" "${bootcfg}"
+      log "[Pi5] dtoverlay=vc4-kms-v3d-pi5 aplicado y conflictos limpiados en ${bootcfg}"
+    else
+      rm -f "${tmp_file}"
+      warn "[Pi5] No se pudo sanear ${bootcfg}; archivo temporal vacío"
+      return 1
+    fi
+  else
+    rm -f "${tmp_file}"
+    warn "[Pi5] No se pudo procesar ${bootcfg} para sanear overlays"
+    return 1
+  fi
+
+  return 0
+}
+
 configure_pi_boot_hardware() {
   local bootcfg="${CONF}"
   local ts="$(date +%Y%m%d-%H%M%S)"
@@ -203,6 +263,9 @@ configure_pi_boot_hardware() {
     printf 'dtoverlay=%s\n' "${dac_name}"
     printf 'camera_auto_detect=1\n'
     printf 'dtoverlay=imx708\n'
+    if [[ ${IS_PI5:-0} -eq 1 ]]; then
+      printf 'dtoverlay=vc4-kms-v3d-pi5\n'
+    fi
     printf '%s\n' "${block_end}"
   } >> "${bootcfg}" || warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
 
@@ -214,8 +277,14 @@ configure_pi_boot_hardware() {
     warn "No se pudo limpiar duplicados en ${bootcfg}"
   fi
 
+  sanitize_pi5_kms_overlays "${bootcfg}" || warn "[Pi5] No se pudo garantizar vc4-kms-v3d-pi5 en ${bootcfg}"
+
   printf '[install] Cámara Picamera2 configurada\n'
-  printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708). Requiere reboot.\n' "${dac_name}"
+  if [[ ${IS_PI5:-0} -eq 1 ]]; then
+    printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708 + vc4-kms-v3d-pi5). Requiere reboot.\n' "${dac_name}"
+  else
+    printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708). Requiere reboot.\n' "${dac_name}"
+  fi
 }
 
 configure_hifiberry_audio() {
@@ -521,6 +590,7 @@ if [[ "${HAS_SYSTEMD}" -eq 0 ]]; then
 fi
 
 ALLOW_SYSTEMD="${ALLOW_SYSTEMD:-1}"
+BASCULA_UI_SMOKE_DONE=0
 
 systemctl_safe() {
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
@@ -530,6 +600,110 @@ systemctl_safe() {
   else
     warn "systemd no disponible: systemctl $* omitido"
   fi
+}
+
+verify_pi5_graphics_stack() {
+  local hint="Revisa dtoverlay=vc4-kms-v3d-pi5 y elimina disable_fw_kms_setup=1"
+  local ok=1
+
+  if [[ ${IS_PI5:-0} -ne 1 ]]; then
+    return 0
+  fi
+
+  log "[Pi5] Verificando stack gráfico (vc4-drm + DRM/KMS)..."
+
+  if [[ ! -e /dev/dri/card0 ]]; then
+    log_err "[Pi5][ERROR] Falta /dev/dri/card0. ${hint}"
+    ok=0
+  fi
+
+  if [[ ! -e /dev/fb0 ]]; then
+    log_err "[Pi5][ERROR] Falta /dev/fb0. ${hint}"
+    ok=0
+  fi
+
+  if ! dmesg | grep -qi 'vc4-drm'; then
+    log_err "[Pi5][ERROR] vc4-drm no aparece en dmesg. ${hint}"
+    ok=0
+  fi
+
+  if command -v xvfb-run >/dev/null 2>&1 && command -v xrandr >/dev/null 2>&1; then
+    local monitors_output
+    if monitors_output=$(xvfb-run -a xrandr --listmonitors 2>&1); then
+      log "[Pi5] Monitores detectados vía xrandr --listmonitors:";
+      printf '%s\n' "${monitors_output}"
+    else
+      log_err "[Pi5][ERROR] xrandr --listmonitors falló. ${hint}"
+      printf '%s\n' "${monitors_output}" | sed 's/^/[Pi5][ERROR] /'
+      ok=0
+    fi
+  elif command -v modetest >/dev/null 2>&1; then
+    local modetest_output
+    if modetest_output=$(modetest -c 2>&1); then
+      log "[Pi5] modetest -c ejecutado correctamente"
+      printf '%s\n' "${modetest_output}" | head -n 10 | sed 's/^/[Pi5] /'
+    else
+      log_err "[Pi5][ERROR] modetest -c falló. ${hint}"
+      printf '%s\n' "${modetest_output}" | sed 's/^/[Pi5][ERROR] /'
+      ok=0
+    fi
+  else
+    log_err "[Pi5][ERROR] No se encontró xrandr (con xvfb-run) ni modetest para validar KMS. ${hint}"
+    ok=0
+  fi
+
+  if (( ok == 0 )); then
+    return 1
+  fi
+
+  log "[Pi5] Stack gráfico validado (vc4-drm activo y dispositivos presentes)"
+  return 0
+}
+
+run_post_install_smoke_tests() {
+  local homepage
+  local capture_json
+
+  if [[ ${HAS_SYSTEMD} -ne 1 || ${ALLOW_SYSTEMD:-1} -ne 1 ]]; then
+    warn "[smoke] systemd deshabilitado; omitiendo pruebas de kiosk"
+    return 0
+  fi
+
+  if [[ ${BASCULA_UI_SMOKE_DONE:-0} -eq 1 ]]; then
+    log "[smoke] Pruebas de kiosk ya ejecutadas anteriormente (omitidas)"
+    return 0
+  fi
+
+  log "[smoke] Ejecutando verificación rápida de kiosk/Nginx"
+
+  if ! systemctl restart bascula-miniweb bascula-ui; then
+    fail "[smoke][ERROR] No se pudo reiniciar bascula-miniweb/bascula-ui"
+  fi
+
+  sleep 3
+
+  if ! systemctl is-active --quiet bascula-ui; then
+    fail "[smoke][ERROR] bascula-ui no está activo tras el reinicio"
+  fi
+
+  if ! homepage=$(curl -fsS http://localhost/); then
+    fail "[smoke][ERROR] curl http://localhost/ falló (proxy Nginx no responde)"
+  fi
+
+  if ! printf '%s' "${homepage}" | grep -qi '<html'; then
+    fail "[smoke][ERROR] La respuesta de http://localhost/ no parece HTML"
+  fi
+
+  if ! capture_json=$(curl -fsS -X POST http://localhost/api/camera/capture-to-file); then
+    fail "[smoke][ERROR] POST /api/camera/capture-to-file falló"
+  fi
+
+  if ! printf '%s' "${capture_json}" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+    fail "[smoke][ERROR] POST /api/camera/capture-to-file no devolvió ok:true"
+  fi
+
+  log "[smoke] Kiosk y API verificados correctamente"
+  BASCULA_UI_SMOKE_DONE=1
 }
 
 configure_bascula_ui_service() {
@@ -618,6 +792,10 @@ EOF
       log_warn "curl no disponible para verificar miniweb"
     fi
 
+    if ! verify_pi5_graphics_stack; then
+      fail "[Pi5] Stack gráfico no listo; se aborta la habilitación de bascula-ui.service"
+    fi
+
     if ! systemctl enable bascula-ui.service; then
       log_err "No se pudo habilitar bascula-ui.service"
       systemctl status bascula-ui.service --no-pager || true
@@ -635,6 +813,8 @@ EOF
       systemctl status bascula-ui --no-pager -l || true
       exit 1
     fi
+
+    run_post_install_smoke_tests
     log "UI activa"
   else
     warn "systemd no disponible o ALLOW_SYSTEMD!=1; se omitió verificación/reinicio de bascula-ui.service"
@@ -790,6 +970,15 @@ if [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "armv7l" ]; then
     warn "No se detectó arquitectura ARM. Este script está diseñado para Raspberry Pi."
 fi
 
+PI_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
+IS_PI5=0
+if printf '%s' "${PI_MODEL}" | grep -q "Raspberry Pi 5"; then
+    IS_PI5=1
+    log "Modelo detectado: ${PI_MODEL} (forzando vc4-kms-v3d-pi5)"
+else
+    [[ -n "${PI_MODEL}" ]] && log "Modelo detectado: ${PI_MODEL}"
+fi
+
 # Update system
 log "[2/20] Actualizando el sistema..."
 if [[ "${NET_OK}" -eq 1 ]]; then
@@ -811,7 +1000,7 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         git curl ca-certificates build-essential cmake pkg-config
         python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial
         python3-pil python3-pil.imagetk python3-xdg
-        x11-xserver-utils xserver-xorg-legacy xinit openbox
+        x11-xserver-utils xserver-xorg-legacy xinit openbox xvfb libdrm-tests
         fonts-dejavu-core fonts-noto-core
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils pulseaudio sox ffmpeg
@@ -1180,21 +1369,24 @@ apt-get autoremove -y || true
 # Remove any fbdev config files
 rm -f /usr/share/X11/xorg.conf.d/*fbdev*.conf /etc/X11/xorg.conf.d/*fbdev*.conf 2>/dev/null || true
 
-# Force modesetting driver (KMS/DRM) for Raspberry Pi 5
-install -d -m 0755 /etc/X11/xorg.conf.d
-cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
-Section "Device"
-  Identifier "Modesetting"
-  Driver "modesetting"
-  Option "AccelMethod" "glamor"
-EndSection
-EOF
-
-log "✓ Xorg configurado para KMS (modesetting)"
-
-# Configure Xorg to use correct DRM card (vc4 = card1)
-log "[8c/20] Configurando Xorg para usar card1 (vc4)..."
-cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
+if [[ ${IS_PI5:-0} -eq 1 ]]; then
+  log "[Pi5] Eliminando overrides xorg.conf.d existentes para dejar KMS autodetectado"
+  for candidate in /etc/X11/xorg.conf.d/*modesetting*.conf /etc/X11/xorg.conf.d/*vc4*.conf; do
+    [[ -e "${candidate}" ]] || continue
+    if [[ "${candidate}" == *.bak ]]; then
+      log "[Pi5] ${candidate} ya está respaldado"
+      continue
+    fi
+    if mv "${candidate}" "${candidate}.bak"; then
+      log "[Pi5] ${candidate} → ${candidate}.bak"
+    else
+      warn "[Pi5] No se pudo mover ${candidate}"
+    fi
+  done
+  log "[Pi5] Sin overrides forzados en /etc/X11/xorg.conf.d (usando auto-KMS)"
+else
+  install -d -m 0755 /etc/X11/xorg.conf.d
+  cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
 Section "Device"
   Identifier "vc4"
   Driver "modesetting"
@@ -1207,7 +1399,8 @@ Section "Screen"
   Device "vc4"
 EndSection
 EOF
-log "✓ Xorg configurado para DRM card1"
+  log "✓ Xorg configurado para DRM card1"
+fi
 
 # Configure Polkit rules
 log "[9/20] Configurando Polkit..."
