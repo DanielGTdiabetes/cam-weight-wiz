@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from backend.camera_service import (
     CameraBusyError,
@@ -40,6 +40,14 @@ def camera_info():
         "Rotation": properties.get("Rotation"),
         "PixelArraySize": properties.get("PixelArraySize"),
     }
+
+
+def _capture_tmp_dir() -> Path:
+    return Path(os.getenv("TMPDIR", "/tmp"))
+
+
+def _capture_file_path() -> Path:
+    return _capture_tmp_dir() / "camera-capture.jpg"
 
 
 def _capture_bytes(full: bool, timeout_ms: int = 2000) -> bytes:
@@ -83,9 +91,8 @@ def camera_test():
 @router.post("/capture-to-file")
 def camera_capture_to_file(full: bool = Query(False, description="Captura en resolución completa")):
     """Captura para depuración guardando la imagen en /tmp."""
-    tmp_dir = Path(os.getenv("TMPDIR", "/tmp"))
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    filename = tmp_dir / "camera-capture.jpg"
+    filename = _capture_file_path()
+    filename.parent.mkdir(parents=True, exist_ok=True)
     service = get_camera_service()
     try:
         result = service.capture_jpeg(str(filename), full=full)
@@ -102,3 +109,17 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
         LOG.exception("Error en la captura: %s", exc)
         return _camera_error_response(500, "camera_failure", str(exc))
     return result
+
+
+@router.get("/last.jpg")
+def camera_last_capture():
+    filename = _capture_file_path()
+    if not filename.exists():
+        return JSONResponse(
+            {"ok": False, "error": "no_capture", "message": "No hay captura disponible"},
+            status_code=404,
+        )
+    response = FileResponse(path=filename, media_type="image/jpeg", filename=filename.name)
+    response.headers["Cache-Control"] = "no-store, private, max-age=0"
+    response.headers.setdefault("Pragma", "no-cache")
+    return response

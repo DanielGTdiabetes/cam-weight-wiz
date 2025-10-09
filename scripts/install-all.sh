@@ -1862,7 +1862,7 @@ server {
 
     # API proxy to FastAPI backend
     location /api/ {
-        proxy_pass http://127.0.0.1:8080/;
+        proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -1888,8 +1888,11 @@ server {
 EOF
 ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
 rm -f /etc/nginx/sites-enabled/default
-nginx -t || warn "Configuración de Nginx con errores"
-systemctl_safe restart nginx
+if nginx -t; then
+  systemctl_safe reload nginx
+else
+  warn "Configuración de Nginx con errores"
+fi
 systemctl_safe enable nginx
 log "✓ Nginx configurado"
 

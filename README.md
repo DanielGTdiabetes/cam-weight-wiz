@@ -83,13 +83,14 @@ Adicionalmente, asegúrate de tener disponibles los paquetes del sistema `python
 
 ### Cámara (Picamera2 + miniweb)
 
-La miniweb en `:8080` expone tres endpoints REST para consultar el estado de la cámara y realizar capturas puntuales:
+La miniweb en `:8080` expone cuatro endpoints REST para consultar el estado de la cámara y realizar capturas puntuales:
 
 | Método | Endpoint | Descripción |
 |--------|----------|-------------|
 | GET | `/api/camera/info` | Devuelve propiedades del sensor detectado (modelo, rotación y resolución nativa). |
 | POST | `/api/camera/capture` | Captura un frame JPEG en memoria y lo devuelve como `image/jpeg`. |
 | POST | `/api/camera/capture-to-file` | Captura un JPEG one-shot (`RGB888`) y lo guarda en `/tmp/camera-capture.jpg`, devolviendo `{ ok, path, full, size }`. |
+| GET | `/api/camera/last.jpg` | Devuelve la última captura almacenada como `image/jpeg`, con cabeceras `Cache-Control: no-store, private`. |
 
 Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
 
@@ -102,7 +103,7 @@ curl -s -X POST http://localhost/api/camera/capture-to-file | jq .
 journalctl -u bascula-miniweb -n 50 --no-pager | grep 'POST /api/camera/capture-to-file' | tail -n 1
 ```
 
-En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y muestra `/tmp/camera-capture.jpg?ts=<epoch_ms>` para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa.
+En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y solicita `/api/camera/last.jpg?ts=<epoch_ms>` para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa y siempre se sirve mediante el proxy `/api/*` de Nginx.
 
 ## API de configuración de red
 
