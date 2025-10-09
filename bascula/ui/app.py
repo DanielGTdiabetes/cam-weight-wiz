@@ -10,6 +10,22 @@ from bascula.ui.screens import HomeScreen, ScaleServiceProtocol, ScanScreen
 from bascula.ui.widgets import SupportsBeep, TimerController
 
 
+class AppUI:
+    """Helper namespace exposing the root ``Tk`` instance."""
+
+    _root: Optional[tk.Tk] = None
+
+    @classmethod
+    def set_root(cls, root: tk.Tk) -> None:
+        cls._root = root
+
+    @classmethod
+    def get_root(cls) -> tk.Tk:
+        if cls._root is None:
+            raise RuntimeError("La instancia Tk principal no se ha inicializado todavía")
+        return cls._root
+
+
 class BasculaApp(tk.Tk):
     """Tk application hosting the weighing and food scanning screens."""
 
@@ -21,6 +37,7 @@ class BasculaApp(tk.Tk):
         app_state: Optional[AppState] = None,
     ) -> None:
         super().__init__()
+        AppUI.set_root(self)
         self.title("Báscula Inteligente")
         self.geometry("600x480")
 
@@ -80,4 +97,4 @@ class BasculaApp(tk.Tk):
         screen.tkraise()
 
 
-__all__ = ["BasculaApp"]
+__all__ = ["AppUI", "BasculaApp"]

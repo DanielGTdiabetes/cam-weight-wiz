@@ -196,3 +196,9 @@ class AppState:
                 listener(snapshot)
             except Exception:
                 continue
+
+    def get_timer_state(self) -> TimerState:
+        """Return the latest timer state snapshot."""
+
+        with self._lock:
+            return self._timer_state
