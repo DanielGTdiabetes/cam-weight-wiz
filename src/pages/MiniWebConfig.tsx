@@ -18,6 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import {
+  Camera,
   Globe,
   Keyboard,
   Loader2,
@@ -163,6 +164,10 @@ export const MiniWebConfig = () => {
   const [nightscoutSaving, setNightscoutSaving] = useState(false);
   const [nightscoutTesting, setNightscoutTesting] = useState(false);
   const [uiRefreshing, setUiRefreshing] = useState(false);
+  const [cameraInfo, setCameraInfo] = useState<Record<string, unknown> | null>(null);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraTesting, setCameraTesting] = useState(false);
 
   const [networks, setNetworks] = useState<WifiNetwork[]>([]);
   const [selectedSsid, setSelectedSsid] = useState("");
@@ -369,6 +374,90 @@ export const MiniWebConfig = () => {
     setStatusRefreshing(false);
     setBusy("settings", false);
   }, [fetchSettings, setBusy]);
+
+  const fetchCameraInfo = useCallback(
+    async (notify = false) => {
+      setCameraLoading(true);
+      try {
+        const response = await fetch(buildUrl("/api/camera/info"), { cache: "no-store" });
+        if (!response.ok) {
+          const payload = await readJson(response);
+          const message =
+            extractMessage(payload) ?? "No se pudo obtener la información de la cámara.";
+          setCameraInfo(null);
+          setCameraError(message);
+          if (notify) {
+            addToast("error", "Cámara no disponible", message);
+          }
+          return false;
+        }
+        const data = (await readJson(response)) as Record<string, unknown> | null;
+        setCameraInfo(data ?? null);
+        setCameraError(null);
+        if (notify) {
+          const model = safeString(
+            (data?.Model as string | undefined) ?? (data?.model as string | undefined),
+          );
+          const text = model ? `Detectada ${model}` : "Información de cámara actualizada.";
+          addToast("success", "Cámara detectada", text);
+        }
+        return true;
+      } catch (error) {
+        const message = "No se pudo obtener la información de la cámara.";
+        setCameraInfo(null);
+        setCameraError(message);
+        if (notify) {
+          addToast("error", "Error de red", message);
+        }
+        return false;
+      } finally {
+        setCameraLoading(false);
+      }
+    },
+    [addToast, buildUrl],
+  );
+
+  useEffect(() => {
+    void fetchCameraInfo(false);
+  }, [fetchCameraInfo]);
+
+  const handleTestCamera = useCallback(async () => {
+    setCameraTesting(true);
+    try {
+      const response = await fetch(buildUrl("/api/camera/test"), { cache: "no-store" });
+      const payload = await readJson(response);
+      if (
+        !response.ok ||
+        !payload ||
+        typeof payload !== "object" ||
+        (payload as { ok?: boolean }).ok === false
+      ) {
+        const record =
+          (payload && typeof payload === "object" ? (payload as Record<string, unknown>) : null) ??
+          null;
+        const message = extractMessage(record) ?? "La prueba de cámara falló.";
+        const rawError =
+          record && typeof record.error === "string" ? (record.error as string) : undefined;
+        const isBusy = rawError === "camera_busy";
+        const toastType: ToastLevel = isBusy ? "warning" : "error";
+        const title = isBusy ? "Cámara ocupada" : "Error al probar";
+        addToast(toastType, title, message);
+        setCameraError(message);
+        return;
+      }
+      const data = payload as Record<string, unknown>;
+      const size = typeof data.size === "number" ? data.size : 0;
+      addToast("success", "Cámara OK", `Cámara OK (${size} bytes)`);
+      setCameraError(null);
+    } catch (error) {
+      const message = "No se pudo ejecutar la prueba de cámara.";
+      addToast("error", "Error de red", message);
+      setCameraError(message);
+    } finally {
+      setCameraTesting(false);
+      void fetchCameraInfo(false);
+    }
+  }, [addToast, buildUrl, fetchCameraInfo]);
 
   useEffect(() => {
     void handleLoadSettings();
@@ -733,6 +822,46 @@ export const MiniWebConfig = () => {
   const apActive = networkStatus?.ap_active === true;
   const offlineMode = networkStatus?.offline_mode ?? settings?.ui?.offline_mode ?? false;
 
+  const cameraModel = useMemo(() => {
+    return safeString(
+      (cameraInfo?.Model as string | undefined) ??
+        (cameraInfo?.model as string | undefined) ??
+        (cameraInfo?.name as string | undefined),
+    );
+  }, [cameraInfo]);
+
+  const cameraRotation = useMemo(() => {
+    const value = (cameraInfo?.Rotation ?? cameraInfo?.rotation) as unknown;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return Math.trunc(value);
+    }
+    if (typeof value === "string" && value.trim().length > 0) {
+      const parsed = Number(value);
+      if (!Number.isNaN(parsed)) {
+        return Math.trunc(parsed);
+      }
+    }
+    return null;
+  }, [cameraInfo]);
+
+  const cameraResolution = useMemo(() => {
+    const raw = (cameraInfo?.PixelArraySize ?? cameraInfo?.pixelArraySize) as unknown;
+    if (Array.isArray(raw) && raw.length >= 2) {
+      const [w, h] = raw;
+      if (typeof w === "number" && typeof h === "number") {
+        return `${w}×${h}`;
+      }
+    }
+    if (typeof raw === "string" && raw.trim().length > 0) {
+      return raw;
+    }
+    return null;
+  }, [cameraInfo]);
+
+  const cameraModelLabel = cameraModel || (cameraError ? "No disponible" : "—");
+  const cameraRotationLabel = cameraRotation !== null ? `${cameraRotation}°` : "—";
+  const cameraResolutionLabel = cameraResolution ?? "—";
+
   const localDevice = useMemo(() => isLocalDevice(), []);
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/40">
@@ -798,6 +927,53 @@ export const MiniWebConfig = () => {
                       aria-label="Alternar modo offline"
                     />
                   </div>
+                </div>
+              </div>
+              <Separator />
+              <div className="space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-2">
+                    <Camera className="h-4 w-4 text-muted-foreground" aria-hidden="true" /> Modelo cámara
+                  </span>
+                  <span className="font-medium text-foreground">{cameraModelLabel}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Rotación</span>
+                  <span className="font-medium text-foreground">{cameraRotationLabel}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-sm text-muted-foreground">Sensor</span>
+                  <span className="font-medium text-foreground">{cameraResolutionLabel}</span>
+                </div>
+                {cameraError && (
+                  <div className="text-sm text-destructive">{cameraError}</div>
+                )}
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void fetchCameraInfo(true)}
+                    disabled={cameraLoading}
+                  >
+                    {cameraLoading ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
+                    )}
+                    Actualizar cámara
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => void handleTestCamera()}
+                    disabled={cameraTesting}
+                  >
+                    {cameraTesting ? (
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                    ) : (
+                      <Camera className="mr-2 h-4 w-4" aria-hidden="true" />
+                    )}
+                    Probar cámara
+                  </Button>
                 </div>
               </div>
               <div className="flex items-center justify-end gap-2 pt-2">
