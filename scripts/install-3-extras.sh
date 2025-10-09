@@ -9,19 +9,12 @@ fi
 echo "[+] Configurando ALSA (mic USB compartido y salida HiFiBerry)"
 cat <<'EOC' > /etc/asound.conf
 ##### ENTRADA (MICRÓFONO USB) — compatible 48 kHz/16 kHz #####
-# Dispositivo físico del micrófono USB (ajusta índices si cambian)
-pcm.raw_mic {
-  type hw
-  card 0
-  device 0
-}
-
-# dsnoop al RATIO NATIVO del USB (48 kHz por defecto; ajusta si tu mic usa otra tasa)
+# Ajusta card/device según tu arecord -l
 pcm.dsnoop_mic {
   type dsnoop
   ipc_key 2048
   slave {
-    pcm "raw_mic"
+    pcm "hw:0,0"
     rate 48000
     channels 1
     format S16_LE
