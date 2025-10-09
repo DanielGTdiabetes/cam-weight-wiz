@@ -23,7 +23,7 @@ export const ScannerView = () => {
     if (!captureTs) {
       return null;
     }
-    return `/api/camera/last.jpg?ts=${captureTs}`;
+    return `/tmp/camera-capture.jpg?ts=${captureTs}`;
   }, [captureTs]);
 
   const handleCapture = useCallback(async () => {

@@ -2,6 +2,7 @@
 Description=Bascula Digital Pro - UI (Chromium kiosk)
 After=systemd-user-sessions.service network-online.target sound.target bascula-miniweb.service
 Wants=network-online.target sound.target bascula-miniweb.service
+Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
 

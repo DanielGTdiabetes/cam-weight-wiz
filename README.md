@@ -40,52 +40,6 @@ Tras el reinicio:
 - El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
 - Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
 
-## Instalación limpia en Raspberry Pi 5
-
-1. Clona el repositorio:
-   ```bash
-   git clone https://github.com/DanielGTdiabetes/cam-weight-wiz
-   cd cam-weight-wiz
-   ```
-
-2. Ejecuta el instalador:
-
-   ```bash
-   sudo bash scripts/install-all.sh
-   ```
-
-3. Verifica el sistema:
-
-   ```bash
-   sudo bash /opt/bascula/check-install.sh
-   ```
-
-Requisitos:
-
-- Raspberry Pi 4 o 5 con dtoverlay=vc4-kms-v3d
-- Python ≥3.11
-- Nginx, Chromium, ALSA activos
-
----
-
-### Gráficos en Raspberry Pi 5
-
-Para Raspberry Pi 5 con Raspberry Pi OS Bookworm (64 bits) mantén el pipeline KMS limpio:
-
-- Asegura `dtoverlay=vc4-kms-v3d-pi5` en `/boot/firmware/config.txt` y elimina overlays genéricos como `vc4-kms-v3d` o `vc4-fkms-v3d`. 【F:scripts/install-all.sh†L130-L188】【F:scripts/install-all.sh†L811-L893】
-- No uses `disable_fw_kms_setup=1`; el instalador lo depura para permitir que el firmware prepare el KMS. 【F:scripts/install-all.sh†L130-L188】
-- Evita archivos forzados en `/etc/X11/xorg.conf.d/` (`*modesetting*.conf`, `*vc4*.conf`); el script los mueve a `.bak` en Pi 5 para que Xorg autodetecte el driver `vc4`. 【F:scripts/install-all.sh†L870-L893】
-
-El instalador verifica que `/dev/dri/card0`, `/dev/fb0` y `vc4-drm` existan y ejecuta `xvfb-run xrandr --listmonitors` (o `modetest -c`) antes de habilitar `bascula-ui.service`. Si algo falla aborta con un mensaje claro y sin activar el kiosk. 【F:scripts/install-all.sh†L548-L669】【F:scripts/install-all.sh†L812-L842】
-
-Tras la instalación puedes hacer un chequeo rápido:
-
-```bash
-ls /dev/dri
-dmesg | grep vc4
-systemctl status bascula-ui
-```
-
 ### Configuración de audio (HifiBerry + micro USB)
 
 El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (dsnoop a 48 kHz → plug `bascula_mix_in`) y mezclar la salida HifiBerry mediante `dmix` (`bascula_out`). 【F:scripts/install-all.sh†L212-L314】
@@ -139,7 +93,7 @@ La miniweb en `:8080` expone tres endpoints REST para consultar el estado de la 
 
 Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
 
-La UI táctil se sirve desde `http://localhost` mediante Nginx. El bloque `location /api/` de `nginx/bascula.conf` actúa como proxy inverso hacia `http://127.0.0.1:8080`, de modo que todas las llamadas `fetch('/api/...')` usan el mismo origen y no disparan CORS en Chromium kiosk. 【F:nginx/bascula.conf†L23-L44】
+La UI táctil se sirve desde `http://localhost` mediante Nginx. El bloque `location /api/` de `nginx/bascula.conf` actúa como proxy inverso hacia `http://127.0.0.1:8080/`, de modo que todas las llamadas `fetch('/api/...')` usan el mismo origen y no disparan CORS en Chromium kiosk. 【F:nginx/bascula.conf†L23-L44】
 
 Para validar el proxy y la captura desde el propio dispositivo:
 

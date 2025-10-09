@@ -20,11 +20,6 @@ warn() { log_warn "$@"; }
 err() { log_err "$@"; }
 fail() { log_err "$*"; exit 1; }
 
-SUDO_BIN=""
-if command -v sudo >/dev/null 2>&1; then
-  SUDO_BIN="sudo"
-fi
-
 disable_cloud_init() {
   local bootcfg_dir="/boot/firmware"
   local mark_file="${bootcfg_dir}/cloud-init.disabled"
@@ -165,66 +160,6 @@ ensure_bootcfg_line() {
   fi
 }
 
-sanitize_pi5_kms_overlays() {
-  local bootcfg="$1"
-  local tmp_file
-
-  if [[ ${IS_PI5:-0} -ne 1 ]]; then
-    return 0
-  fi
-
-  if [[ ! -f "${bootcfg}" ]]; then
-    warn "Pi 5 detectado pero ${bootcfg} no existe para sanear overlays"
-    return 1
-  fi
-
-  tmp_file="${bootcfg}.pi5kms.$$"
-  if awk 'BEGIN {IGNORECASE=1; has_pi5=0}
-    {
-      line=$0
-      trimmed=line
-      gsub(/^[ \t]+|[ \t]+$/, "", trimmed)
-      if (trimmed ~ /^dtoverlay=vc4-kms-v3d-pi5(,|$)/) {
-        if (!has_pi5) {
-          has_pi5=1
-          print line
-        }
-        next
-      }
-      if (trimmed ~ /^disable_fw_kms_setup=1( |$|#)/) {
-        next
-      }
-      if (trimmed ~ /^dtoverlay=vc4-kms-v3d(,|$)/) {
-        next
-      }
-      if (trimmed ~ /^dtoverlay=vc4-fkms-v3d(,|$)/) {
-        next
-      }
-      print line
-    }
-    END {
-      if (!has_pi5) {
-        print "dtoverlay=vc4-kms-v3d-pi5"
-      }
-    }
-  ' "${bootcfg}" > "${tmp_file}"; then
-    if [[ -s "${tmp_file}" ]]; then
-      mv "${tmp_file}" "${bootcfg}"
-      log "[Pi5] dtoverlay=vc4-kms-v3d-pi5 aplicado y conflictos limpiados en ${bootcfg}"
-    else
-      rm -f "${tmp_file}"
-      warn "[Pi5] No se pudo sanear ${bootcfg}; archivo temporal vacío"
-      return 1
-    fi
-  else
-    rm -f "${tmp_file}"
-    warn "[Pi5] No se pudo procesar ${bootcfg} para sanear overlays"
-    return 1
-  fi
-
-  return 0
-}
-
 configure_pi_boot_hardware() {
   local bootcfg="${CONF}"
   local ts="$(date +%Y%m%d-%H%M%S)"
@@ -268,9 +203,6 @@ configure_pi_boot_hardware() {
     printf 'dtoverlay=%s\n' "${dac_name}"
     printf 'camera_auto_detect=1\n'
     printf 'dtoverlay=imx708\n'
-    if [[ ${IS_PI5:-0} -eq 1 ]]; then
-      printf 'dtoverlay=vc4-kms-v3d-pi5\n'
-    fi
     printf '%s\n' "${block_end}"
   } >> "${bootcfg}" || warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
 
@@ -282,14 +214,8 @@ configure_pi_boot_hardware() {
     warn "No se pudo limpiar duplicados en ${bootcfg}"
   fi
 
-  sanitize_pi5_kms_overlays "${bootcfg}" || warn "[Pi5] No se pudo garantizar vc4-kms-v3d-pi5 en ${bootcfg}"
-
   printf '[install] Cámara Picamera2 configurada\n'
-  if [[ ${IS_PI5:-0} -eq 1 ]]; then
-    printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708 + vc4-kms-v3d-pi5). Requiere reboot.\n' "${dac_name}"
-  else
-    printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708). Requiere reboot.\n' "${dac_name}"
-  fi
+  printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708). Requiere reboot.\n' "${dac_name}"
 }
 
 configure_hifiberry_audio() {
@@ -595,7 +521,6 @@ if [[ "${HAS_SYSTEMD}" -eq 0 ]]; then
 fi
 
 ALLOW_SYSTEMD="${ALLOW_SYSTEMD:-1}"
-BASCULA_UI_SMOKE_DONE=0
 
 systemctl_safe() {
   if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
@@ -605,110 +530,6 @@ systemctl_safe() {
   else
     warn "systemd no disponible: systemctl $* omitido"
   fi
-}
-
-verify_pi5_graphics_stack() {
-  local hint="Revisa dtoverlay=vc4-kms-v3d-pi5 y elimina disable_fw_kms_setup=1"
-  local ok=1
-
-  if [[ ${IS_PI5:-0} -ne 1 ]]; then
-    return 0
-  fi
-
-  log "[Pi5] Verificando stack gráfico (vc4-drm + DRM/KMS)..."
-
-  if [[ ! -e /dev/dri/card0 ]]; then
-    log_err "[Pi5][ERROR] Falta /dev/dri/card0. ${hint}"
-    ok=0
-  fi
-
-  if [[ ! -e /dev/fb0 ]]; then
-    log_err "[Pi5][ERROR] Falta /dev/fb0. ${hint}"
-    ok=0
-  fi
-
-  if ! dmesg | grep -qi 'vc4-drm'; then
-    log_err "[Pi5][ERROR] vc4-drm no aparece en dmesg. ${hint}"
-    ok=0
-  fi
-
-  if command -v xvfb-run >/dev/null 2>&1 && command -v xrandr >/dev/null 2>&1; then
-    local monitors_output
-    if monitors_output=$(xvfb-run -a xrandr --listmonitors 2>&1); then
-      log "[Pi5] Monitores detectados vía xrandr --listmonitors:";
-      printf '%s\n' "${monitors_output}"
-    else
-      log_err "[Pi5][ERROR] xrandr --listmonitors falló. ${hint}"
-      printf '%s\n' "${monitors_output}" | sed 's/^/[Pi5][ERROR] /'
-      ok=0
-    fi
-  elif command -v modetest >/dev/null 2>&1; then
-    local modetest_output
-    if modetest_output=$(modetest -c 2>&1); then
-      log "[Pi5] modetest -c ejecutado correctamente"
-      printf '%s\n' "${modetest_output}" | head -n 10 | sed 's/^/[Pi5] /'
-    else
-      log_err "[Pi5][ERROR] modetest -c falló. ${hint}"
-      printf '%s\n' "${modetest_output}" | sed 's/^/[Pi5][ERROR] /'
-      ok=0
-    fi
-  else
-    log_err "[Pi5][ERROR] No se encontró xrandr (con xvfb-run) ni modetest para validar KMS. ${hint}"
-    ok=0
-  fi
-
-  if (( ok == 0 )); then
-    return 1
-  fi
-
-  log "[Pi5] Stack gráfico validado (vc4-drm activo y dispositivos presentes)"
-  return 0
-}
-
-run_post_install_smoke_tests() {
-  local homepage
-  local capture_json
-
-  if [[ ${HAS_SYSTEMD} -ne 1 || ${ALLOW_SYSTEMD:-1} -ne 1 ]]; then
-    warn "[smoke] systemd deshabilitado; omitiendo pruebas de kiosk"
-    return 0
-  fi
-
-  if [[ ${BASCULA_UI_SMOKE_DONE:-0} -eq 1 ]]; then
-    log "[smoke] Pruebas de kiosk ya ejecutadas anteriormente (omitidas)"
-    return 0
-  fi
-
-  log "[smoke] Ejecutando verificación rápida de kiosk/Nginx"
-
-  if ! systemctl restart bascula-miniweb bascula-ui; then
-    fail "[smoke][ERROR] No se pudo reiniciar bascula-miniweb/bascula-ui"
-  fi
-
-  sleep 3
-
-  if ! systemctl is-active --quiet bascula-ui; then
-    fail "[smoke][ERROR] bascula-ui no está activo tras el reinicio"
-  fi
-
-  if ! homepage=$(curl -fsS http://localhost/); then
-    fail "[smoke][ERROR] curl http://localhost/ falló (proxy Nginx no responde)"
-  fi
-
-  if ! printf '%s' "${homepage}" | grep -qi '<html'; then
-    fail "[smoke][ERROR] La respuesta de http://localhost/ no parece HTML"
-  fi
-
-  if ! capture_json=$(curl -fsS -X POST http://localhost/api/camera/capture-to-file); then
-    fail "[smoke][ERROR] POST /api/camera/capture-to-file falló"
-  fi
-
-  if ! printf '%s' "${capture_json}" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
-    fail "[smoke][ERROR] POST /api/camera/capture-to-file no devolvió ok:true"
-  fi
-
-  log "[smoke] Kiosk y API verificados correctamente"
-  BASCULA_UI_SMOKE_DONE=1
 }
 
 configure_bascula_ui_service() {
@@ -797,10 +618,6 @@ EOF
       log_warn "curl no disponible para verificar miniweb"
     fi
 
-    if ! verify_pi5_graphics_stack; then
-      fail "[Pi5] Stack gráfico no listo; se aborta la habilitación de bascula-ui.service"
-    fi
-
     if ! systemctl enable bascula-ui.service; then
       log_err "No se pudo habilitar bascula-ui.service"
       systemctl status bascula-ui.service --no-pager || true
@@ -818,8 +635,6 @@ EOF
       systemctl status bascula-ui --no-pager -l || true
       exit 1
     fi
-
-    run_post_install_smoke_tests
     log "UI activa"
   else
     warn "systemd no disponible o ALLOW_SYSTEMD!=1; se omitió verificación/reinicio de bascula-ui.service"
@@ -975,15 +790,6 @@ if [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "armv7l" ]; then
     warn "No se detectó arquitectura ARM. Este script está diseñado para Raspberry Pi."
 fi
 
-PI_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
-IS_PI5=0
-if printf '%s' "${PI_MODEL}" | grep -q "Raspberry Pi 5"; then
-    IS_PI5=1
-    log "Modelo detectado: ${PI_MODEL} (forzando vc4-kms-v3d-pi5)"
-else
-    [[ -n "${PI_MODEL}" ]] && log "Modelo detectado: ${PI_MODEL}"
-fi
-
 # Update system
 log "[2/20] Actualizando el sistema..."
 if [[ "${NET_OK}" -eq 1 ]]; then
@@ -1001,33 +807,16 @@ fi
 # Install base system packages
 log "[3/20] Instalando dependencias del sistema..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-    if [[ -n "${SUDO_BIN}" ]]; then
-        ${SUDO_BIN} apt-get update
-    else
-        apt-get update
-    fi
-
-    if [[ -n "${SUDO_BIN}" ]]; then
-        ${SUDO_BIN} apt-get install -y \
-            nginx python3-venv python3-dev build-essential libcap-dev \
-            git jq curl unzip tesseract-ocr libtesseract-dev sox alsa-utils \
-            chromium xserver-xorg xinit openbox unclutter psmisc
-    else
-        apt-get install -y \
-            nginx python3-venv python3-dev build-essential libcap-dev \
-            git jq curl unzip tesseract-ocr libtesseract-dev sox alsa-utils \
-            chromium xserver-xorg xinit openbox unclutter psmisc
-    fi
-
     BASE_PACKAGES=(
-        ca-certificates cmake pkg-config python3 python3-pip python3-tk python3-numpy python3-serial
+        git curl ca-certificates build-essential cmake pkg-config
+        python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial
         python3-pil python3-pil.imagetk python3-xdg
-        x11-xserver-utils xserver-xorg-legacy xvfb libdrm-tests
+        x11-xserver-utils xserver-xorg-legacy xinit openbox
         fonts-dejavu-core fonts-noto-core
         libjpeg-dev zlib1g-dev libpng-dev
-        pulseaudio ffmpeg
+        alsa-utils pulseaudio sox ffmpeg
         libzbar0 gpiod python3-rpi.gpio
-        network-manager dnsmasq-base dnsutils sqlite3 tesseract-ocr-spa espeak-ng
+        network-manager dnsmasq-base dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
         uuid-runtime
     )
     if apt_install "${BASE_PACKAGES[@]}"; then
@@ -1055,44 +844,6 @@ if [[ "${NET_OK}" -eq 1 ]]; then
 else
     warn "Sin red: omitiendo la instalación de dependencias base"
     warn "Instala manualmente python3-serial para el backend UART"
-fi
-
-log "Forzando configuración primaria KMS..."
-XORG_DIR="/etc/X11/xorg.conf.d"
-if [[ -n "${SUDO_BIN}" ]]; then
-  ${SUDO_BIN} mkdir -p "${XORG_DIR}"
-else
-  mkdir -p "${XORG_DIR}"
-fi
-XORG_CONF="${XORG_DIR}/10-primary-kms.conf"
-if [[ -n "${SUDO_BIN}" ]]; then
-  ${SUDO_BIN} tee "${XORG_CONF}" >/dev/null <<'EOF'
-Section "Device"
-  Identifier "VC4"
-  Driver "modesetting"
-  Option "AccelMethod" "glamor"
-  Option "PrimaryGPU" "true"
-  Option "kmsdev" "/dev/dri/card0"
-EndSection
-Section "Screen"
-  Identifier "Screen0"
-  Device "VC4"
-EndSection
-EOF
-else
-  tee "${XORG_CONF}" >/dev/null <<'EOF'
-Section "Device"
-  Identifier "VC4"
-  Driver "modesetting"
-  Option "AccelMethod" "glamor"
-  Option "PrimaryGPU" "true"
-  Option "kmsdev" "/dev/dri/card0"
-EndSection
-Section "Screen"
-  Identifier "Screen0"
-  Device "VC4"
-EndSection
-EOF
 fi
 
 CHROME_PKG=""
@@ -1429,24 +1180,21 @@ apt-get autoremove -y || true
 # Remove any fbdev config files
 rm -f /usr/share/X11/xorg.conf.d/*fbdev*.conf /etc/X11/xorg.conf.d/*fbdev*.conf 2>/dev/null || true
 
-if [[ ${IS_PI5:-0} -eq 1 ]]; then
-  log "[Pi5] Eliminando overrides xorg.conf.d existentes para dejar KMS autodetectado"
-  for candidate in /etc/X11/xorg.conf.d/*modesetting*.conf /etc/X11/xorg.conf.d/*vc4*.conf; do
-    [[ -e "${candidate}" ]] || continue
-    if [[ "${candidate}" == *.bak ]]; then
-      log "[Pi5] ${candidate} ya está respaldado"
-      continue
-    fi
-    if mv "${candidate}" "${candidate}.bak"; then
-      log "[Pi5] ${candidate} → ${candidate}.bak"
-    else
-      warn "[Pi5] No se pudo mover ${candidate}"
-    fi
-  done
-  log "[Pi5] Sin overrides forzados en /etc/X11/xorg.conf.d (usando auto-KMS)"
-else
-  install -d -m 0755 /etc/X11/xorg.conf.d
-  cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
+# Force modesetting driver (KMS/DRM) for Raspberry Pi 5
+install -d -m 0755 /etc/X11/xorg.conf.d
+cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
+Section "Device"
+  Identifier "Modesetting"
+  Driver "modesetting"
+  Option "AccelMethod" "glamor"
+EndSection
+EOF
+
+log "✓ Xorg configurado para KMS (modesetting)"
+
+# Configure Xorg to use correct DRM card (vc4 = card1)
+log "[8c/20] Configurando Xorg para usar card1 (vc4)..."
+cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
 Section "Device"
   Identifier "vc4"
   Driver "modesetting"
@@ -1459,8 +1207,7 @@ Section "Screen"
   Device "vc4"
 EndSection
 EOF
-  log "✓ Xorg configurado para DRM card1"
-fi
+log "✓ Xorg configurado para DRM card1"
 
 # Configure Polkit rules
 log "[9/20] Configurando Polkit..."
@@ -1828,46 +1575,68 @@ log "✓ Estructura OTA configurada"
 log "[12/20] Configurando entorno Python..."
 cd "${BASCULA_CURRENT_LINK}"
 if [[ ! -d ".venv" ]]; then
-  python3 -m venv .venv
+  set +e
+  runuser -l "${TARGET_USER}" -c "python3 -m venv '${BASCULA_CURRENT_LINK}/.venv'"
+  create_rc=$?
+  set -e
+  if [[ ${create_rc} -ne 0 ]]; then
+    warn "No se pudo crear la venv como ${TARGET_USER}; intentando como root"
+    python3 -m venv .venv
+  fi
 fi
-
 VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
+VENV_PY="${VENV_DIR}/bin/python"
+VENV_PIP="${VENV_DIR}/bin/pip"
 
-if [[ ! -f "${VENV_DIR}/bin/activate" ]]; then
-  fail "Entorno virtual inválido en ${VENV_DIR}"
+# Allow venv to see system packages (picamera2)
+VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
+if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
+  echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
 fi
-
-# shellcheck disable=SC1091
-source "${VENV_DIR}/bin/activate"
 
 export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BINARY=1
 export PIP_INDEX_URL="https://www.piwheels.org/simple"
 export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
 
+REQUIREMENTS_FILE="${BASCULA_CURRENT_LINK}/requirements.txt"
+
 if [[ "${NET_OK}" -eq 1 ]]; then
-  pip install --upgrade pip
-  if [[ -f "requirements.txt" ]]; then
-    pip install -r requirements.txt
+  if ! sudo -H -u "${TARGET_USER}" env \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    PIP_PREFER_BINARY=1 \
+    PIP_INDEX_URL="${PIP_INDEX_URL}" \
+    PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
+    "${VENV_PY}" -m pip install --upgrade pip wheel setuptools; then
+    fail "No se pudo actualizar pip/wheel/setuptools en la venv"
+  fi
+  if [[ -f "${REQUIREMENTS_FILE}" ]]; then
+    if ! sudo -H -u "${TARGET_USER}" env \
+      PIP_DISABLE_PIP_VERSION_CHECK=1 \
+      PIP_ROOT_USER_ACTION=ignore \
+      PIP_PREFER_BINARY=1 \
+      PIP_INDEX_URL="${PIP_INDEX_URL}" \
+      PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
+      "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
+      fail "No se pudieron instalar las dependencias Python desde requirements.txt"
+    fi
   else
-    warn "requirements.txt no encontrado en ${BASCULA_CURRENT_LINK}"
+    fail "No se encontró ${REQUIREMENTS_FILE}; instala las dependencias manualmente"
   fi
 else
-  warn "Sin red: omitiendo actualización de pip y pip install -r requirements.txt"
+  warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
 fi
 
-python - <<'PY'
+if ! sudo -H -u "${TARGET_USER}" "${VENV_PY}" - <<'PY'
 import rapidfuzz
 import fastapi
 import uvicorn
+print("py_deps_ok")
 PY
-
-deactivate
-
-VENV_PY="${VENV_DIR}/bin/python"
-VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
-if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
-  echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
+then
+  err "[ERROR] Dependencias Python faltantes"
+  exit 1
 fi
 
 log "✓ Entorno Python configurado"
@@ -2062,20 +1831,63 @@ fi
 
 # Install and configure Nginx
 log "[16/20] Instalando y configurando Nginx..."
+if [[ "${NET_OK}" -eq 1 ]]; then
+  if ! apt-get install -y nginx; then
+    warn "No se pudo instalar Nginx"
+  fi
+else
+  warn "Sin red: omitiendo instalación de Nginx"
+fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
-if [[ -n "${SUDO_BIN}" ]]; then
-  ${SUDO_BIN} cp "${PROJECT_ROOT}/nginx/bascula.conf" /etc/nginx/sites-available/bascula
-else
-  cp "${PROJECT_ROOT}/nginx/bascula.conf" /etc/nginx/sites-available/bascula
-fi
-if [[ -n "${SUDO_BIN}" ]]; then
-  ${SUDO_BIN} ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
-  ${SUDO_BIN} rm -f /etc/nginx/sites-enabled/default
-else
-  ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
-  rm -f /etc/nginx/sites-enabled/default
-fi
+cat > /etc/nginx/sites-available/bascula <<EOF
+server {
+    listen 80 default_server;
+    server_name _;
+    root ${BASCULA_CURRENT_LINK}/dist;
+    index index.html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # API proxy to FastAPI backend
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \$host;
+        proxy_cache_bypass \$http_upgrade;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host \$host;
+    }
+}
+EOF
+ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
+rm -f /etc/nginx/sites-enabled/default
 nginx -t || warn "Configuración de Nginx con errores"
 systemctl_safe restart nginx
 systemctl_safe enable nginx
@@ -2209,6 +2021,7 @@ else
 Description=Bascula Digital Pro - UI (Chromium kiosk)
 After=systemd-user-sessions.service network-online.target sound.target bascula-miniweb.service
 Wants=network-online.target sound.target bascula-miniweb.service
+Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
 
@@ -2288,20 +2101,6 @@ log "[20/20] Ajustando permisos finales..."
 install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /var/log/bascula
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}" /opt/ocr-service
 log "✓ Permisos ajustados"
-
-echo "== Post-install checks =="
-install -d -m 0755 "${BASCULA_ROOT}"
-cat >"${BASCULA_ROOT}/check-install.sh" <<'CHECK'
-#!/bin/bash
-echo "1) Verificando Nginx..."
-which nginx || echo "Nginx no instalado"
-echo "2) Verificando backend..."
-curl -s http://127.0.0.1:8080/health || echo "Backend no responde"
-echo "3) Verificando API cámara..."
-curl -s -X POST http://127.0.0.1:8080/api/camera/capture-to-file | jq .
-curl -sI http://127.0.0.1:8080/api/camera/last.jpg | grep -i 'Content-Type'
-CHECK
-chmod +x "${BASCULA_ROOT}/check-install.sh"
 
 post_install_hardware_checks
 
