@@ -236,19 +236,12 @@ configure_hifiberry_audio() {
 # ===========================
 
 ##### ENTRADA (MICRÓFONO USB) — compatible 48 kHz/16 kHz #####
-# Dispositivo físico del micrófono USB (ajusta índices si cambian)
-pcm.raw_mic {
-  type hw
-  card 0
-  device 0
-}
-
-# dsnoop al RATIO NATIVO del USB (48 kHz por defecto; ajusta si tu mic usa otra tasa)
+# Ajusta card/device según tu arecord -l
 pcm.dsnoop_mic {
   type dsnoop
   ipc_key 2048
   slave {
-    pcm "raw_mic"
+    pcm "hw:0,0"
     rate 48000
     channels 1
     format S16_LE
@@ -2494,16 +2487,13 @@ fi
 
 echo "== PRUEBA CÁMARA =="
 if command -v jq >/dev/null 2>&1; then
-  if ! curl -sf -X POST http://localhost:8080/api/camera/capture-to-file | jq .; then
-    echo "[WARN] Falló la captura o el formateo JSON de la respuesta"
-  fi
+  curl -fsS -X POST http://localhost:8080/api/camera/capture-to-file | jq . \
+    || echo "[WARN] cámara no disponible o backend no iniciado"
 else
   echo "[WARN] jq no encontrado; omitiendo formateo JSON"
-  if ! curl -sf -X POST http://localhost:8080/api/camera/capture-to-file; then
-    echo "[WARN] Falló la captura de la cámara"
-  fi
+  curl -fsS -X POST http://localhost:8080/api/camera/capture-to-file \
+    || echo "[WARN] cámara no disponible o backend no iniciado"
 fi
 
-if ! curl -sfI http://localhost/tmp/camera-capture.jpg; then
-  echo "[WARN] No se pudo obtener la cabecera de la captura de cámara"
-fi
+curl -fsSI http://localhost/tmp/camera-capture.jpg \
+  || echo "[WARN] cámara no disponible o backend no iniciado"
