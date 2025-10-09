@@ -2490,5 +2490,17 @@ fi
 # speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1
 
 echo "== PRUEBA CÁMARA =="
-curl -s -X POST http://localhost:8080/api/camera/capture-to-file | jq .
-curl -I http://localhost/tmp/camera-capture.jpg
+if command -v jq >/dev/null 2>&1; then
+  if ! curl -sf -X POST http://localhost:8080/api/camera/capture-to-file | jq .; then
+    echo "[WARN] Falló la captura o el formateo JSON de la respuesta"
+  fi
+else
+  echo "[WARN] jq no encontrado; omitiendo formateo JSON"
+  if ! curl -sf -X POST http://localhost:8080/api/camera/capture-to-file; then
+    echo "[WARN] Falló la captura de la cámara"
+  fi
+fi
+
+if ! curl -sfI http://localhost/tmp/camera-capture.jpg; then
+  echo "[WARN] No se pudo obtener la cabecera de la captura de cámara"
+fi
