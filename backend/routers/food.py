@@ -12,7 +12,18 @@ from typing import Any, Dict, Optional
 import requests
 from fastapi import APIRouter, HTTPException
 from PIL import Image
-from pydantic import BaseModel, Field, validator
+try:
+    from pydantic import BaseModel, Field, field_validator, conint
+except Exception:  # pragma: no cover - fallback for Pydantic v1
+    from pydantic.v1 import BaseModel, Field, validator as field_validator, conint
+
+ConfigDict = None
+try:  # pragma: no cover - ConfigDict only exists in Pydantic v2
+    from pydantic import ConfigDict as _ConfigDict
+except Exception:
+    pass
+else:
+    ConfigDict = _ConfigDict
 from pyzbar.pyzbar import Decoded, decode
 
 import pytesseract
@@ -22,8 +33,6 @@ CAMERA_CAPTURE_ENDPOINT = "http://127.0.0.1:8080/api/camera/capture-to-file"
 SCALE_WEIGHT_ENDPOINT = "http://127.0.0.1:8080/api/scale/weight"
 TTS_ENDPOINT = "http://127.0.0.1:8080/api/voice/tts/say"
 OPENFOODFACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
-
-VALID_ROTATIONS = {0, 90, 180, 270}
 
 router = APIRouter()
 
@@ -35,16 +44,23 @@ class ScanRequest(BaseModel):
         default=None,
         description="Existing image path to reuse instead of taking a new capture.",
     )
-    rotate: int = Field(
+    rotate: conint(ge=0, le=270) = Field(
         default=0,
         description="Rotation angle in degrees applied before processing (0/90/180/270).",
     )
 
-    @validator("rotate")
-    def validate_rotation(cls, value: int) -> int:  # noqa: D417
-        if value not in VALID_ROTATIONS:
-            raise ValueError(f"rotate must be one of {sorted(VALID_ROTATIONS)}")
+    @field_validator("rotate")
+    def _rotate_multiple_of_90(cls, value: int) -> int:  # noqa: D417,N805
+        if value % 90 != 0:
+            raise ValueError("rotate must be a multiple of 90 (0, 90, 180, 270)")
         return value
+
+    if ConfigDict is not None:  # pragma: no cover - attribute differs across Pydantic versions
+        model_config = ConfigDict(extra="ignore")
+    else:  # pragma: no cover - fallback for Pydantic v1
+
+        class Config:
+            extra = "ignore"
 
 
 @dataclass
