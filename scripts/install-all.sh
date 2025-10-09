@@ -228,13 +228,70 @@ configure_hifiberry_audio() {
   fi
 
   cat > "${asound_conf}" <<'EOF'
-defaults.pcm.card 1
-defaults.ctl.card 1
-pcm.!default {
-  type plug
-  slave.pcm "hw:1,0"
+##### ENTRADA (MICRÓFONO USB) #####
+# Dispositivo físico del micrófono USB (ajustar según `arecord -l`).
+pcm.raw_mic {
+  type hw
+  card 0
+  device 0
 }
-ctl.!default {
+
+# dsnoop a 48 kHz (nativo del USB) para acceso simultáneo (Basculín + Recetas)
+pcm.dsnoop_mic {
+  type dsnoop
+  ipc_key 2048
+  slave {
+    pcm "raw_mic"
+    format S16_LE
+    rate 48000
+    channels 1
+    period_time 0
+    period_size 1024
+    buffer_size 4096
+  }
+}
+
+# plug que adapta automáticamente la tasa que pidan las apps (ej. 16 kHz)
+pcm.bascula_mix_in {
+  type plug
+  slave.pcm "dsnoop_mic"
+}
+
+ctl.bascula_mix_in {
+  type hw
+  card 0
+}
+
+##### SALIDA (HIFIBERRY DAC) #####
+# Ajusta la card del DAC si difiere (ver `aplay -l`). En nuestros equipos suele ser card 1, device 0.
+pcm.raw_dac {
+  type hw
+  card 1
+  device 0
+}
+
+# dmix para permitir múltiples clientes de salida simultáneos
+pcm.dmix_dac {
+  type dmix
+  ipc_key 2049
+  slave {
+    pcm "raw_dac"
+    format S16_LE
+    rate 44100
+    channels 2
+    period_time 0
+    period_size 1024
+    buffer_size 4096
+  }
+}
+
+# plug para adaptar cualquier formato a lo que acepte dmix_dac
+pcm.bascula_out {
+  type plug
+  slave.pcm "dmix_dac"
+}
+
+ctl.bascula_out {
   type hw
   card 1
 }
@@ -248,7 +305,7 @@ EOF
     warn "alsactl no disponible; no se guardó el estado de audio"
   fi
 
-  printf '[install] Audio (HifiBerry DAC) configurado\n'
+  printf '[install] Audio (HifiBerry DAC + mic USB compartido) configurado\n'
 }
 
 configure_usb_microphone() {
@@ -266,6 +323,90 @@ configure_usb_microphone() {
   amixer -c 0 set 'Auto Gain Control' on >/dev/null 2>&1 || true
 
   printf '[install] Micrófono USB configurado con ganancia máxima\n'
+}
+
+configure_miniweb_audio_env() {
+  local override_dir="/etc/systemd/system/bascula-miniweb.service.d"
+  local override_file="${override_dir}/21-audio.conf"
+
+  install -d -m 0755 "${override_dir}"
+
+  cat > "${override_file}" <<'EOF'
+[Service]
+# Entrada (micro compartido → 16 kHz vía plug)
+Environment=BASCULA_MIC_DEVICE=bascula_mix_in
+Environment=BASCULA_SAMPLE_RATE=16000
+
+# Salida (HiFiBerry con dmix/plug)
+Environment=BASCULA_AUDIO_DEVICE=bascula_out
+EOF
+
+  printf '[install] Override de audio para bascula-miniweb.service aplicado\n'
+}
+
+run_audio_io_self_tests() {
+  local restart_service="${1:-1}"
+  local mic_test="/tmp/alsa_mic_test.wav"
+  log "Verificando MIC (arecord a 16 kHz vía bascula_mix_in)"
+
+  if command -v arecord >/dev/null 2>&1; then
+    if arecord -q -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 "${mic_test}"; then
+      log "[OK] MIC grabó correctamente: ${mic_test}"
+    else
+      warn "MIC no disponible. Revisa /etc/asound.conf y arecord -l"
+    fi
+  else
+    warn "arecord no disponible; omitiendo prueba de micrófono"
+  fi
+
+  if [[ "${restart_service}" -eq 1 ]]; then
+    if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+      log "Reiniciando bascula-miniweb para aplicar audio I/O"
+      if systemctl restart bascula-miniweb; then
+        sleep 2
+      else
+        warn "No se pudo reiniciar bascula-miniweb"
+      fi
+    else
+      warn "systemd no disponible o ALLOW_SYSTEMD!=1; no se reinició bascula-miniweb"
+    fi
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    log "Comprobando wake status"
+    if curl -s http://localhost:8080/api/voice/wake/status | grep -q '"running":true'; then
+      log "[OK] Wake activo y escuchando"
+    else
+      warn "Wake no activo. Revisa logs y envs"
+    fi
+  else
+    warn "curl no disponible; omitiendo comprobación de wake"
+  fi
+
+  log "Verificando SALIDA (HiFiBerry) con aplay/speaker-test"
+  if command -v aplay >/dev/null 2>&1; then
+    local front_center="/usr/share/sounds/alsa/Front_Center.wav"
+    if [[ -f "${front_center}" ]]; then
+      if aplay -q -D bascula_out "${front_center}"; then
+        log "[OK] Salida HiFiBerry reproducida (Front_Center.wav)"
+        return
+      else
+        warn "aplay falló con Front_Center.wav; probando speaker-test"
+      fi
+    fi
+  else
+    warn "aplay no disponible; omitiendo prueba inicial de salida"
+  fi
+
+  if command -v speaker-test >/dev/null 2>&1; then
+    if speaker-test -D bascula_out -t sine -f 440 -l 1 >/dev/null 2>&1; then
+      log "[OK] Tono reproducido en bascula_out"
+    else
+      warn "Falló la reproducción en bascula_out"
+    fi
+  else
+    warn "speaker-test no disponible; no se pudo validar la salida"
+  fi
 }
 
 post_install_hardware_checks() {
@@ -1962,6 +2103,8 @@ install_services() {
     install -m 0644 systemd/tmpfiles.d/bascula-x11.conf /etc/tmpfiles.d/bascula-x11.conf
   fi
 
+  configure_miniweb_audio_env
+
   if [[ "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
     systemctl daemon-reload
     systemctl disable --now bascula-app.service 2>/dev/null || true
@@ -2000,6 +2143,7 @@ if [[ ${SERVICES_INSTALLED} -eq 1 && "${HAS_SYSTEMD}" -eq 1 ]]; then
       err "[ERROR] miniweb no responde"
       exit 1
     fi
+    run_audio_io_self_tests 0
   else
     err "[ERROR] No se pudo reiniciar bascula-miniweb"
     exit 1
