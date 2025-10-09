@@ -17,6 +17,16 @@ try:  # pragma: no cover - dependency available only on target device
 except ImportError:  # pragma: no cover - runtime fallback when camera lib missing
     Picamera2 = None  # type: ignore[misc]
 
+try:  # pragma: no cover - dependency available only on target device
+    from libcamera import Transform
+except ImportError:  # pragma: no cover - runtime fallback when camera lib missing
+    class Transform:  # type: ignore[misc,override]
+        """Fallback Transform stub used when libcamera is unavailable."""
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # noqa: D401 - simple stub
+            self.args = args
+            self.kwargs = kwargs
+
 
 LOG_CAMERA = logging.getLogger("bascula.camera")
 
@@ -55,7 +65,7 @@ class Picamera2Service:
         self._configs: Dict[str, Any] = {}
         self._active_config: Optional[str] = None
         self._properties: Dict[str, Any] = {}
-        self._transform: Dict[str, Any] = {}
+        self._transform: Optional[Transform] = None
         self._warmup_delay = 0.2  # 200 ms para estabilizar tras iniciar la cámara
         self._closed = False
         LOG_CAMERA.debug("Picamera2Service inicializado")
@@ -86,10 +96,7 @@ class Picamera2Service:
                 raise CameraUnavailableError(str(exc)) from exc
             self._properties = dict(getattr(camera, "camera_properties", {}) or {})
             rotation = self._resolve_rotation(self._properties.get("Rotation"))
-            if rotation:
-                self._transform = {"rotation": rotation}
-            else:
-                self._transform = {}
+            self._transform = self._build_transform(rotation)
             self._camera = camera
             self._configs.clear()
             self._active_config = None
@@ -108,6 +115,17 @@ class Picamera2Service:
                 return rotation
         return None
 
+    def _build_transform(self, rotation: Optional[int]) -> Transform:
+        try:
+            normalized = 0 if rotation is None else int(rotation) % 360
+        except (TypeError, ValueError):
+            normalized = 0
+        if normalized == 180:
+            LOG_CAMERA.info("camera transform: hflip+vflip (rotation 180)")
+            return Transform(hflip=1, vflip=1)
+        LOG_CAMERA.info("camera transform: identity")
+        return Transform()
+
     def _config_key(self, full: bool) -> str:
         return "full" if full else "fast"
 
@@ -116,7 +134,11 @@ class Picamera2Service:
         if key in self._configs:
             return self._configs[key]
         size = (4608, 2592) if full else (2304, 1296)
-        config = camera.create_still_configuration(main={"size": size}, transform=self._transform or None)
+        transform = self._transform or Transform()
+        if full:
+            config = camera.create_still_configuration(main={"size": size}, transform=transform)
+        else:
+            config = camera.create_preview_configuration(main={"size": size}, transform=transform)
         self._configs[key] = config
         LOG_CAMERA.debug("Configuración creada para %s: %s", key, size)
         return config

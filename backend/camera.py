@@ -66,15 +66,17 @@ def camera_capture(full: bool = Query(False, description="Captura en resolución
     return Response(content=data, media_type="image/jpeg")
 
 
-@router.get("/test")
-def camera_test(full: bool = Query(False, description="Probar captura en modo completo")):
+@router.api_route("/test", methods=["GET", "POST"])
+def camera_test():
     try:
-        data = _capture_bytes(full=full)
+        data = _capture_bytes(full=False)
     except HTTPException as exc:
         payload = exc.detail if isinstance(exc.detail, dict) else {"error": "camera_failure"}
         payload.setdefault("ok", False)
         return JSONResponse(payload, status_code=exc.status_code)
-    return {"ok": True, "size": len(data), "full": full}
+    if not data:
+        return JSONResponse({"ok": False, "error": "camera_failure"}, status_code=500)
+    return {"ok": True, "size": len(data)}
 
 
 @router.post("/capture-to-file")
