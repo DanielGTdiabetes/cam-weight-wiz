@@ -344,14 +344,120 @@ EOF
   printf '[install] Override de audio para bascula-miniweb.service aplicado\n'
 }
 
+log_env_audio() {
+  if [[ "${HAS_SYSTEMD}" -ne 1 ]]; then
+    warn "systemd no disponible; no se puede inspeccionar entorno de bascula-miniweb"
+    return
+  fi
+
+  log "Inspeccionando entorno de audio de bascula-miniweb"
+
+  local env_output
+  if ! env_output=$(systemctl show -p Environment bascula-miniweb 2>/dev/null); then
+    warn "No se pudo obtener entorno de bascula-miniweb"
+    return
+  fi
+
+  env_output=${env_output#Environment=}
+  if [[ -z "${env_output}" ]]; then
+    warn "variables de audio no presentes en entorno de bascula-miniweb"
+    return
+  fi
+
+  local env_lines
+  env_lines=$(printf '%s' "${env_output}" | tr ' ' '\n')
+
+  local audio_dev mic_dev sample_rate
+  audio_dev=$(printf '%s\n' "${env_lines}" | sed -n 's/^BASCULA_AUDIO_DEVICE=//p' | head -n1)
+  mic_dev=$(printf '%s\n' "${env_lines}" | sed -n 's/^BASCULA_MIC_DEVICE=//p' | head -n1)
+  sample_rate=$(printf '%s\n' "${env_lines}" | sed -n 's/^BASCULA_SAMPLE_RATE=//p' | head -n1)
+
+  if [[ -z "${audio_dev}" || -z "${mic_dev}" || -z "${sample_rate}" ]]; then
+    warn "variables de audio no presentes en entorno de bascula-miniweb"
+  else
+    printf '[inst] BASCULA_AUDIO_DEVICE=%s\n' "${audio_dev}"
+    printf '[inst] BASCULA_MIC_DEVICE=%s\n' "${mic_dev}"
+    printf '[inst] BASCULA_SAMPLE_RATE=%s\n' "${sample_rate}"
+  fi
+}
+
+check_playback() {
+  log "Verificando SALIDA (HiFiBerry) con aplay/speaker-test"
+
+  if ! command -v aplay >/dev/null 2>&1; then
+    warn "aplay no disponible; omitiendo prueba de salida"
+    return
+  fi
+
+  local cmd_bascula_out=(aplay -D bascula_out -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
+  if "${cmd_bascula_out[@]}"; then
+    printf '[inst][ok] salida OK via bascula_out\n'
+    return
+  fi
+
+  warn "aplay falló via bascula_out (intento 1); reintentando en 2s"
+  sleep 2
+  if "${cmd_bascula_out[@]}"; then
+    printf '[inst][ok] salida OK via bascula_out\n'
+    return
+  fi
+
+  warn "aplay falló via bascula_out tras reintento; probando hw:1,0"
+  local cmd_hw_fallback=(aplay -D hw:1,0 -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
+  if "${cmd_hw_fallback[@]}"; then
+    printf '[inst][ok] salida OK via hw:1,0 (fallback)\n'
+    return
+  fi
+
+  if command -v speaker-test >/dev/null 2>&1; then
+    warn "aplay falló via hw:1,0; probando speaker-test"
+    if speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1; then
+      log "speaker-test completado tras reintentos"
+      printf '[inst][ok] salida OK via bascula_out\n'
+      return
+    fi
+  else
+    warn "speaker-test no disponible; omitiendo prueba de tono"
+  fi
+
+  warn "reproducción falló en bascula_out y hw:1,0"
+}
+
 run_audio_io_self_tests() {
   local restart_service="${1:-1}"
+  local waited_param="${2:-0}"
   local mic_test="/tmp/alsa_mic_test.wav"
-  log "Verificando MIC (arecord a 16 kHz vía bascula_mix_in)"
+  local waited=0
 
+  if [[ "${restart_service}" -eq 1 ]]; then
+    if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+      log "Recargando systemd y reiniciando bascula-miniweb para aplicar audio I/O"
+      if systemctl daemon-reload; then
+        if systemctl restart bascula-miniweb; then
+          sleep 5
+          waited=1
+        else
+          warn "No se pudo reiniciar bascula-miniweb"
+        fi
+      else
+        warn "systemctl daemon-reload falló"
+      fi
+    else
+      warn "systemd no disponible o ALLOW_SYSTEMD!=1; no se reinició bascula-miniweb"
+    fi
+  fi
+
+  if [[ "${waited}" -eq 0 && "${waited_param}" -eq 0 ]]; then
+    sleep 5
+    waited=1
+  fi
+
+  log_env_audio
+
+  log "Verificando MIC (arecord a 16 kHz vía bascula_mix_in)"
   if command -v arecord >/dev/null 2>&1; then
     if arecord -q -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 "${mic_test}"; then
-      log "[OK] MIC grabó correctamente: ${mic_test}"
+      printf '[inst][ok] MIC grabó correctamente: %s\n' "${mic_test}"
     else
       warn "MIC no disponible. Revisa /etc/asound.conf y arecord -l"
     fi
@@ -359,23 +465,10 @@ run_audio_io_self_tests() {
     warn "arecord no disponible; omitiendo prueba de micrófono"
   fi
 
-  if [[ "${restart_service}" -eq 1 ]]; then
-    if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-      log "Reiniciando bascula-miniweb para aplicar audio I/O"
-      if systemctl restart bascula-miniweb; then
-        sleep 2
-      else
-        warn "No se pudo reiniciar bascula-miniweb"
-      fi
-    else
-      warn "systemd no disponible o ALLOW_SYSTEMD!=1; no se reinició bascula-miniweb"
-    fi
-  fi
-
   if command -v curl >/dev/null 2>&1; then
     log "Comprobando wake status"
     if curl -s http://localhost:8080/api/voice/wake/status | grep -q '"running":true'; then
-      log "[OK] Wake activo y escuchando"
+      printf '[inst][ok] Wake activo y escuchando\n'
     else
       warn "Wake no activo. Revisa logs y envs"
     fi
@@ -383,30 +476,7 @@ run_audio_io_self_tests() {
     warn "curl no disponible; omitiendo comprobación de wake"
   fi
 
-  log "Verificando SALIDA (HiFiBerry) con aplay/speaker-test"
-  if command -v aplay >/dev/null 2>&1; then
-    local front_center="/usr/share/sounds/alsa/Front_Center.wav"
-    if [[ -f "${front_center}" ]]; then
-      if aplay -q -D bascula_out "${front_center}"; then
-        log "[OK] Salida HiFiBerry reproducida (Front_Center.wav)"
-        return
-      else
-        warn "aplay falló con Front_Center.wav; probando speaker-test"
-      fi
-    fi
-  else
-    warn "aplay no disponible; omitiendo prueba inicial de salida"
-  fi
-
-  if command -v speaker-test >/dev/null 2>&1; then
-    if speaker-test -D bascula_out -t sine -f 440 -l 1 >/dev/null 2>&1; then
-      log "[OK] Tono reproducido en bascula_out"
-    else
-      warn "Falló la reproducción en bascula_out"
-    fi
-  else
-    warn "speaker-test no disponible; no se pudo validar la salida"
-  fi
+  check_playback
 }
 
 post_install_hardware_checks() {
@@ -2137,16 +2207,26 @@ else
 fi
 
 if [[ ${SERVICES_INSTALLED} -eq 1 && "${HAS_SYSTEMD}" -eq 1 ]]; then
+  systemctl daemon-reload || warn "systemctl daemon-reload falló"
   if systemctl restart bascula-miniweb; then
-    sleep 3
+    sleep 5
     if ! curl -fsS http://127.0.0.1:8080/health >/dev/null; then
       err "[ERROR] miniweb no responde"
       exit 1
     fi
-    run_audio_io_self_tests 0
+    run_audio_io_self_tests 0 1
   else
     err "[ERROR] No se pudo reiniciar bascula-miniweb"
     exit 1
   fi
 fi
 # --- Fin bloque ---
+# Pruebas manuales de referencia:
+# Ver entorno del servicio
+# systemctl show -p Environment bascula-miniweb
+# Probar reproducción con alias
+# aplay -D bascula_out -r 44100 -f S16_LE -c 2 -d 1 /dev/zero
+# Probar fallback directo
+# aplay -D hw:1,0 -r 44100 -f S16_LE -c 2 -d 1 /dev/zero
+# Tono de 1 kHz (verificación fina)
+# speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1
