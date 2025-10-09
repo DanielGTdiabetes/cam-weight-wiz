@@ -23,6 +23,6 @@ def test_openapi_includes_camera_routes() -> None:
     assert "post" in capture_to_file
     assert "get" not in capture_to_file
 
-    assert "/api/camera/last.jpg" in paths
-    last_jpg = paths["/api/camera/last.jpg"]
-    assert "get" in last_jpg
+    assert "/api/camera/last" in paths
+    last_route = paths["/api/camera/last"]
+    assert "get" in last_route

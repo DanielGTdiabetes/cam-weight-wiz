@@ -104,7 +104,7 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
     return result
 
 
-@router.get("/last.jpg")
+@router.get("/last")
 def camera_last_capture():
     """Devuelve el último archivo de captura almacenado en /tmp."""
     tmp_dir = Path(os.getenv("TMPDIR", "/tmp"))
