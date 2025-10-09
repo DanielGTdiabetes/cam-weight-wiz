@@ -231,74 +231,64 @@ configure_hifiberry_audio() {
   fi
 
   cat > "${asound_conf}" <<'EOF'
+# ===========================
+# Báscula Digital Pro - Audio Config (verificada)
+# ===========================
+
 ##### ENTRADA (MICRÓFONO USB) #####
-# Dispositivo físico del micrófono USB (ajustar según `arecord -l`).
-pcm.raw_mic {
-  type hw
-  card 0
-  device 0
-}
-
-# dsnoop a 48 kHz (nativo del USB) para acceso simultáneo (Basculín + Recetas)
+# Micrófono USB (card 0)
 pcm.dsnoop_mic {
-  type dsnoop
-  ipc_key 2048
-  slave {
-    pcm "raw_mic"
-    format S16_LE
-    rate 48000
-    channels 1
-    period_time 0
-    period_size 1024
-    buffer_size 4096
-  }
+    type dsnoop
+    ipc_key 2048
+    slave {
+        pcm "hw:0,0"
+        rate 16000
+        channels 1
+        format S16_LE
+    }
 }
 
-# plug que adapta automáticamente la tasa que pidan las apps (ej. 16 kHz)
 pcm.bascula_mix_in {
-  type plug
-  slave.pcm "dsnoop_mic"
+    type plug
+    slave.pcm "dsnoop_mic"
 }
 
 ctl.bascula_mix_in {
-  type hw
-  card 0
+    type hw
+    card 0
 }
 
 ##### SALIDA (HIFIBERRY DAC) #####
-# Ajusta la card del DAC si difiere (ver `aplay -l`). En nuestros equipos suele ser card 1, device 0.
-pcm.raw_dac {
-  type hw
-  card 1
-  device 0
-}
-
-# dmix para permitir múltiples clientes de salida simultáneos
-pcm.dmix_dac {
-  type dmix
-  ipc_key 2049
-  slave {
-    pcm "raw_dac"
-    format S16_LE
-    rate 44100
-    channels 2
-    period_time 0
-    period_size 1024
-    buffer_size 4096
-  }
-}
-
-# plug para adaptar cualquier formato a lo que acepte dmix_dac
+# HiFiBerry DAC (card 1)
 pcm.bascula_out {
-  type plug
-  slave.pcm "dmix_dac"
+    type plug
+    slave.pcm "plughw:CARD=sndrpihifiberry,DEV=0"
 }
 
 ctl.bascula_out {
-  type hw
-  card 1
+    type hw
+    card 1
+}
+
+# Alias globales
+pcm.!default {
+    type plug
+    slave.pcm "bascula_out"
+}
+
+ctl.!default {
+    type hw
+    card 1
 }
 EOF
+
+  if command -v aplay >/dev/null 2>&1; then
+    if aplay -L | grep -q 'plughw:CARD=sndrpihifiberry,DEV=0'; then
+      printf '[ok] HiFiBerry detectado\n'
+    else
+      printf '[warn] DAC no encontrado\n'
+    fi
+  fi
 
   if command -v alsactl >/dev/null 2>&1; then
     if ! alsactl store >/dev/null 2>&1; then
@@ -336,13 +326,18 @@ configure_miniweb_audio_env() {
 
   cat > "${override_file}" <<'EOF'
 [Service]
-# Entrada (micro compartido → 16 kHz vía plug)
-Environment=BASCULA_MIC_DEVICE=bascula_mix_in
-Environment=BASCULA_SAMPLE_RATE=16000
-
-# Salida (HiFiBerry con dmix/plug)
-Environment=BASCULA_AUDIO_DEVICE=bascula_out
+Environment="BASCULA_AUDIO_DEVICE=bascula_out"
+Environment="BASCULA_MIC_DEVICE=bascula_mix_in"
+Environment="BASCULA_SAMPLE_RATE=16000"
 EOF
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reexec || warn "systemctl daemon-reexec falló"
+    systemctl daemon-reload || warn "systemctl daemon-reload falló"
+    systemctl restart bascula-miniweb || warn "No se pudo reiniciar bascula-miniweb"
+  else
+    warn "systemctl no disponible; no se pudo aplicar override de audio"
+  fi
 
   printf '[install] Override de audio para bascula-miniweb.service aplicado\n'
 }
