@@ -45,6 +45,7 @@ import grp
 from backend.audio_utils import play_audio_file, play_pcm_audio
 from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
+from backend.routers import food as food_router
 from app.services.settings_service import get_settings_service
 
 
@@ -785,6 +786,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(food_router.router, prefix="/api/food", tags=["food"])
 
 # ============= SCALE ENDPOINTS =============
 
