@@ -133,7 +133,7 @@ La miniweb en `:8080` expone tres endpoints REST para consultar el estado de la 
 |--------|----------|-------------|
 | GET | `/api/camera/info` | Devuelve propiedades del sensor detectado (modelo, rotación y resolución nativa). |
 | POST | `/api/camera/capture` | Captura un frame JPEG en memoria y lo devuelve como `image/jpeg`. |
-| POST | `/api/camera/capture-to-file` | Captura un JPEG one-shot (`RGB888`) y lo guarda en `/run/bascula/captures/camera-capture.jpg`, devolviendo `{ ok, path, size }`. |
+| POST | `/api/camera/capture-to-file` | Captura un JPEG one-shot (`RGB888`) y lo guarda en `/run/bascula/captures/camera-capture.jpg`, devolviendo `{ ok, url, size, full }` y exponiéndolo vía Nginx en `/captures/camera-capture.jpg`. |
 
 Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
 
@@ -148,7 +148,7 @@ ls -lh /run/bascula/captures/camera-capture.jpg
 file /run/bascula/captures/camera-capture.jpg
 ```
 
-En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y muestra `/run/bascula/captures/camera-capture.jpg?t=<epoch_ms>` para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa.
+En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y muestra `/captures/camera-capture.jpg?t=<epoch_ms>` (servido por Nginx con `Cache-Control: no-store`) para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa.
 
 ## API de configuración de red
 

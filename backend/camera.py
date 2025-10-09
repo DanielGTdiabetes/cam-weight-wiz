@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Dict
 
@@ -17,8 +18,10 @@ from backend.camera_service import (
 )
 
 
-CAPTURE_DIRECTORY = Path("/run/bascula/captures")
-CAPTURE_PATH = CAPTURE_DIRECTORY / "camera-capture.jpg"
+CAPTURE_DIRECTORY = Path(os.getenv("BASCULA_CAPTURES_DIR", "/run/bascula/captures"))
+CAPTURE_FILENAME = "camera-capture.jpg"
+CAPTURE_PATH = CAPTURE_DIRECTORY / CAPTURE_FILENAME
+CAPTURE_URL = f"/captures/{CAPTURE_FILENAME}"
 
 
 router = APIRouter(prefix="/api/camera", tags=["camera"])
@@ -31,13 +34,13 @@ def _camera_error_response(status_code: int, reason: str, message: str):
     return JSONResponse(detail, status_code=status_code)
 
 
-def _capture_payload(size: int) -> Dict[str, object]:
-    return {"ok": True, "path": str(CAPTURE_PATH), "size": size}
+def _capture_payload(size: int, full: bool) -> Dict[str, object]:
+    return {"ok": True, "url": CAPTURE_URL, "size": size, "full": bool(full)}
 
 
 def _last_capture_metadata() -> Dict[str, object]:
     size = _capture_size()
-    return {"ok": size > 0, "path": str(CAPTURE_PATH), "size": size}
+    return {"ok": size > 0, "url": CAPTURE_URL, "size": size}
 
 
 def _capture_size() -> int:
@@ -129,6 +132,12 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
         filename.chmod(0o644)
     except OSError:
         LOG.warning("No se pudieron ajustar permisos de %s", filename, exc_info=True)
-    payload = _capture_payload(size=int(result.get("size", 0)))
-    LOG.info("capture_to_file: saved %s size=%s", payload["path"], payload["size"])
+    file_size = int(result.get("size", 0)) if isinstance(result, dict) else 0
+    if file_size <= 0:
+        try:
+            file_size = filename.stat().st_size
+        except OSError:
+            file_size = 0
+    payload = _capture_payload(size=file_size, full=full)
+    LOG.info("capture_to_file: saved %s size=%s", filename, payload["size"])
     return payload

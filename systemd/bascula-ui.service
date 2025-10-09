@@ -1,7 +1,7 @@
 [Unit]
 Description=Bascula Digital Pro - UI (Chromium kiosk)
-After=systemd-user-sessions.service network-online.target sound.target bascula-miniweb.service
-Wants=network-online.target sound.target bascula-miniweb.service
+After=graphical.target bascula-miniweb.service systemd-user-sessions.service network-online.target sound.target
+Wants=graphical.target bascula-miniweb.service network-online.target sound.target
 Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
@@ -18,9 +18,9 @@ Environment=XDG_RUNTIME_DIR=/run/user/1000
 StandardOutput=journal
 StandardError=journal
 PermissionsStartOnly=yes
-ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
+ExecStart=/usr/bin/startx /opt/bascula/current/scripts/start-kiosk.sh -- :0 vt1
 Restart=always
-RestartSec=3
+RestartSec=2s
 
 [Install]
 WantedBy=multi-user.target

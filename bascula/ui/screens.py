@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,10 @@ from bascula.state import AppState, WeightState
 from bascula.ui.widgets import TimerController, TimerWidget
 
 LOGGER = logging.getLogger(__name__)
+
+CAPTURE_DIRECTORY = Path(os.getenv("BASCULA_CAPTURES_DIR", "/run/bascula/captures"))
+CAPTURE_FILE = CAPTURE_DIRECTORY / "camera-capture.jpg"
+CAPTURE_URL = "/captures/camera-capture.jpg"
 
 
 class ScaleServiceProtocol(Protocol):
@@ -266,10 +271,9 @@ class ScanScreen(ttk.Frame):
                 self.after(0, lambda: self._on_capture_failure("Error al capturar imagen"))
                 return
 
-            default_path = "/run/bascula/captures/camera-capture.jpg"
-            path_value = data.get("path")
-            file_path = path_value if isinstance(path_value, str) and path_value else default_path
-            display_url = file_path
+            file_path = str(CAPTURE_FILE)
+            url_value = data.get("url")
+            display_url = url_value if isinstance(url_value, str) and url_value else CAPTURE_URL
 
             size_value = data.get("size")
             try:

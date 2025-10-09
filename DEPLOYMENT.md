@@ -56,6 +56,45 @@ sudo systemctl start bascula-ui.service
 
 ## Configuración Post-Instalación
 
+### Raspberry Pi 5 (Bookworm) - Cámara y Audio
+
+Estas comprobaciones son obligatorias en instalaciones limpias de Raspberry Pi OS Bookworm Lite (Pi 5 + Cámara IMX708):
+
+1. **Actualizar libcamera si aparecen errores IPA/PISP:**
+   ```bash
+   libcamera-hello --version
+   libcamera-hello --list-cameras
+   ```
+   Si ves `ipa_rpi_pisp.so` o `Failed to load a suitable IPA`, vuelve a ejecutar `scripts/install-all.sh`. El instalador forzará un `dist-upgrade` y marcará `/.needs-reboot-libcamera` cuando sea necesario reiniciar para aplicar firmware nuevo.
+
+2. **Verificación de captura desde el backend:**
+   ```bash
+   curl -s http://127.0.0.1:8080/api/camera/test | jq .
+   curl -s -X POST http://127.0.0.1:8080/api/camera/capture-to-file | jq .
+   ls -l /run/bascula/captures/camera-capture.jpg
+   ```
+   El archivo queda disponible para Nginx en `http://127.0.0.1/captures/camera-capture.jpg`.
+
+3. **Pila ALSA a 48 kHz con softvol/plug:**
+   ```bash
+   arecord -D bascula_mix_in -r 48000 -f S16_LE -c 1 -d 1 /dev/null
+   speaker-test -D bascula_out -c 2 -t sine -l 1
+   ```
+   Ambos comandos están envueltos por el instalador; cualquier error se reporta como `[inst][warn]` sin abortar la instalación.
+
+4. **Servicio de UI en modo kiosk:**
+   ```bash
+   systemctl is-enabled bascula-ui.service
+   systemctl is-active bascula-ui.service
+   ```
+   Tras la instalación, la Raspberry debe arrancar automáticamente Xorg + Openbox + Chromium usando `/opt/bascula/current/scripts/start-kiosk.sh`.
+
+5. **Smoke test rápido (opcional):**
+   ```bash
+   ./scripts/smoke-miniweb.sh http://127.0.0.1:8080
+   ```
+   El script registra advertencias en lugar de abortar si falta algún endpoint.
+
 ### 1. Variables de Entorno
 
 Edita `/home/pi/bascula-ui/.env`:

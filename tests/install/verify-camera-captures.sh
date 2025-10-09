@@ -20,11 +20,13 @@ with open(path, "rb") as fh:
     data = json.load(fh)
 if not data.get("ok"):
     raise SystemExit("respuesta ok=false")
-if data.get("path") != "/run/bascula/captures/camera-capture.jpg":
-    raise SystemExit("path inesperado: %s" % data.get("path"))
+if data.get("url") != "/captures/camera-capture.jpg":
+    raise SystemExit("url inesperado: %s" % data.get("url"))
 size = int(data.get("size", 0))
 if size <= 0:
     raise SystemExit("size inválido: %s" % data.get("size"))
+if "full" not in data:
+    raise SystemExit("campo 'full' ausente")
 PY
 
 if [[ ! -f "${CAPTURE_PATH}" ]]; then

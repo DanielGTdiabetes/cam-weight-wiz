@@ -20,6 +20,19 @@ warn() { log_warn "$@"; }
 err() { log_err "$@"; }
 fail() { log_err "$*"; exit 1; }
 
+try_or_warn() {
+  local description="$1"
+  local command="$2"
+  log "[check] ${description}"
+  if bash -lc "$command"; then
+    log "[check][ok] ${description}"
+    return 0
+  fi
+  local status=$?
+  log_warn "${description} falló (status ${status}). Comando: ${command}"
+  return ${status}
+}
+
 OVERLAY_ADDED=0
 INSTALL_LOG=""
 
@@ -222,109 +235,100 @@ configure_pi_boot_hardware() {
 }
 
 configure_hifiberry_audio() {
-  local cards_file="/proc/asound/cards"
   local asound_conf="/etc/asound.conf"
-
-  if [[ ! -f "${cards_file}" ]] || ! grep -qi 'snd_rpi_hifiberry_dac' "${cards_file}"; then
-    warn "DAC HifiBerry no detectado; omitiendo configuración de audio"
-    return
-  fi
-
-  cat > "${asound_conf}" <<'EOF'
-# ===========================
-# Báscula Digital Pro - Audio Config (verificada)
-# ===========================
-
-##### ENTRADA (MICRÓFONO USB) — compatible 48 kHz/16 kHz #####
-# Ajusta card/device según tu arecord -l
-pcm.dsnoop_mic {
-  type dsnoop
-  ipc_key 2048
-  slave {
-    pcm "hw:0,0"
-    rate 48000
-    channels 1
-    format S16_LE
-    period_time 0
-    period_size 1024
-    buffer_size 4096
-  }
-}
-
-# Ganancia software (control SoftMicGain) encadenada a dsnoop
-pcm.soft_mic {
-  type softvol
-  slave.pcm "dsnoop_mic"
-  control {
-    name "SoftMicGain"
-    card 0
-  }
-  use_dB yes
-  min_dB -30.0
-  max_dB +20.0
-  resolution 100
-}
-
-# EXPOSICIÓN PARA LAS APPS con re-muestreo automático
+  local tmp_conf
+  tmp_conf="$(mktemp)"
+  cat <<'EOF' >"${tmp_conf}"
+# === Entrada (MIC) ===
 pcm.bascula_mix_in {
-  type plug
-  slave.pcm "soft_mic"
+    type plug
+    slave.pcm "softvol_mic"
 }
 
-ctl.bascula_mix_in {
-  type hw
-  card 0
+pcm.softvol_mic {
+    type softvol
+    slave.pcm "dsnoop_mic"
+    control { name "SoftMicGain"; card 0; }
+    min_dB -20.0
+    max_dB +30.0
 }
 
-##### SALIDA (HIFIBERRY DAC) #####
-# HiFiBerry DAC (card 1)
+pcm.dsnoop_mic {
+    type dsnoop
+    ipc_key 2048
+    slave {
+        pcm "hw:0,0"
+        channels 1
+        rate 48000
+        format S16_LE
+        period_time 0
+        buffer_time 0
+        period_size 1024
+        buffer_size 8192
+    }
+}
+
+# === Salida (SPEAKER) ===
 pcm.bascula_out {
     type plug
-    slave.pcm "plughw:CARD=sndrpihifiberry,DEV=0"
+    slave.pcm "softvol_out"
 }
 
-ctl.bascula_out {
-    type hw
-    card 1
+pcm.softvol_out {
+    type softvol
+    slave.pcm "dmix_out"
+    control { name "SoftOutVol"; card 0; }
+    min_dB -20.0
+    max_dB +10.0
 }
 
-# Alias globales
-pcm.!default {
-    type plug
-    slave.pcm "bascula_out"
-}
-
-ctl.!default {
-    type hw
-    card 1
+pcm.dmix_out {
+    type dmix
+    ipc_key 4096
+    slave {
+        pcm "hw:0,0"
+        channels 2
+        rate 48000
+        format S16_LE
+        period_time 0
+        buffer_time 0
+        period_size 1024
+        buffer_size 8192
+    }
 }
 EOF
 
-  if command -v amixer >/dev/null 2>&1; then
-    amixer -c 0 sset 'Mic' 16 cap >/dev/null 2>&1 || true
-    amixer -c 0 sset 'Auto Gain Control' on >/dev/null 2>&1 || true
-    amixer -c 0 sset 'SoftMicGain' 10dB >/dev/null 2>&1 || true
+  if [[ ! -f "${asound_conf}" ]] || ! cmp -s "${tmp_conf}" "${asound_conf}"; then
+    install -m 0644 "${tmp_conf}" "${asound_conf}"
+    log "✓ /etc/asound.conf actualizado"
+  else
+    log "✓ /etc/asound.conf sin cambios"
   fi
+  rm -f "${tmp_conf}"
 
-  printf '[inst][info] SoftMicGain disponible (softvol). Ajustable desde alsamixer (F6->card 0) si fuera necesario.\n'
-
+  local card_list
   if command -v aplay >/dev/null 2>&1; then
-    if aplay -L | grep -q 'plughw:CARD=sndrpihifiberry,DEV=0'; then
-      printf '[ok] HiFiBerry detectado\n'
-    else
-      printf '[warn] DAC no encontrado\n'
-    fi
-  fi
-
-  if command -v alsactl >/dev/null 2>&1; then
-    if ! alsactl store >/dev/null 2>&1; then
-      warn "No se pudo ejecutar alsactl store"
+    card_list="$(aplay -l 2>/dev/null || true)"
+    if ! printf '%s' "${card_list}" | grep -q "card 0:"; then
+      log_warn "No se detectó tarjeta ALSA hw:0,0 (I2S); verifica conexiones"
     fi
   else
-    warn "alsactl no disponible; no se guardó el estado de audio"
+    log_warn "aplay no disponible para verificar tarjetas ALSA"
   fi
 
-  printf '[install] Audio (HifiBerry DAC + mic USB compartido) configurado\n'
+  if command -v arecord >/dev/null 2>&1; then
+    try_or_warn "arecord bascula_mix_in 48k" \
+      "timeout 8 arecord -q -D bascula_mix_in -t raw -f S16_LE -r 48000 -c 1 -d 1 /dev/null"
+  else
+    log_warn "arecord no disponible; omitiendo prueba de entrada"
+  fi
+
+  if command -v speaker-test >/dev/null 2>&1; then
+    try_or_warn "speaker-test bascula_out" \
+      "timeout 8 speaker-test -D bascula_out -c 2 -t sine -l 1"
+  else
+    log_warn "speaker-test no disponible; omitiendo prueba de salida"
+  fi
 }
 
 configure_usb_microphone() {
@@ -366,6 +370,64 @@ EOF
   fi
 
   printf '[install] Override de audio para bascula-miniweb.service aplicado\n'
+}
+
+ensure_libcamera_ready() {
+  if ! command -v libcamera-hello >/dev/null 2>&1; then
+    log_warn "libcamera-hello no está instalado; omitiendo verificación de cámara"
+    return
+  fi
+
+  try_or_warn "libcamera version" "libcamera-hello --version"
+  try_or_warn "listar cámaras" "libcamera-hello --list-cameras"
+
+  local list_output
+  list_output="$(libcamera-hello --list-cameras 2>&1 || true)"
+  local needs_upgrade=0
+
+  if printf '%s' "${list_output}" | grep -qiE 'ipa_rpi_pisp\\.so|Failed to load a suitable IPA'; then
+    needs_upgrade=1
+  fi
+
+  if ! printf '%s' "${list_output}" | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]*:'; then
+    needs_upgrade=1
+  fi
+
+  if [[ ${needs_upgrade} -eq 0 ]]; then
+    return
+  fi
+
+  log_warn "Problemas detectados con libcamera (IPA/PISP o sin cámaras). Intentando corregir mediante actualización"
+
+  if [[ "${NET_OK:-0}" -ne 1 ]]; then
+    log_warn "Sin red: no se puede ejecutar dist-upgrade para reparar libcamera"
+    return
+  fi
+
+  if ! apt-get update -y; then
+    log_warn "apt-get update falló; no se aplicó corrección de libcamera"
+  else
+    if ! apt-get -y dist-upgrade; then
+      log_warn "dist-upgrade falló; intentando full-upgrade"
+      apt-get -y full-upgrade || true
+    fi
+    apt-get install -y libcamera0 libcamera-apps libcamera-tools || true
+    log "[inst][info] Aplicado full-upgrade con libcamera"
+    if [[ -f /var/run/reboot-required ]]; then
+      touch /.needs-reboot-libcamera
+      log_warn "Se detectó /var/run/reboot-required tras actualizar libcamera; se recomienda sudo reboot"
+    fi
+  fi
+
+  local retry_output
+  retry_output="$(libcamera-hello --list-cameras 2>&1 || true)"
+  if printf '%s' "${retry_output}" | grep -qiE 'ipa_rpi_pisp\\.so|Failed to load a suitable IPA'; then
+    log_warn "Tras la actualización, libcamera aún reporta problemas IPA/PISP"
+  elif ! printf '%s' "${retry_output}" | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]*:'; then
+    log_warn "Tras la actualización, libcamera sigue sin cámaras disponibles"
+  else
+    log "✓ libcamera operativo tras reintento"
+  fi
 }
 
 log_env_audio() {
@@ -1048,6 +1110,8 @@ if [[ "${NET_OK}" -eq 1 ]]; then
 else
     warn "Sin red: omitiendo dependencias de cámara"
 fi
+
+ensure_libcamera_ready
 
 log "[4a/20] Instalando herramientas de audio..."
 if [[ "${NET_OK}" -eq 1 ]]; then
@@ -1912,8 +1976,14 @@ else
 fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
-install -d -m0755 -o pi -g www-data /run/bascula || true
-install -d -m0755 -o pi -g www-data /run/bascula/captures || true
+install -d -m0755 /run/bascula || true
+if id -u pi >/dev/null 2>&1; then
+  install -d -m0770 -o pi -g pi /run/bascula/captures || true
+else
+  install -d -m0770 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /run/bascula/captures || true
+  log_warn "Usuario pi no encontrado; asignando capturas a ${TARGET_USER}:${TARGET_GROUP}"
+fi
+chmod 0770 /run/bascula/captures || true
 cat > /etc/nginx/sites-available/bascula <<'EOF'
 server {
     listen 80 default_server;
@@ -1973,11 +2043,15 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer la última captura de la cámara
-    location = /run/bascula/captures/camera-capture.jpg {
-        alias /run/bascula/captures/camera-capture.jpg;
+    # Exponer capturas de la cámara (solo localhost)
+    location ^~ /captures/ {
+        alias /run/bascula/captures/;
         default_type image/jpeg;
+        autoindex off;
         add_header Cache-Control "no-store";
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
     }
 }
 EOF
@@ -2041,11 +2115,15 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer la última captura de la cámara
-    location = /run/bascula/captures/camera-capture.jpg {
-        alias /run/bascula/captures/camera-capture.jpg;
+    # Exponer capturas de la cámara (solo localhost)
+    location ^~ /captures/ {
+        alias /run/bascula/captures/;
         default_type image/jpeg;
+        autoindex off;
         add_header Cache-Control "no-store";
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
     }
 }
 EOF
@@ -2109,26 +2187,26 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer la última captura de la cámara
-    location = /run/bascula/captures/camera-capture.jpg {
-        alias /run/bascula/captures/camera-capture.jpg;
+    # Exponer capturas de la cámara (solo localhost)
+    location ^~ /captures/ {
+        alias /run/bascula/captures/;
         default_type image/jpeg;
+        autoindex off;
         add_header Cache-Control "no-store";
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
     }
 }
 EOF
 fi
 rm -f /etc/nginx/sites-enabled/default
 if command -v sudo >/dev/null 2>&1; then
-  if ! sudo nginx -t; then
-    warn "Configuración de Nginx con errores"
-  else
+  if try_or_warn "nginx -t" "sudo nginx -t"; then
     sudo systemctl reload nginx || warn "No se pudo recargar Nginx"
   fi
 else
-  if ! nginx -t; then
-    warn "Configuración de Nginx con errores"
-  else
+  if try_or_warn "nginx -t" "nginx -t"; then
     systemctl_safe reload nginx
   fi
 fi
@@ -2355,6 +2433,19 @@ else
   warn "nmcli no disponible para verificación rápida"
 fi
 
+# Asegurar servicios principales activos
+if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+  if ! systemctl daemon-reload; then
+    warn "systemctl daemon-reload falló"
+  fi
+  systemctl enable bascula-miniweb.service || warn "No se pudo habilitar bascula-miniweb.service"
+  systemctl enable bascula-ui.service || warn "No se pudo habilitar bascula-ui.service"
+  systemctl restart bascula-miniweb.service || warn "No se pudo reiniciar bascula-miniweb.service"
+  systemctl restart bascula-ui.service || warn "No se pudo reiniciar bascula-ui.service"
+else
+  warn "systemd no disponible o ALLOW_SYSTEMD!=1; omitiendo enable/restart finales"
+fi
+
 # Final message
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 log "============================================"
@@ -2382,6 +2473,9 @@ log "  libcamera-hello  # probar cámara"
 log "  say.sh 'Hola'    # probar voz"
 log "  x735off          # apagar el sistema de forma segura"
 log "Instalación finalizada"
+if [[ -f /.needs-reboot-libcamera ]]; then
+  log_warn "Se detectó /.needs-reboot-libcamera: ejecuta 'sudo reboot' para completar la actualización de cámara"
+fi
 log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
 systemctl_safe status bascula-miniweb --no-pager -l
 systemctl_safe status bascula-ui --no-pager -l
@@ -2490,56 +2584,25 @@ fi
 # Tono de 1 kHz (verificación fina)
 # speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1
 
-echo "== PRUEBA CÁMARA =="
-CAPTURE_API_URL="http://localhost:8080/api/camera/capture-to-file"
-CAPTURE_INFO_URL="http://localhost:8080/api/camera/info"
-CAPTURE_STATIC_URL="http://localhost/run/bascula/captures/camera-capture.jpg"
-CAPTURE_PATH="/run/bascula/captures/camera-capture.jpg"
-CAPTURE_DIR="/run/bascula/captures"
+echo "== PRUEBAS DE HUMO MINIWEB =="
+CAPTURE_API_URL="http://127.0.0.1:8080/api/camera/capture-to-file"
+CAPTURE_TEST_URL="http://127.0.0.1:8080/api/camera/test"
+CAPTURE_FILE="/run/bascula/captures/camera-capture.jpg"
+CAPTURE_PUBLIC_URL="http://127.0.0.1/captures/camera-capture.jpg"
 
 if command -v curl >/dev/null 2>&1; then
-  if command -v jq >/dev/null 2>&1; then
-    if curl -fsS "${CAPTURE_INFO_URL}" | jq -e '.ok == true' >/dev/null; then
-      echo "[ok] camera info disponible"
-    else
-      echo "[WARN] cámara no reporta info válida" >&2
-      curl -fsS "${CAPTURE_INFO_URL}" | jq . || true
-    fi
-
-    capture_json="$(curl -fsS -X POST "${CAPTURE_API_URL}" || true)"
-    if [[ -n "${capture_json}" ]]; then
-      if echo "${capture_json}" | jq -e --arg path "${CAPTURE_PATH}" \
-        '.ok == true and .path == $path and ((.size | try tonumber catch 0) > 0)' >/dev/null; then
-        echo "${capture_json}" | jq .
-      else
-        echo "${capture_json}" | jq .
-        echo "[WARN] respuesta inesperada de capture-to-file" >&2
-      fi
-    else
-      echo "[WARN] captura no devolvió respuesta" >&2
-    fi
-  else
-    echo "[WARN] jq no encontrado; mostrando respuesta plana" >&2
-    curl -fsS "${CAPTURE_INFO_URL}" || echo "[WARN] cámara no disponible" >&2
-    curl -fsS -X POST "${CAPTURE_API_URL}" || echo "[WARN] captura no disponible" >&2
-  fi
-
-  curl -fsSI "${CAPTURE_STATIC_URL}" \
-    || echo "[WARN] cámara no disponible o backend no iniciado" >&2
+  try_or_warn "smoke /api/camera/test" \
+    "curl -s ${CAPTURE_TEST_URL} | jq . | sed -n '1,40p'"
+  try_or_warn "capture-to-file" \
+    "curl -s -X POST '${CAPTURE_API_URL}' | jq ."
+  try_or_warn "curl captura pública" \
+    "curl -sI ${CAPTURE_PUBLIC_URL}"
 else
-  echo "[WARN] curl no encontrado; omitiendo prueba de cámara" >&2
+  log_warn "curl no disponible; omitiendo pruebas HTTP"
 fi
 
-if command -v sudo >/dev/null 2>&1; then
-  if sudo -u pi test -w "${CAPTURE_DIR}"; then
-    echo "[ok] ${CAPTURE_DIR} writable por pi"
-  else
-    echo "[WARN] ${CAPTURE_DIR} no escribible por pi" >&2
-  fi
+if [[ -f "${CAPTURE_FILE}" ]]; then
+  ls -l "${CAPTURE_FILE}" || true
 else
-  if [ -w "${CAPTURE_DIR}" ]; then
-    echo "[ok] ${CAPTURE_DIR} writable"
-  else
-    echo "[WARN] ${CAPTURE_DIR} no escribible" >&2
-  fi
+  log_warn "${CAPTURE_FILE} no existe tras la captura"
 fi
