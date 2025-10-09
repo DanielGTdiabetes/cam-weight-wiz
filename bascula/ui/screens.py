@@ -58,7 +58,7 @@ class HomeScreen(ttk.Frame):
         self._tara_message = ttk.Label(self, foreground="#2563eb", font=("Segoe UI", 12))
         self._tara_message.pack_forget()
 
-        self._tare_button = ttk.Button(self, text="TARA", command=self._handle_tare, style="Tara.TButton")
+        self._tare_button = ttk.Button(self, text="TARA", command=self._on_tare, style="Tara.TButton")
         self._tare_button.pack(pady=(0, 24))
 
         timer_frame = ttk.LabelFrame(self, text="Temporizador")
@@ -72,7 +72,7 @@ class HomeScreen(ttk.Frame):
     # ------------------------------------------------------------------
     # Event handlers
     # ------------------------------------------------------------------
-    def _handle_tare(self) -> None:
+    def _on_tare(self) -> None:
         if self._tare_in_progress:
             return
 
@@ -244,34 +244,49 @@ class ScanScreen(ttk.Frame):
                     timeout=10,
                 )
                 response.raise_for_status()
-                data = response.json()
-            except Exception as exc:  # pragma: no cover - network/hardware path
+            except requests.RequestException as exc:  # pragma: no cover - network/hardware path
                 LOGGER.exception("Error al contactar la API de cámara: %s", exc)
-                self.after(0, lambda: self._on_capture_failure("Cámara no disponible. Revisa conexión o permisos."))
+                self.after(
+                    0,
+                    lambda: self._on_capture_failure(
+                        "Cámara no disponible. Revisa conexión o permisos."
+                    ),
+                )
                 return
 
-            if not data.get("ok"):
+            try:
+                data = response.json()
+            except ValueError as exc:  # pragma: no cover - respuesta inválida
+                LOGGER.exception("Respuesta JSON inválida de la API de cámara: %s", exc)
+                self.after(0, lambda: self._on_capture_failure("Respuesta inválida de la cámara"))
+                return
+
+            if not isinstance(data, dict) or not data.get("ok"):
                 LOGGER.warning("La API de cámara devolvió error: %s", data)
                 self.after(0, lambda: self._on_capture_failure("Error al capturar imagen"))
                 return
 
-            path = data.get("path")
-            if not isinstance(path, str) or not path:
-                LOGGER.warning("Ruta de captura inválida en respuesta: %s", data)
-                self.after(0, lambda: self._on_capture_failure("Error al capturar imagen"))
-                return
+            path_value = data.get("path")
+            file_path = path_value if isinstance(path_value, str) and path_value else "/tmp/camera-capture.jpg"
 
-            size = int(data.get("size") or 0)
+            size_value = data.get("size")
+            try:
+                size = int(size_value)
+            except (TypeError, ValueError):
+                size = 0
+
             timestamp = int(time.time() * 1000)
-            self.after(0, lambda: self._on_capture_success(path, size, timestamp))
+            self.after(0, lambda: self._on_capture_success(file_path, size, timestamp))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_capture_success(self, path: str, size: int, timestamp: int) -> None:
         self._capture_in_progress = False
         self._capture_button.state(["!disabled"])
-        self._set_status(f"Imagen actualizada ({size} bytes)", error=False)
-        self._current_capture = f"{path}?t={timestamp}"
+        status_text = "Imagen actualizada" if size <= 0 else f"Imagen actualizada ({size} bytes)"
+        self._set_status(status_text, error=False)
+        display_path = f"/tmp/camera-capture.jpg?ts={timestamp}"
+        self._current_capture = display_path
         self._load_preview(Path(path))
 
     def _on_capture_failure(self, message: str) -> None:
