@@ -1897,57 +1897,221 @@ else
 fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
-cat > /etc/nginx/sites-available/bascula <<EOF
+cat > /etc/nginx/sites-available/bascula <<'EOF'
 server {
     listen 80 default_server;
     server_name _;
-    root ${BASCULA_CURRENT_LINK}/dist;
+    root /opt/bascula/current/dist;
     index index.html;
 
     gzip on;
     gzip_vary on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
 
+    # PWA/SPA
     location / {
-        try_files \$uri \$uri/ /index.html;
+        try_files $uri $uri/ /index.html;
     }
 
+    # Archivos estáticos
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
 
-    # API proxy to FastAPI backend
+    # Proxy principal hacia FastAPI
     location /api/ {
-        proxy_pass http://127.0.0.1:8080/;
+        proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \$host;
-        proxy_cache_bypass \$http_upgrade;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
 
+    # Compatibilidad rutas legacy sin /api
+    location /camera/  { proxy_pass http://127.0.0.1:8080/api/camera/;  include proxy_params; }
+    location /voice/   { proxy_pass http://127.0.0.1:8080/api/voice/;   include proxy_params; }
+    location /miniweb/ { proxy_pass http://127.0.0.1:8080/api/miniweb/; include proxy_params; }
+    location /net/     { proxy_pass http://127.0.0.1:8080/api/net/;     include proxy_params; }
+
+    # WebSocket
     location /ws/ {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "Upgrade";
-        proxy_set_header Host \$host;
+        proxy_set_header Host $host;
+    }
+
+    # Exponer solo /tmp para la última captura
+    location ^~ /tmp/ {
+        alias /tmp/;
+        default_type image/jpeg;
+        autoindex off;
+        add_header Cache-Control "no-store";
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
     }
 }
 EOF
-ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
+if command -v sudo >/dev/null 2>&1; then
+  sudo tee /etc/nginx/sites-enabled/bascula >/dev/null <<'EOF'
+server {
+    listen 80 default_server;
+    server_name _;
+    root /opt/bascula/current/dist;
+    index index.html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+
+    # PWA/SPA
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Archivos estáticos
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Proxy principal hacia FastAPI
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    # Compatibilidad rutas legacy sin /api
+    location /camera/  { proxy_pass http://127.0.0.1:8080/api/camera/;  include proxy_params; }
+    location /voice/   { proxy_pass http://127.0.0.1:8080/api/voice/;   include proxy_params; }
+    location /miniweb/ { proxy_pass http://127.0.0.1:8080/api/miniweb/; include proxy_params; }
+    location /net/     { proxy_pass http://127.0.0.1:8080/api/net/;     include proxy_params; }
+
+    # WebSocket
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host $host;
+    }
+
+    # Exponer solo /tmp para la última captura
+    location ^~ /tmp/ {
+        alias /tmp/;
+        default_type image/jpeg;
+        autoindex off;
+        add_header Cache-Control "no-store";
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+    }
+}
+EOF
+else
+  cat <<'EOF' > /etc/nginx/sites-enabled/bascula
+server {
+    listen 80 default_server;
+    server_name _;
+    root /opt/bascula/current/dist;
+    index index.html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
+
+    # PWA/SPA
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Archivos estáticos
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Proxy principal hacia FastAPI
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    # Compatibilidad rutas legacy sin /api
+    location /camera/  { proxy_pass http://127.0.0.1:8080/api/camera/;  include proxy_params; }
+    location /voice/   { proxy_pass http://127.0.0.1:8080/api/voice/;   include proxy_params; }
+    location /miniweb/ { proxy_pass http://127.0.0.1:8080/api/miniweb/; include proxy_params; }
+    location /net/     { proxy_pass http://127.0.0.1:8080/api/net/;     include proxy_params; }
+
+    # WebSocket
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "Upgrade";
+        proxy_set_header Host $host;
+    }
+
+    # Exponer solo /tmp para la última captura
+    location ^~ /tmp/ {
+        alias /tmp/;
+        default_type image/jpeg;
+        autoindex off;
+        add_header Cache-Control "no-store";
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
+    }
+}
+EOF
+fi
 rm -f /etc/nginx/sites-enabled/default
-nginx -t || warn "Configuración de Nginx con errores"
-systemctl_safe restart nginx
-systemctl_safe enable nginx
+if command -v sudo >/dev/null 2>&1; then
+  if ! sudo nginx -t; then
+    warn "Configuración de Nginx con errores"
+  else
+    sudo systemctl reload nginx || warn "No se pudo recargar Nginx"
+  fi
+else
+  if ! nginx -t; then
+    warn "Configuración de Nginx con errores"
+  else
+    systemctl_safe reload nginx
+  fi
+fi
 log "✓ Nginx configurado"
 
 # Create mini-web backend service
@@ -2305,3 +2469,7 @@ fi
 # aplay -D hw:1,0 -r 44100 -f S16_LE -c 2 -d 1 /dev/zero
 # Tono de 1 kHz (verificación fina)
 # speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1
+
+echo "== PRUEBA CÁMARA =="
+curl -s -X POST http://localhost:8080/api/camera/capture-to-file | jq .
+curl -I http://localhost/tmp/camera-capture.jpg
