@@ -187,8 +187,10 @@ def test_post_settings_updates_nightscout_from_diabetes_payload(miniweb_client):
 
     assert response.status_code == 200
     loaded = service.load()
-    assert loaded.diabetes.nightscout_url == "https://example.com"
-    assert loaded.diabetes.nightscout_token == "token123"
+    assert loaded.nightscout.url == "https://example.com"
+    assert loaded.nightscout.token == "token123"
+    assert loaded.diabetes.nightscout_url in {None, ""}
+    assert loaded.diabetes.nightscout_token in {None, ""}
 
 
 def test_post_settings_accepts_plain_payload(miniweb_client):
@@ -323,12 +325,12 @@ def test_get_settings_masks_secret_values(miniweb_client):
     assert payload.get("network", {}).get("openai_api_key") == "__stored__"
     assert payload.get("openai", {}).get("apiKey") == "__stored__"
     assert payload.get("openai", {}).get("hasKey") is True
-    assert payload.get("diabetes", {}).get("nightscout_url") == "__stored__"
-    assert payload.get("diabetes", {}).get("nightscout_token") == "__stored__"
-    assert payload.get("nightscout", {}).get("url") == "__stored__"
+    assert "nightscout_url" not in payload.get("diabetes", {})
+    assert "nightscout_token" not in payload.get("diabetes", {})
+    assert payload.get("nightscout", {}).get("url") == "https://mask.me"
     assert payload.get("nightscout", {}).get("token") == "__stored__"
     assert payload.get("nightscout", {}).get("hasToken") is True
-    assert payload.get("nightscout_url") == "__stored__"
+    assert payload.get("nightscout_url") == "https://mask.me"
     assert payload.get("nightscout_token") == "__stored__"
 
 

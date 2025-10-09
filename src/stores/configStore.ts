@@ -38,6 +38,12 @@ export interface SettingsResponse {
     openai_api_key?: string | null;
     [key: string]: unknown;
   } | null;
+  nightscout?: {
+    url?: string | null;
+    token?: string | null;
+    hasToken?: boolean | null;
+    [key: string]: unknown;
+  } | null;
   diabetes?: {
     nightscout_url?: string | null;
     nightscout_token?: string | null;

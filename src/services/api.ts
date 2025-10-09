@@ -108,6 +108,12 @@ export interface BackendSettingsPayload {
     ap?: { ssid: string; ip: string };
     openai_api_key?: string | null;
   };
+  nightscout?: {
+    url?: string | null;
+    token?: string | null;
+    hasToken?: boolean | null;
+    [key: string]: unknown;
+  };
   diabetes?: {
     nightscout_url?: string | null;
     nightscout_token?: string | null;
@@ -118,6 +124,7 @@ export interface BackendSettingsPayload {
 export interface BackendSettingsUpdate {
   pin?: string;
   network?: { openai_api_key?: string | null } & Record<string, unknown>;
+  nightscout?: { url?: string | null; token?: string | null; [key: string]: unknown };
   diabetes?: { nightscout_url?: string | null; nightscout_token?: string | null } & Record<string, unknown>;
   ui?: ({ flags?: Record<string, boolean>; offline_mode?: boolean | number | string } & Record<string, unknown>) | undefined;
   tts?: Record<string, unknown>;
@@ -389,10 +396,10 @@ class ApiService {
   async testNightscout(url?: string, token?: string, pin?: string): Promise<IntegrationTestResponse> {
     const body: Record<string, string> = {};
     if (url) {
-      body.nightscout_url = url;
+      body.url = url;
     }
     if (token) {
-      body.nightscout_token = token;
+      body.token = token;
     }
     const headers: Record<string, string> = {};
     if (pin) {

@@ -28,6 +28,10 @@ class SettingsSchema(BaseModel):
     class NetworkSettings(BaseModel):
         openai_api_key: Optional[str] = None
     
+    class NightscoutSettings(BaseModel):
+        url: Optional[str] = None
+        token: Optional[str] = None
+
     class DiabetesSettings(BaseModel):
         nightscout_url: Optional[str] = None
         nightscout_token: Optional[str] = None
@@ -56,6 +60,7 @@ class SettingsSchema(BaseModel):
         updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     
     network: NetworkSettings = Field(default_factory=NetworkSettings)
+    nightscout: NightscoutSettings = Field(default_factory=NightscoutSettings)
     diabetes: DiabetesSettings = Field(default_factory=DiabetesSettings)
     ui: UiSettings = Field(default_factory=UiSettings)
     scale: ScaleSettings = Field(default_factory=ScaleSettings)
@@ -249,6 +254,8 @@ class SettingsService:
             # Ocultar secretos con placeholders
             if data.get("network", {}).get("openai_api_key"):
                 data["network"]["openai_api_key"] = "__stored__"
+            if data.get("nightscout", {}).get("token"):
+                data.setdefault("nightscout", {})["token"] = "__stored__"
             if data.get("diabetes", {}).get("nightscout_token"):
                 data["diabetes"]["nightscout_token"] = "__stored__"
             if data.get("diabetes", {}).get("nightscout_url"):

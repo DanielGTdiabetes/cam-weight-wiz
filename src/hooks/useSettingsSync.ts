@@ -73,17 +73,34 @@ export const useSettingsSync = () => {
         }
 
         const diabetesChanged = message.fields.includes('diabetes') || message.fields.includes('nightscout');
-        if (diabetesChanged && data.diabetes) {
-          if (
-            typeof data.diabetes.nightscout_url === 'string' &&
-            data.diabetes.nightscout_url !== '__stored__'
-          ) {
-            updates.nightscoutUrl = data.diabetes.nightscout_url;
+        if (diabetesChanged) {
+          const nightscoutSection =
+            data && typeof data.nightscout === 'object'
+              ? (data.nightscout as { url?: string; token?: string; hasToken?: boolean })
+              : null;
+          const legacyDiabetes = data.diabetes as { nightscout_url?: string; nightscout_token?: string } | undefined;
+
+          const rawUrl =
+            typeof nightscoutSection?.url === 'string'
+              ? nightscoutSection.url.trim()
+              : typeof legacyDiabetes?.nightscout_url === 'string'
+                ? legacyDiabetes.nightscout_url.trim()
+                : '';
+          if (rawUrl && rawUrl !== '__stored__') {
+            updates.nightscoutUrl = rawUrl;
           }
-          if (data.diabetes.nightscout_token === '__stored__') {
-            // Mantener el token actual si está guardado
-          } else if (data.diabetes.nightscout_token) {
-            updates.nightscoutToken = data.diabetes.nightscout_token;
+
+          const rawToken =
+            typeof nightscoutSection?.token === 'string'
+              ? nightscoutSection.token.trim()
+              : typeof legacyDiabetes?.nightscout_token === 'string'
+                ? legacyDiabetes.nightscout_token.trim()
+                : '';
+
+          if (rawToken === '__stored__' || nightscoutSection?.hasToken) {
+            // Mantener el token actual si está guardado o marcado como presente
+          } else if (rawToken) {
+            updates.nightscoutToken = rawToken;
           }
         }
         
