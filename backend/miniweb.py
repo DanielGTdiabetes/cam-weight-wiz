@@ -69,6 +69,7 @@ _LOGGED_SERIAL_WARNING = False
 from backend.voice import router as voice_router
 from backend.camera import router as camera_router
 from backend.wake import router as wake_router, init_wake_if_enabled
+from backend.routers.food import router as food_router
 
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -3587,6 +3588,7 @@ init_wake_if_enabled(app)
 app.include_router(voice_router)
 app.include_router(camera_router)
 app.include_router(wake_router)
+app.include_router(food_router, prefix="/api/food", tags=["food"])
 
 
 @app.get("/health")
