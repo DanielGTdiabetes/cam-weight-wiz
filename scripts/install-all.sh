@@ -242,13 +242,13 @@ pcm.dsnoop_mic {
     ipc_key 2048
     slave {
         pcm "hw:0,0"
-        rate 16000
+        rate 48000
         channels 1
         format S16_LE
     }
 }
 
-pcm.bascula_mix_in {
+pcm.softvol_mic {
     type softvol
     slave.pcm "dsnoop_mic"
     control {
@@ -258,6 +258,11 @@ pcm.bascula_mix_in {
     min_dB -5.0
     max_dB 20.0
     resolution 200
+}
+
+pcm.bascula_mix_in {
+    type plug
+    slave.pcm "softvol_mic"
 }
 
 ctl.bascula_mix_in {
