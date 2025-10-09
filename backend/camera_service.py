@@ -153,6 +153,7 @@ class Picamera2Service:
             if attempts < 2:
                 time.sleep(0.3)
 
+        LOG_CAMERA.error("No se detectó cámara Picamera2 tras %d intentos", attempts)
         if last_error is not None:
             message = str(last_error) or "No se pudo inicializar la cámara"
             raise CameraUnavailableError(message) from last_error
@@ -266,6 +267,9 @@ class Picamera2Service:
                     self._properties = dict(getattr(camera, "camera_properties", {}) or {})
                 snapshot = dict(self._properties)
                 return snapshot
+            except CameraUnavailableError as exc:
+                LOG_CAMERA.error("No se detectó cámara al solicitar información: %s", exc)
+                raise
             finally:
                 self._release_camera()
 
@@ -283,6 +287,15 @@ class Picamera2Service:
                         "Captura completada (%s) - %d bytes", self._config_key(full), len(data)
                     )
                     return data
+                except CameraUnavailableError as exc:
+                    last_error = exc
+                    LOG_CAMERA.warning(
+                        "Cámara no disponible en captura (intento %d/3): %s",
+                        attempts,
+                        exc,
+                    )
+                    time.sleep(0.3)
+                    continue
                 except Exception as exc:
                     LOG_CAMERA.exception(
                         "Error en la captura (%s): %s",
@@ -303,6 +316,8 @@ class Picamera2Service:
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.25)
+        if isinstance(last_error, CameraUnavailableError):
+            raise CameraUnavailableError(str(last_error)) from last_error
         if last_error and self._is_busy_error(last_error):
             raise CameraBusyError("La cámara está ocupada") from last_error
         raise CameraTimeoutError("La captura excedió el tiempo máximo permitido")
