@@ -164,7 +164,18 @@ class Picamera2Service:
                     if not cameras:
                         raise CameraUnavailableError("No camera detected")
                     LOG_CAMERA.debug("Cámaras detectadas: %s", len(cameras))
-                    temp_camera = Picamera2()
+                    temp_camera = None
+                    for _ in range(10):
+                        try:
+                            info = Picamera2.global_camera_info()
+                            if info:
+                                temp_camera = Picamera2()
+                                break
+                        except Exception as exc:  # pragma: no cover - hardware specific failure
+                            LOG_CAMERA.debug("Picamera2 todavía no lista: %s", exc)
+                        time.sleep(1)
+                    if temp_camera is None:
+                        raise RuntimeError("No camera detected")
                     self._properties = dict(getattr(temp_camera, "camera_properties", {}) or {})
                     rotation = self._resolve_rotation(self._properties.get("Rotation"))
                     self._transform = _build_transform(rotation or 0)

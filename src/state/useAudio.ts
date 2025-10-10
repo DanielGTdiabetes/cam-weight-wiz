@@ -2,7 +2,8 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 import { storage } from "@/services/storage";
 
 const LS_KEY = "bascula.voiceEnabled";
-const LEGACY_MUTED_KEY = "bascula.voiceMuted";
+const LEGACY_MUTED_KEYS = ["bascula.voiceMuted", "audioMuted"] as const;
+const AUDIO_MUTED_KEY = "audioMuted";
 
 type Listener = () => void;
 
@@ -52,6 +53,7 @@ const persistSettings = (enabled: boolean, shouldPersist: boolean, updateSetting
   if (typeof window !== "undefined" && shouldPersist) {
     try {
       window.localStorage.setItem(LS_KEY, String(enabled));
+      window.localStorage.setItem(AUDIO_MUTED_KEY, enabled ? "false" : "true");
     } catch (error) {
       console.warn("No se pudo guardar bascula.voiceEnabled en localStorage", error);
     }
@@ -83,21 +85,23 @@ const syncFromLegacyKey = () => {
   if (typeof window === "undefined") {
     return false;
   }
-  try {
-    const legacy = window.localStorage.getItem(LEGACY_MUTED_KEY);
-    if (legacy === null) {
-      return false;
-    }
+  for (const key of LEGACY_MUTED_KEYS) {
+    try {
+      const legacy = window.localStorage.getItem(key);
+      if (legacy === null) {
+        continue;
+      }
 
-    const normalized = normalizeBoolean(legacy);
-    const enabled = normalized === null ? voiceEnabledState : !normalized;
-    window.localStorage.removeItem(LEGACY_MUTED_KEY);
-    applyState(enabled, { persist: true, updateSettings: true });
-    return true;
-  } catch (error) {
-    console.warn("No se pudo migrar la preferencia legacy de voz", error);
-    return false;
+      const normalized = normalizeBoolean(legacy);
+      const enabled = normalized === null ? voiceEnabledState : !normalized;
+      window.localStorage.removeItem(key);
+      applyState(enabled, { persist: true, updateSettings: true });
+      return true;
+    } catch (error) {
+      console.warn(`No se pudo migrar la preferencia legacy de voz (${key})`, error);
+    }
   }
+  return false;
 };
 
 const attemptRemoteFallback = async () => {

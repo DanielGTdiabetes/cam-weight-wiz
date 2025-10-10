@@ -1,0 +1,11 @@
+[Unit]
+Description=Bascula health gate (miniweb)
+Wants=bascula-miniweb.service
+After=bascula-miniweb.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null && exit 0; sleep 1; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target

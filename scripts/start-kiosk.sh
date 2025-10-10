@@ -97,6 +97,7 @@ exec "${CHROME_BIN}" \
   --start-fullscreen \
   --window-size=1024,600 \
   --window-position=0,0 \
-  --disk-cache-dir=/dev/null \
+  --user-data-dir=/run/bascula/chrome-profile \
+  --disk-cache-dir=/run/bascula/chrome-cache \
   --check-for-update-interval=31536000 \
   "${TARGET_URL}"

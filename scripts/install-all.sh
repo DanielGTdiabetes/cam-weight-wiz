@@ -149,6 +149,7 @@ INSTALL_LOG=""
 
 REBOOT_STATE_DIR="/var/lib/bascula"
 REBOOT_FLAG_FILE="${REBOOT_STATE_DIR}/reboot-required"
+REBOOT_QUEUE_MARK="${REBOOT_STATE_DIR}/reboot-queued"
 REBOOT_REASONS_FILE="${REBOOT_STATE_DIR}/reboot-reasons.txt"
 
 STATE_DIR="${REBOOT_STATE_DIR}"
@@ -2176,7 +2177,7 @@ systemctl_safe restart ocr-service.service
 log "✓ Servicio OCR configurado"
 
 # Setup Frontend (preparación)
-log "[15/20] Preparando frontend..."
+log "[15/20] Configurando frontend (single build)..."
 cd "${BASCULA_CURRENT_LINK}"
 if [[ -f "package.json" ]]; then
   if [[ -f ".env.device" ]]; then
@@ -2188,6 +2189,9 @@ else
 fi
 
 build_frontend_once "${BASCULA_CURRENT_LINK}"
+if [[ -d "${BASCULA_CURRENT_LINK}/dist" ]]; then
+  touch "${BASCULA_CURRENT_LINK}/.frontend_built"
+fi
 
 # Install and configure Nginx
 log "[16/20] Instalando y configurando Nginx..."
@@ -2404,7 +2408,8 @@ exec "\${CHROME_BIN}" \
   --enable-features=OverlayScrollbar \
   --disable-translate \
   --disable-features=TranslateUI \
-  --disk-cache-dir=/dev/null \
+  --user-data-dir=/run/bascula/chrome-profile \
+  --disk-cache-dir=/run/bascula/chrome-cache \
   --overscroll-history-navigation=0 \
   --disable-pinch \
   --check-for-update-interval=31536000 \
@@ -2594,6 +2599,12 @@ if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
       warn "No se pudo habilitar/iniciar bascula-miniweb.service"
       local_services_ok=0
     fi
+    if ! sudo systemctl enable bascula-health-wait.service; then
+      warn "No se pudo habilitar bascula-health-wait.service"
+      local_services_ok=0
+    else
+      sudo systemctl start bascula-health-wait.service || true
+    fi
     sleep 2
     if ! sudo systemctl enable bascula-ui.service; then
       warn "No se pudo habilitar bascula-ui.service"
@@ -2757,6 +2768,10 @@ if [[ -f "${REBOOT_FLAG_FILE}" && "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}
   if [[ -f "${POSTINSTALL_DONE_MARKER}" ]]; then
     log "[inst][skip] postinstall ya completado (${POSTINSTALL_DONE_MARKER})"
   elif ! systemctl is-enabled bascula-postinstall.service >/dev/null 2>&1; then
+    if [[ -f "${POSTINSTALL_SRC}" ]]; then
+      install -D -m 0755 "${POSTINSTALL_SRC}" "${POSTINSTALL_DST}"
+      chown "${TARGET_USER}:${TARGET_GROUP}" "${POSTINSTALL_DST}" || true
+    fi
     if ! systemctl enable bascula-postinstall.service; then
       warn "No se pudo habilitar bascula-postinstall.service"
     else
@@ -2767,7 +2782,13 @@ fi
 
 echo "[inst] ============================================"
 if [[ -f "${REBOOT_FLAG_FILE}" ]]; then
-  log_warn "⚠ REINICIO REQUERIDO"
+  if [[ ! -f "${REBOOT_QUEUE_MARK}" ]]; then
+    install -d -m 0755 "${REBOOT_STATE_DIR}"
+    touch "${REBOOT_QUEUE_MARK}"
+    log_warn "⚠ REINICIO REQUERIDO (marcado)"
+  else
+    log_warn "⚠ REINICIO REQUERIDO"
+  fi
   if [[ -s "${REBOOT_REASONS_FILE}" ]]; then
     log_warn "Razones:"
     sed 's/^/[inst][warn]  - /' "${REBOOT_REASONS_FILE}" || true
@@ -2785,6 +2806,9 @@ install_services() {
   # Copiar units del repo (solo los nuestros)
   install -m 0644 systemd/bascula-miniweb.service /etc/systemd/system/bascula-miniweb.service
   install -m 0644 systemd/bascula-backend.service  /etc/systemd/system/bascula-backend.service
+  if [ -f systemd/bascula-health-wait.service ]; then
+    install -m 0644 systemd/bascula-health-wait.service /etc/systemd/system/bascula-health-wait.service
+  fi
 
   if [ -f systemd/bascula-ui.service ]; then
     local tmp_service="$(mktemp)"
@@ -2819,6 +2843,7 @@ install_services() {
     rm -f /etc/systemd/system/bascula-app.service 2>/dev/null || true
 
     systemctl enable bascula-miniweb bascula-backend || true
+    systemctl enable bascula-health-wait.service || true
     systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
     systemctl is-active --quiet bascula-backend  || systemctl start bascula-backend
 
