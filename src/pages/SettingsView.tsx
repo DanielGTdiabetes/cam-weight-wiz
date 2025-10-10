@@ -58,6 +58,7 @@ import { FEATURE_FLAG_DEFINITIONS, getFeatureFlags, setFeatureFlag, type Feature
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { useSettingsSync } from "@/hooks/useSettingsSync";
+import { useAudioPref } from "@/state/useAudio";
 import { cn } from "@/lib/utils";
 import { api, setApiBaseUrl, type BackendSettingsUpdate, type OtaJobState, type WakeStatus } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
@@ -138,8 +139,7 @@ export const SettingsView = () => {
   const localClient = isLocalClient();
   const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags>(() => getFeatureFlags());
-
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const { voiceEnabled, setEnabled: setVoicePreference } = useAudioPref();
   const [voiceId, setVoiceId] = useState<string | undefined>(undefined);
   const voiceIdRef = useRef<string | undefined>(undefined);
   const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
@@ -433,7 +433,6 @@ export const SettingsView = () => {
   // Load settings on mount
   useEffect(() => {
     const settings = storage.getSettings();
-    setVoiceEnabled(settings.isVoiceActive);
     setVoiceId(settings.voiceId);
     voiceIdRef.current = settings.voiceId;
     setWakeWordEnabled(settings.wakeWordEnabled ?? false);
@@ -1928,7 +1927,9 @@ export const SettingsView = () => {
                 </div>
                 <Switch
                   checked={voiceEnabled}
-                  onCheckedChange={setVoiceEnabled}
+                  onCheckedChange={(value) => {
+                    void setVoicePreference(value);
+                  }}
                   className="scale-150"
                 />
               </div>

@@ -372,7 +372,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   targetGlucose: 100,
   hypoAlarm: 70,
   hyperAlarm: 180,
-  isVoiceActive: false,
+  isVoiceActive: true,
   voiceId: undefined,
   wakeWordEnabled: false,
   theme: 'dark',

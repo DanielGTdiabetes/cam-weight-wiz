@@ -21,13 +21,13 @@ import { apiWrapper } from "@/services/apiWrapper";
 import { storage, type AppSettings } from "@/services/storage";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
+import { useAudioPref } from "@/state/useAudio";
 
 const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
   const [showTimerDialog, setShowTimerDialog] = useState(false);
   const [timerSeconds, setTimerSeconds] = useState<number | undefined>(undefined);
   const [notification, setNotification] = useState<string>("");
-  const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [diabetesMode, setDiabetesMode] = useState(true); // Enable by default for demo
   const [show1515Mode, setShow1515Mode] = useState(false);
   const [showRecovery, setShowRecovery] = useState(false);
@@ -46,6 +46,7 @@ const Index = () => {
   const wakeEventSourceRef = useRef<EventSource | null>(null);
   const wakeReconnectTimeoutRef = useRef<number | null>(null);
   const scaleDecimals = useScaleDecimals();
+  const { voiceEnabled: isVoiceActive, setEnabled: setVoiceEnabled } = useAudioPref();
 
   // Monitor glucose if diabetes mode is enabled
   const glucoseData = useGlucoseMonitor(diabetesMode);
@@ -552,7 +553,9 @@ const Index = () => {
             timerSeconds={timerSeconds}
             onSettingsClick={() => setCurrentView("settings")}
             onTimerClick={() => setShowTimerDialog(true)}
-            onVoiceToggle={() => setIsVoiceActive(!isVoiceActive)}
+            onVoiceToggle={() => {
+              void setVoiceEnabled(!isVoiceActive);
+            }}
             onBackClick={handleBackToMenu}
             showBackButton={true}
             showTimerButton={currentView === "scale" || currentView === "scanner"}
