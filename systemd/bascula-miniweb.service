@@ -1,32 +1,21 @@
 [Unit]
 Description=Bascula Mini-Web Backend
-After=network-online.target sound.target
-Wants=network-online.target sound.target
-ConditionPathExists=/opt/bascula/current/.venv/bin/python
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=pi
-Group=pi
+Group=www-data
 WorkingDirectory=/opt/bascula/current
-Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=-/etc/default/bascula
 EnvironmentFile=-/etc/default/bascula-audio
-Environment=BASCULA_AUDIO_DEVICE=bascula_out
-Environment=BASCULA_MIC_DEVICE=bascula_mix_in
-Environment=BASCULA_SAMPLE_RATE=16000
-Environment=BASCULA_UI_AUDIO_DEFAULT=on
-Environment=BASCULA_CFG_DIR=/home/pi/.bascula
-Environment=BASCULA_CAM_RELEASE_ON_EXIT=true
-Environment=BASCULA_CAPTURES_DIR=/run/bascula/captures
-ExecStartPre=-/usr/bin/nm-online -s -q -t 25
-ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 0755 /run/bascula
-ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 02770 /run/bascula/captures
-ExecStartPre=/bin/chmod g+s /run/bascula/captures
-ExecStart=/opt/bascula/current/.venv/bin/python -m uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
+ExecStart=/opt/bascula/current/.venv/bin/uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=1
+RuntimeDirectory=bascula
+StateDirectory=bascula
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

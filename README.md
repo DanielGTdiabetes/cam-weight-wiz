@@ -1,268 +1,68 @@
-# Báscula Digital Pro (bascula-cam)
+# Báscula Digital Pro (cam-weight-wiz)
 
-## Visión general
+Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 
-Este repositorio contiene la base de software para la báscula digital basada en Raspberry Pi.
-Incluye:
+- API/mini-web de configuración FastAPI (puerto 8080) desplegada mediante `uvicorn`.
+- Backend principal en el puerto 8081 para lógica de la báscula.
+- UI kiosk en Chromium que se muestra al arrancar (`bascula-ui.service`).
+- Scripts de instalación idempotentes y unidades systemd listos para Raspberry Pi OS Bookworm Lite (64-bit).
 
-- Backend FastAPI/uvicorn que expone la mini-web de configuración y los servicios de la báscula en `http://localhost:8080`.
-- UI web (React/Chromium en modo kiosk) pensada para una pantalla táctil.
-- Scripts de instalación reproducibles y servicios systemd listos para producción en Raspberry Pi OS Bookworm.
-- Automatización del modo AP de NetworkManager para casos sin conectividad Wi-Fi ni Ethernet.
+## Instalación limpia en Raspberry Pi OS Bookworm Lite (Pi 5)
 
-## Instalación limpia en Raspberry Pi
-
-> Se asume Raspberry Pi OS Bookworm (64 bits) con el usuario `pi` habilitado y `NetworkManager` instalado.
-
-1. Clona o sincroniza el proyecto en el directorio deseado (por ejemplo `/opt/bascula/current`).
-2. Ejecuta el script principal como root:
+1. Copia el repositorio a la Raspberry Pi (por ejemplo en `/home/pi/cam-weight-wiz`).
+2. Ejecuta el instalador como `root`:
 
    ```bash
-   cd /opt/bascula/current
+   cd /home/pi/cam-weight-wiz
    sudo ./scripts/install-all.sh
    ```
 
-   El script (`scripts/install-all.sh`) realiza las siguientes tareas principales:
+   El script es idempotente: se puede volver a ejecutar sin romper instalaciones previas.
 
-   - Instala dependencias del sistema, Python, Node.js y Chromium kiosk. 【F:scripts/install-all.sh†L1-L210】
-   - Configura reglas de PolicyKit que permiten al usuario `pi` administrar redes Wi-Fi (escaneo, conexión, y modo compartido). 【F:scripts/install-all.sh†L320-L352】【F:packaging/polkit/49-nmcli.rules†L1-L13】
-   - Despliega el backend mini-web (`bascula-miniweb.service`) escuchando en `:8080`. 【F:packaging/systemd/bascula-miniweb.service†L1-L16】
-   - Configura el servicio kiosk de Chromium apuntando a `http://localhost:8080`. 【F:scripts/install-all.sh†L772-L834】
-   - Despliega el servicio `bascula-ap-ensure.service`, que crea y activa el AP `BasculaAP` (wlan0, `192.168.4.1/24`) sólo cuando no hay conectividad previa. 【F:scripts/install-all.sh†L1090-L1185】【F:scripts/bascula-ap-ensure.sh†L1-L150】
-  - El servicio espera hasta 25 segundos a que NetworkManager intente las redes guardadas antes de encender el AP (`nm-online`) y, si NetworkManager sigue en estado `connecting`, prolonga la espera hasta 45 segundos adicionales antes de activar el modo AP. 【F:systemd/bascula-ap-ensure.service†L1-L13】【F:scripts/bascula-ap-ensure.sh†L24-L120】
+### Qué hace `scripts/install-all.sh`
 
-3. Reinicia el dispositivo al finalizar la instalación para cargar todos los servicios y reglas (`sudo reboot`).
+El instalador crea una estructura tipo OTA y deja los servicios listos para producción:
 
-Tras el reinicio:
+- Provisiona `/opt/bascula/releases/<timestamp>` con el contenido del repositorio y apunta `/opt/bascula/current` al release activo. 【F:scripts/install-all.sh†L57-L130】
+- Instala dependencias del sistema (libcamera/picamera2, Chromium kiosk, nginx, ALSA, etc.) sólo si faltan. 【F:scripts/install-all.sh†L75-L96】【F:scripts/install-all.sh†L391-L396】
+- Fuerza los overlays requeridos en `/boot/firmware/config.txt` (`vc4-kms-v3d-pi5`, `disable-bt`, `hifiberry-dac`, `enable_uart=1`). Si alguno se añade, marca que es necesario reiniciar. 【F:scripts/install-all.sh†L120-L148】
+- Crea la virtualenv en `/opt/bascula/current/.venv` y instala `requirements*.txt` usando piwheels para aarch64. 【F:scripts/install-all.sh†L150-L190】
+- Genera `/etc/asound.conf` con alias robustos (`bascula_out` → HiFiBerry si está disponible, fallback a HDMI; `bascula_mix_in` con `dsnoop` para el micro USB). 【F:scripts/install-all.sh†L192-L244】
+- Asegura `/run/bascula/captures` con permisos `drwxrws---` y bit `g+s`, además del archivo tmpfiles correspondiente. 【F:scripts/install-all.sh†L246-L267】
+- Configura nginx para servir `/captures/` únicamente en loopback y reinicia el servicio tras validar `nginx -t`. 【F:scripts/install-all.sh†L336-L367】
+- Instala y habilita `bascula-miniweb.service`, `bascula-backend.service`, `bascula-health-wait.service` y `bascula-ui.service`. 【F:scripts/install-all.sh†L318-L334】【F:systemd/bascula-miniweb.service†L1-L21】【F:systemd/bascula-backend.service†L1-L18】【F:systemd/bascula-health-wait.service†L1-L13】【F:systemd/bascula-ui.service†L1-L27】
+- Ejecuta verificaciones de salud (`systemd-analyze verify`, `curl 127.0.0.1:8080`, `python -c 'import picamera2'`, `arecord`, `speaker-test`). Si el script detecta que hay que reiniciar por cambios en `config.txt`, pospone las pruebas de audio y finaliza exitosamente recordando que falta el reboot. 【F:scripts/install-all.sh†L369-L381】【F:scripts/install-all.sh†L425-L437】
 
-- `bascula-miniweb.service` sirve la mini-web y la API en `http://localhost:8080`.
-- `bascula-ui.service` lanza Chromium en modo kiosk apuntando a `http://localhost:8080` y gestiona el flujo de inicio tolerante a reinicios.
-- El PIN de acceso se muestra en la pantalla principal y puede consultarse desde `/api/miniweb/pin` cuando se accede localmente.
-- Si no hay Wi-Fi ni Ethernet, `bascula-ap-ensure.service` levanta `Bascula-AP` (`192.168.4.1`) con clave `Bascula1234` para exponer la miniweb en `http://192.168.4.1:8080`. 【F:scripts/bascula-ap-ensure.sh†L18-L115】
+### Primer arranque en Bookworm
 
-### Raspberry Pi OS Lite: dependencias de UI
+Los overlays `vc4-kms-v3d-pi5`, `disable-bt`, `hifiberry-dac` y `enable_uart=1` requieren reinicio. La primera vez que se ejecuta el instalador:
 
-En imágenes **Lite** (sin entorno gráfico), instala los componentes mínimos de Xorg y Chromium antes de lanzar la UI. El script `install-all.sh` ya lo hace de forma idempotente con un solo comando APT, pero puedes ejecutarlo manualmente si preparas la máquina a mano:
+1. Detectará los overlays ausentes, los añadirá a `/boot/firmware/config.txt` y dejará registro en `/var/lib/bascula/reboot-reasons.txt`.
+2. El script terminará con un aviso: reinicia manualmente (`sudo reboot`) antes de ejecutar `arecord`/`speaker-test`.
+3. Después del reboot, vuelve a lanzar `./scripts/install-all.sh` (no recrea el release) o ejecuta `./scripts/post-install-checks.sh` para validar audio y miniweb. 【F:scripts/install-all.sh†L333-L364】【F:scripts/post-install-checks.sh†L1-L39】
 
-```bash
-sudo apt-get update -y
-sudo apt-get install -y \
-  xserver-xorg xinit openbox chromium unclutter fonts-dejavu-core \
-  libxi6 libxrender1 libxrandr2 libgtk-3-0
-```
+### Comprobaciones rápidas
 
-Este bloque garantiza que existan Xorg, Openbox, Chromium y fuentes básicas en Raspberry Pi OS Lite sin entorno gráfico. 【F:scripts/install-all.sh†L2421-L2448】
-
-### Flujo de instalación y smoke checks
-
-El instalador crea la virtualenv del backend, instala requisitos (incluyendo opcionales de voz si existen), compila el frontend con `npm run build` y valida que la carpeta `dist/` exista antes de habilitar los servicios. 【F:scripts/install-all.sh†L2425-L2448】
-
-Tras completar `install-all.sh`, puedes repetir las mismas comprobaciones rápidas que ejecuta el script para asegurarte de que todo responde:
+Tras el reboot (o después del instalador si no hubo overlays nuevos), verifica el estado con:
 
 ```bash
-curl -s http://127.0.0.1:8080/api/health
-curl -sI http://127.0.0.1/ | head -n1
-tail -n 50 /var/log/bascula/ui.log
+sudo ./scripts/post-install-checks.sh
 ```
 
-La primera petición comprueba que el backend FastAPI (`bascula-miniweb.service`) está en marcha; la segunda confirma que Nginx sirve la SPA en `/opt/bascula/current/dist`; la tercera revisa los últimos eventos del kiosk (`CHROME=… URL=…`) para diagnosticar problemas de arranque. 【F:scripts/install-all.sh†L2495-L2498】【F:scripts/start-kiosk.sh†L61-L83】
+El script comprueba `shellcheck`, `systemd-analyze verify`, `nginx -t`, `curl 127.0.0.1:8080`, `picamera2`, `arecord` y `speaker-test`. Usa `SKIP_AUDIO=1` si aún no tienes conectado el DAC o el micrófono. 【F:scripts/post-install-checks.sh†L1-L39】
 
-### Problema: “Fatal server error: no screens found”
+### Servicios desplegados
 
-En Raspberry Pi 5 con Raspberry Pi OS Bookworm puede aparecer el error de Xorg `Fatal server error: no screens found` junto a `open /dev/dri/card1: No such file or directory`. 【F:scripts/install-all.sh†L624-L635】
+- **bascula-miniweb.service** – mini web/API FastAPI en `:8080`, ejecutada bajo `uvicorn` con usuario `pi` y grupo `www-data`. La configuración de audio se inyecta mediante `/etc/default/bascula-audio`. 【F:systemd/bascula-miniweb.service†L1-L21】
+- **bascula-backend.service** – backend principal (puerto 8081) ejecutando `python -m backend.main`. 【F:systemd/bascula-backend.service†L1-L18】
+- **bascula-health-wait.service** – espera a que `/api/miniweb/status` devuelva `"ok": true` antes de dejar continuar al kiosk. 【F:systemd/bascula-health-wait.service†L1-L13】
+- **bascula-ui.service** – arranca `startx` + Chromium kiosk sólo cuando `bascula-health-wait.service` completó correctamente. Prepara `/run/user/1000` y los logs antes de lanzar la sesión gráfica. 【F:systemd/bascula-ui.service†L1-L27】
 
-1. Verifica si el driver KMS creó los nodos DRM:
+### Troubleshooting rápido
 
-   ```bash
-   ls -l /dev/dri
-   ```
+- **Miniweb no responde**: revisa `journalctl -u bascula-miniweb -n 50` y vuelve a lanzar `sudo systemctl restart bascula-miniweb`. Asegúrate de que la virtualenv exista en `/opt/bascula/current/.venv`.
+- **Chromium no arranca**: comprueba que `bascula-health-wait.service` haya terminado (`systemctl status bascula-health-wait`). Si el miniweb no devuelve `ok=true`, la UI queda bloqueada por diseño.
+- **Audio**: `arecord -D bascula_mix_in -f S16_LE -r 16000 -d 2 /tmp/test.wav` y `speaker-test -D bascula_out -t sine -f 440 -l 1`. Si fallan tras el reboot inicial, revisa `/etc/asound.conf` y que ALSA detecte el DAC (`aplay -L`).
+- **Capturas**: los archivos se escriben en `/run/bascula/captures` con permisos `02770` y bit `g+s`. Nginx los expone en `http://127.0.0.1/captures/`. 【F:scripts/install-all.sh†L246-L267】【F:scripts/install-all.sh†L336-L367】
 
-   Si el directorio no existe, el overlay KMS adecuado no está cargado. 【F:scripts/install-all.sh†L624-L635】【F:scripts/test-x-kms.sh†L1-L13】
-
-2. Comprueba el overlay configurado en `/boot/firmware/config.txt` (o `/boot/config.txt` según la imagen). Para Raspberry Pi 5 debe existir la línea:
-
-   ```ini
-   dtoverlay=vc4-kms-v3d-pi5
-   ```
-
-   En Raspberry Pi 4 se debe usar `dtoverlay=vc4-kms-v3d`.
-
-3. Si falta el overlay, añade la línea y reinicia:
-
-   ```bash
-   echo 'dtoverlay=vc4-kms-v3d-pi5' | sudo tee -a /boot/firmware/config.txt
-   sudo reboot
-   ```
-
-   Tras el reinicio, confirma que `/dev/dri/card0` y `/dev/dri/renderD128` existen antes de iniciar `bascula-ui.service`. 【F:scripts/install-all.sh†L624-L635】
-
-### Configuración de audio (HifiBerry + micro USB)
-
-El instalador crea un `/etc/asound.conf` con aliases listos para compartir el micrófono USB (`dsnoop_mic` a la tasa nativa —48 kHz por defecto— envuelto por `softvol` → `bascula_mix_in` con control `SoftMicGain`) y dirigir la salida HifiBerry mediante `plug` (`bascula_out`). 【F:scripts/install-all.sh†L224-L314】
-
-Antes de ejecutar la instalación, verifica los índices reales de las tarjetas con:
-
-```bash
-arecord -l
-aplay -l
-```
-
-En nuestros presets habituales: micrófono USB = `card 0, device 0`; HiFiBerry DAC = `card 1, device 0`. Si difiere, edita `/etc/asound.conf` y ajusta las secciones `pcm.dsnoop_mic`/`pcm.bascula_out`. 【F:scripts/install-all.sh†L224-L314】
-
-El backend consume estas variables publicadas por el servicio `bascula-miniweb`:
-
-```
-BASCULA_MIC_DEVICE=bascula_mix_in
-BASCULA_SAMPLE_RATE=16000
-BASCULA_AUDIO_DEVICE=bascula_out
-```
-
-El listener de wake-word opera siempre a 16 kHz mediante el alias `bascula_mix_in`, por lo que conviene mantener los aliases de ALSA generados por el instalador. Si el preflight del micrófono falla, el backend intentará usar el primer dispositivo USB disponible (`hw:<card>,0` detectado con `arecord -l`).
-
-Tras `install-all.sh`, el script ejecuta pruebas rápidas: graba con `arecord` sobre `bascula_mix_in`, reinicia la miniweb para aplicar los overrides y reproduce audio por `bascula_out` (usando `aplay` o `speaker-test`). 【F:scripts/install-all.sh†L316-L392】
-
-Para comprobaciones manuales adicionales:
-
-```bash
-arecord -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 /tmp/test.wav
-aplay -D bascula_out /usr/share/sounds/alsa/Front_Center.wav
-speaker-test -D bascula_out -t sine -f 440 -l 1
-```
-
-#### Ajuste de ganancia del micrófono
-
-Para subir o bajar la ganancia software del micrófono USB:
-
-```
-alsamixer  # F6 → seleccionar card 0 (USB) y mover SoftMicGain
-```
-
-Para fijar el hardware al máximo y habilitar AGC (si existe el control):
-
-```bash
-amixer -c 0 sset 'Mic' 16 cap
-amixer -c 0 sset 'Auto Gain Control' on
-```
-
-### Dependencias Python críticas
-
-El backend y la miniweb requieren una serie de librerías que ahora se instalan desde `requirements.txt`. 【F:requirements.txt†L1-L20】
-Entre las más relevantes se encuentran `fastapi`, `uvicorn[standard]`, `pydantic`, `rapidfuzz` (>=3,<4), `vosk`, `picamera2` y `piper-tts`, necesarias para la API, reconocimiento de voz y cámara. 【F:requirements.txt†L2-L20】
-El instalador crea la `venv` con el usuario objetivo, instala esas dependencias y valida el entorno importando `fastapi`, `uvicorn` y `rapidfuzz` antes de habilitar los servicios, evitando fallos por módulos faltantes. 【F:scripts/install-all.sh†L1202-L1254】
-
-Adicionalmente, asegúrate de tener disponibles los paquetes del sistema `python3-picamera2`, `rpicam-apps` y `python3-pil` (Pillow) para que la cámara IMX708 funcione con Picamera2 y el guardado de JPEG.
-
-### Cámara (Picamera2 + miniweb)
-
-La miniweb en `:8080` expone tres endpoints REST para consultar el estado de la cámara y realizar capturas puntuales:
-
-| Método | Endpoint | Descripción |
-|--------|----------|-------------|
-| GET | `/api/camera/info` | Devuelve propiedades del sensor detectado (modelo, rotación y resolución nativa). |
-| POST | `/api/camera/capture` | Captura un frame JPEG en memoria y lo devuelve como `image/jpeg`. |
-| POST | `/api/camera/capture-to-file` | Captura un JPEG one-shot (`RGB888`) y lo guarda en `/run/bascula/captures/camera-capture.jpg`, devolviendo `{ ok, url, size, full }` y exponiéndolo vía Nginx en `/captures/camera-capture.jpg`. |
-
-Cada petición reutiliza la misma sesión de Picamera2, aplica la rotación correcta para el módulo IMX708 y guarda el archivo en RGB puro para evitar errores `cannot write mode RGBA as JPEG`.
-
-La UI táctil se sirve desde `http://localhost` mediante Nginx. El bloque `location /api/` de `nginx/bascula.conf` actúa como proxy inverso hacia `http://127.0.0.1:8080/`, de modo que todas las llamadas `fetch('/api/...')` usan el mismo origen y no disparan CORS en Chromium kiosk. 【F:nginx/bascula.conf†L23-L44】
-
-Para validar el proxy y la captura desde el propio dispositivo:
-
-```bash
-curl -s -X POST http://localhost/api/camera/capture-to-file | jq .
-journalctl -u bascula-miniweb -n 50 --no-pager | grep 'POST /api/camera/capture-to-file' | tail -n 1
-ls -lh /run/bascula/captures/camera-capture.jpg
-file /run/bascula/captures/camera-capture.jpg
-```
-
-En la mini-web, el botón “Activar cámara” realiza el `POST` anterior y muestra `/captures/camera-capture.jpg?t=<epoch_ms>` (servido por Nginx con `Cache-Control: no-store`) para forzar un cache-buster en cada intento. Así se pueden repetir capturas sucesivas sin que el navegador reutilice la imagen previa.
-
-## API de configuración de red
-
-La mini-web expone endpoints REST pensados para el flujo de provisión sin `sudo` ni edición manual de perfiles de NetworkManager:
-
-| Método | Endpoint                    | Descripción                                                                           |
-|--------|-----------------------------|---------------------------------------------------------------------------------------|
-| GET    | `/api/miniweb/scan-networks`| Escanea redes visibles y devuelve `{ssid, signal, sec, in_use, secured}` por entrada. 【F:backend/miniweb.py†L134-L183】|
-| POST   | `/api/miniweb/connect`      | Recrea el perfil Wi-Fi con el SSID indicado, fija `autoconnect` (prioridad 120), baja `BasculaAP` y activa la nueva red. 【F:backend/miniweb.py†L1446-L1573】|
-| GET    | `/api/miniweb/status`       | Devuelve el estado actual (`connected`, `internet`, `ssid`, `ip`, `ethernet_connected`, `ap_active`, `should_activate_ap`). 【F:backend/miniweb.py†L1707-L1808】|
-
-> El endpoint legado `/api/miniweb/connect-wifi` permanece disponible como alias para compatibilidad.
-
-## Mini-web de ajustes y API de settings
-
-La mini-web completa está disponible en `http://<IP>:8080/config` durante el modo AP y también desde la red local habitual en
-`http://<IP>/config`. Desde cualquier navegador conectado podrás introducir el PIN mostrado en la báscula y gestionar tanto la
-conexión Wi-Fi como las integraciones (OpenAI, Nightscout, modo offline, etc.).
-
-El backend expone una API específica para estos ajustes:
-
-| Método  | Endpoint                 | Descripción |
-|---------|--------------------------|-------------|
-| GET     | `/api/settings`          | Devuelve la configuración actual normalizada, incluyendo `network.status`, `ui.offline_mode` y los indicadores de credenciales almacenadas. |
-| POST    | `/api/settings`          | Persiste cambios de configuración. **Debe usarse `POST`** (no `PUT`), enviando JSON con los campos deseados. Cuando accedes desde otro dispositivo añade `Authorization: BasculaPin <PIN>` en la cabecera para autorizar la operación. |
-| OPTIONS | `/api/settings`          | Expone `Allow: GET, POST, OPTIONS` para clientes y diagnósticos. |
-| GET     | `/api/settings/health`   | Comprueba lectura/escritura del archivo de settings y responde `{ ok, can_write, message, version, updated_at }`. |
-
-Los scripts, la UI táctil y la mini-web utilizan esta misma API. Tras ejecutar `scripts/install-all.sh` puedes validar el
-comportamiento con:
-
-```bash
-curl -s http://localhost:8080/api/settings/health | jq .
-curl -s http://localhost:8080/api/settings | jq .
-curl -s -X POST http://localhost:8080/api/settings \
-  -H 'Content-Type: application/json' \
-  -d '{"ui": {"offline_mode": false}}'
-```
-
-### Reglas de PolicyKit
-
-Las reglas instaladas permiten al usuario `pi` (o miembros de `netdev`) ejecutar `nmcli` para escanear, crear conexiones Wi-Fi y gestionar modo compartido sin `sudo`. 【F:packaging/polkit/49-nmcli.rules†L1-L13】
-
-### Modo AP de rescate
-
-El modo AP está gestionado íntegramente por NetworkManager:
-
-- **SSID**: `Bascula-AP`
-- **Contraseña WPA2**: `Bascula1234` (puedes personalizarla exportando `AP_PASS="<tu_clave>"` antes de ejecutar el instalador o con
-  `nmcli con modify BasculaAP wifi-sec.psk <nueva_clave>` tras la instalación).
-- **IP de la báscula**: `192.168.4.1/24`
-- **Miniweb**: `http://192.168.4.1:8080`
-
-> Cambia esta contraseña en cuanto sea posible desde la miniweb para tu despliegue final.
-
-Flujo esperado:
-
-1. Sin credenciales conocidas → `bascula-ap-ensure.sh` crea/activa la red compartida en `wlan0` con DHCP interno de NetworkManager.
-2. El usuario accede a `http://192.168.4.1:8080`, introduce el PIN y guarda una Wi-Fi doméstica.
-3. Al enviar SSID y clave desde la miniweb, la Pi recrea el perfil Wi-Fi, lo exporta a `/etc/NetworkManager/system-connections/<SSID>.nmconnection` (permisos `600`, `autoconnect=yes`, prioridad `120`), desconecta `BasculaAP`, activa la red doméstica y reinicia el kiosk. Si más tarde se pierde la conectividad, el AP reaparece.
-
-Verificación rápida (no bloqueante):
-
-```bash
-nmcli con show --active
-nmcli dev status
-nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway con show BasculaAP
-journalctl -u bascula-ap-ensure -b | tail -n 20
-ss -lntu | grep ':53' || true   # No debe aparecer dnsmasq.service
-```
-
-Todos estos pasos quedan automatizados por `scripts/bascula-ap-ensure.sh`, ejecutado como servicio `oneshot` con reintentos. 【F:scripts/bascula-ap-ensure.sh†L1-L150】【F:systemd/bascula-ap-ensure.service†L1-L16】
-
-Checklist posterior a la instalación:
-
-1. Tras ejecutar el instalador, confirma que `BasculaAP` no tiene autoconexión: `nmcli con show | grep BasculaAP` debe mostrar `autoconnect=no`.
-2. Arranca sin cable Ethernet ni Wi-Fi guardada y verifica que el ensure levanta `BasculaAP` (SSID `Bascula-AP`).
-3. Usa la miniweb para guardar una Wi-Fi válida; la AP debe bajar y la interfaz cambiar al modo normal tras obtener IP del router.
-4. En un arranque posterior con esa Wi-Fi guardada, NetworkManager debe conectar al perfil cliente (prioridad 120) sin levantar la AP; si por cualquier motivo `BasculaAP` aparece activa, el ensure la apagará automáticamente al detectar conectividad.
-
-## Validación recomendada
-
-1. Tras una instalación limpia y reinicio, abre `http://localhost:8080` desde el propio dispositivo y confirma que se muestra el PIN de acceso.
-2. Desde la mini-web (`/config`) o un navegador en la misma LAN:
-   - Ejecuta un escaneo de redes y verifica que se listan SSID, nivel de señal, seguridad y la red actualmente en uso. 【F:src/pages/MiniWebConfig.tsx†L1-L210】
-   - Conecta a una red protegida y comprueba que el endpoint responde con éxito y programa el reinicio.
-3. Con Ethernet conectada, revisa que `bascula-ap-ensure` no active el AP (`nmcli -t -f NAME con show --active` no debe listar `BasculaAP`).
-4. Tras desconectar Ethernet y eliminar cualquier Wi-Fi válida, `BasculaAP` debe aparecer con IP `192.168.4.1`. Verifica con los comandos de la sección anterior y consulta los logs con `journalctl -u bascula-ap-ensure -b`.
-
-Con este flujo, una Raspberry Pi recién provisionada queda lista para funcionar sin intervenciones manuales en NetworkManager y con la UI limpia de branding antiguo.
+Para más diagnósticos, consulta los journals de cada servicio (`journalctl -u bascula-*.service`).
