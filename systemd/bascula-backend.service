@@ -1,5 +1,5 @@
 [Unit]
-Description=Bascula Backend (core)
+Description=Bascula Backend (core, 8081)
 After=network-online.target
 Wants=network-online.target
 
