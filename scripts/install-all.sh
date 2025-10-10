@@ -384,7 +384,7 @@ configure_pi_boot_hardware() {
 
 configure_hifiberry_audio() {
   local asound_conf="/etc/asound.conf"
-  local defaults_conf="/etc/default/bascula"
+  local defaults_conf="/etc/default/bascula-audio"
   local tmp_conf tmp_defaults
 
   tmp_conf="$(mktemp)"
@@ -394,6 +394,7 @@ configure_hifiberry_audio() {
 # DAC I2S HiFiBerry MAX98357A + Micrófono USB PnP
 # ============================================================
 
+# ---- 1) Dispositivo de salida (DAC) ----
 pcm.dmix_dac {
     type dmix
     ipc_key 1024
@@ -408,6 +409,7 @@ pcm.dmix_dac {
     }
 }
 
+# ---- 2) Dispositivo de entrada (Micrófono USB) ----
 pcm.dsnoop_mic {
     type dsnoop
     ipc_key 2048
@@ -420,6 +422,7 @@ pcm.dsnoop_mic {
     }
 }
 
+# ---- 3) Alias públicos usados por el backend ----
 pcm.bascula_out {
     type plug
     slave.pcm "dmix_dac"
@@ -430,20 +433,16 @@ pcm.bascula_mix_in {
     slave.pcm "dsnoop_mic"
 }
 
+# ---- 4) Defaults globales (opcional) ----
 pcm.!default bascula_out
 ctl.!default bascula_out
 EOF
 
-  local needs_update=1
   if [[ -f "${asound_conf}" ]] && cmp -s "${tmp_conf}" "${asound_conf}"; then
-    needs_update=0
-  fi
-
-  if [[ "${needs_update}" -eq 1 ]]; then
+    log "✓ /etc/asound.conf sin cambios"
+  else
     install -D -m 0644 "${tmp_conf}" "${asound_conf}"
     log "✓ /etc/asound.conf actualizado"
-  else
-    log "✓ /etc/asound.conf sin cambios"
   fi
   chmod 0644 "${asound_conf}" || warn "No se pudo ajustar permisos de ${asound_conf}"
   rm -f "${tmp_conf}" || true
@@ -455,55 +454,41 @@ BASCULA_MIC_DEVICE=bascula_mix_in
 BASCULA_SAMPLE_RATE=16000
 EOF
 
-  if [[ ! -f "${defaults_conf}" ]] || ! cmp -s "${tmp_defaults}" "${defaults_conf}"; then
+  if [[ ! -f "${defaults_conf}" ]]; then
     install -D -m 0644 "${tmp_defaults}" "${defaults_conf}"
-    log "✓ /etc/default/bascula actualizado"
+    log "✓ /etc/default/bascula-audio creado"
+  elif cmp -s "${tmp_defaults}" "${defaults_conf}"; then
+    log "✓ /etc/default/bascula-audio sin cambios"
   else
-    log "✓ /etc/default/bascula sin cambios"
+    log_warn "/etc/default/bascula-audio personalizado; se mantiene contenido existente"
   fi
   rm -f "${tmp_defaults}" || true
 
-  local card_list=""
   if command -v aplay >/dev/null 2>&1; then
-    card_list="$(aplay -l 2>/dev/null || true)"
-    if ! printf '%s' "${card_list}" | grep -q "card 0:"; then
-      log_warn "No se detectó tarjeta ALSA hw:0,0 (I2S); verifica conexiones"
-    fi
-  else
-    log_warn "aplay no disponible para verificar tarjetas ALSA"
-  fi
-
-  local test_wav="/tmp/test.wav"
-  if command -v arecord >/dev/null 2>&1; then
-    log "[check] arecord bascula_mix_in -> ${test_wav}"
-    if arecord -q -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 "${test_wav}"; then
-      AUDIO_RECORD_STATUS="ok"
-    else
-      AUDIO_RECORD_STATUS="fail"
-      log_warn "arecord bascula_mix_in falló; revisa micrófono"
-    fi
-  else
-    AUDIO_RECORD_STATUS="skipped"
-    log_warn "arecord no disponible; omitiendo prueba de entrada"
-  fi
-
-  if command -v aplay >/dev/null 2>&1; then
-    log "[check] aplay bascula_out <- ${test_wav}"
-    if [[ ! -f "${test_wav}" ]]; then
-      : > "${test_wav}"
-    fi
-    if aplay -q -D bascula_out "${test_wav}"; then
+    if aplay -D bascula_out /dev/zero >/dev/null 2>&1; then
       AUDIO_PLAY_STATUS="ok"
+      log "[check][ok] aplay -D bascula_out /dev/zero"
     else
       AUDIO_PLAY_STATUS="fail"
-      log_warn "aplay bascula_out falló; revisa salida de audio"
+      log_warn "aplay -D bascula_out /dev/zero falló; revisa salida de audio"
     fi
   else
     AUDIO_PLAY_STATUS="skipped"
-    log_warn "aplay no disponible; omitiendo prueba de salida"
+    log_warn "aplay no disponible; omitiendo verificación de salida"
   fi
 
-  rm -f "${test_wav}" || true
+  if command -v arecord >/dev/null 2>&1; then
+    if arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1 -q -t raw /dev/null >/dev/null 2>&1; then
+      AUDIO_RECORD_STATUS="ok"
+      log "[check][ok] arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1"
+    else
+      AUDIO_RECORD_STATUS="fail"
+      log_warn "arecord -D bascula_mix_in falló; revisa micrófono"
+    fi
+  else
+    AUDIO_RECORD_STATUS="skipped"
+    log_warn "arecord no disponible; omitiendo verificación de entrada"
+  fi
 }
 
 configure_usb_microphone() {
@@ -583,25 +568,40 @@ ensure_audio_playback_defaults() {
 configure_miniweb_audio_env() {
   local override_dir="/etc/systemd/system/bascula-miniweb.service.d"
   local override_file="${override_dir}/21-audio.conf"
+  local tmp_override
+  local updated=0
 
   install -d -m 0755 "${override_dir}"
 
-  cat > "${override_file}" <<'EOF'
+  tmp_override="$(mktemp)"
+  cat > "${tmp_override}" <<'EOF'
 [Service]
 Environment="BASCULA_AUDIO_DEVICE=bascula_out"
 Environment="BASCULA_MIC_DEVICE=bascula_mix_in"
 Environment="BASCULA_SAMPLE_RATE=16000"
 EOF
 
-  if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reexec || warn "systemctl daemon-reexec falló"
-    systemctl daemon-reload || warn "systemctl daemon-reload falló"
-    systemctl restart bascula-miniweb || warn "No se pudo reiniciar bascula-miniweb"
+  if [[ ! -f "${override_file}" ]]; then
+    install -D -m 0644 "${tmp_override}" "${override_file}"
+    updated=1
+  elif ! cmp -s "${tmp_override}" "${override_file}"; then
+    install -D -m 0644 "${tmp_override}" "${override_file}"
+    updated=1
   else
-    warn "systemctl no disponible; no se pudo aplicar override de audio"
+    log "✓ Override de audio sin cambios (21-audio.conf)"
   fi
 
-  printf '[install] Override de audio para bascula-miniweb.service aplicado\n'
+  rm -f "${tmp_override}" || true
+
+  if [[ "${updated}" -eq 1 ]]; then
+    log "✓ Override de audio para bascula-miniweb.service actualizado"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl daemon-reload || warn "systemctl daemon-reload falló"
+      systemctl restart bascula-miniweb || warn "No se pudo reiniciar bascula-miniweb"
+    else
+      warn "systemctl no disponible; no se pudo aplicar override de audio"
+    fi
+  fi
 }
 
 ensure_libcamera_stack() {
@@ -2409,111 +2409,93 @@ chmod g+s /run/bascula /run/bascula/captures || true
 # asegurar que el usuario pi pertenece al grupo www-data
 usermod -aG www-data pi || true
 
-cat > /etc/nginx/sites-available/bascula <<'EOF'
-server {
-    listen 80 default_server;
-    server_name _;
-    root /opt/bascula/current/dist;
-    index index.html;
+nginx_conf_src="${PROJECT_ROOT}/nginx/bascula.conf"
+nginx_conf_dst="/etc/nginx/sites-available/bascula"
+nginx_conf_link="/etc/nginx/sites-enabled/bascula"
+previous_nginx_conf=""
+previous_link_type=""
+previous_link_target=""
+previous_link_backup=""
 
-    gzip on;
-    gzip_vary on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
-
-    set_real_ip_from 127.0.0.1;
-    set_real_ip_from ::1;
-    real_ip_header X-Forwarded-For;
-    real_ip_recursive on;
-
-    # Exponer capturas de la cámara solo a loopback por defecto
-    location /captures/ {
-        alias /run/bascula/captures/;
-        autoindex off;
-        allow 127.0.0.1;
-        deny all;
-    }
-
-    # PWA/SPA
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Archivos estáticos
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-
-    # Proxy principal hacia FastAPI
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    # Compatibilidad rutas legacy sin /api
-    location /camera/  { proxy_pass http://127.0.0.1:8080/api/camera/;  include proxy_params; }
-    location /voice/   { proxy_pass http://127.0.0.1:8080/api/voice/;   include proxy_params; }
-    location /miniweb/ { proxy_pass http://127.0.0.1:8080/api/miniweb/; include proxy_params; }
-    location /net/     { proxy_pass http://127.0.0.1:8080/api/net/;     include proxy_params; }
-
-    # WebSocket
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header Host $host;
-    }
-
-    # Exponer capturas de la cámara (solo loopback por defecto)
-    location /captures/ {
-        alias /run/bascula/captures/;
-        autoindex off;
-        allow 127.0.0.1;
-        allow ::1;
-        deny all;
-        add_header Cache-Control "no-store";
-    }
-}
-EOF
-ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
-rm -f /etc/nginx/sites-enabled/default
-if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
-  EXPOSE_SITE="/etc/nginx/sites-available/bascula-captures"
-  cat > "${EXPOSE_SITE}" <<'EOF'
-server {
-    listen 8085;
-    server_name _;
-
-    location / {
-        alias /run/bascula/captures/;
-        autoindex off;
-        add_header Cache-Control "no-store";
-        auth_basic "Báscula Captures";
-        auth_basic_user_file /etc/nginx/bascula/captures.htpasswd;
-    }
-}
-EOF
-  if [[ ! -f /etc/nginx/bascula/captures.htpasswd ]]; then
-    install -D -m 0640 /dev/null /etc/nginx/bascula/captures.htpasswd
-  fi
-  chgrp www-data /etc/nginx/bascula/captures.htpasswd || true
-  ln -sf "${EXPOSE_SITE}" /etc/nginx/sites-enabled/bascula-captures
-  log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1). Configura credenciales en /etc/nginx/bascula/captures.htpasswd"
+if [[ ! -f "${nginx_conf_src}" ]]; then
+  fail "No se encontró ${nginx_conf_src} para desplegar configuración de Nginx"
 fi
-if try_or_warn "nginx -t" "nginx -t"; then
-  systemctl_safe reload nginx
+
+if [[ -f "${nginx_conf_dst}" ]]; then
+  previous_nginx_conf="$(mktemp)"
+  cp -f "${nginx_conf_dst}" "${previous_nginx_conf}"
+fi
+
+if [[ -L "${nginx_conf_link}" ]]; then
+  previous_link_type="symlink"
+  previous_link_target="$(readlink "${nginx_conf_link}")"
+elif [[ -e "${nginx_conf_link}" ]]; then
+  previous_link_type="file"
+  previous_link_backup="$(mktemp)"
+  cp -a "${nginx_conf_link}" "${previous_link_backup}"
+fi
+
+rm -f "${nginx_conf_link}"
+rm -f "${nginx_conf_dst}"
+
+install -D -m 0644 "${nginx_conf_src}" "${nginx_conf_dst}"
+ln -sfn "${nginx_conf_dst}" "${nginx_conf_link}"
+rm -f /etc/nginx/sites-enabled/default
+rm -f /etc/nginx/sites-enabled/bascula-captures /etc/nginx/sites-available/bascula-captures
+
+if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
+  if python3 - "$nginx_conf_dst" <<'PY'; then
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+pattern = re.compile(r'(?P<indent>[ \t]*)allow 127\.0\.0\.1;[ \t]*\n[ \t]*allow ::1;[ \t]*\n[ \t]*deny all;')
+new_text, count = pattern.subn(lambda m: f"{m.group('indent')}allow all;", text, count=1)
+if count == 0:
+    sys.exit(1)
+path.write_text(new_text)
+PY
+  then
+    log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1): allow all"
+  else
+    warn "No se pudo exponer /captures/ para LAN; revisa ${nginx_conf_dst}"
+  fi
+fi
+
+if ! nginx -t; then
+  rm -f "${nginx_conf_link}"
+  if [[ -n "${previous_nginx_conf}" && -f "${previous_nginx_conf}" ]]; then
+    install -D -m 0644 "${previous_nginx_conf}" "${nginx_conf_dst}"
+  else
+    rm -f "${nginx_conf_dst}"
+  fi
+
+  if [[ "${previous_link_type}" == "symlink" && -n "${previous_link_target}" ]]; then
+    ln -s "${previous_link_target}" "${nginx_conf_link}" 2>/dev/null || true
+  elif [[ "${previous_link_type}" == "file" && -n "${previous_link_backup}" && -f "${previous_link_backup}" ]]; then
+    install -D -m 0644 "${previous_link_backup}" "${nginx_conf_link}"
+  fi
+
+  [[ -n "${previous_nginx_conf}" ]] && rm -f "${previous_nginx_conf}" || true
+  [[ -n "${previous_link_backup}" ]] && rm -f "${previous_link_backup}" || true
+
+  fail "nginx -t falló tras desplegar bascula.conf; se restauró la configuración previa"
+fi
+
+[[ -n "${previous_nginx_conf}" ]] && rm -f "${previous_nginx_conf}" || true
+[[ -n "${previous_link_backup}" ]] && rm -f "${previous_link_backup}" || true
+
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if ! systemctl reload nginx; then
+    warn "systemctl reload nginx falló; intentando restart"
+    if ! systemctl restart nginx; then
+      warn "systemctl restart nginx también falló"
+    fi
+  fi
+else
+  warn "systemd no disponible; omitiendo reload de nginx"
 fi
 log "✓ Nginx configurado"
 
@@ -2834,6 +2816,86 @@ try_or_warn "miniweb status" "curl -fsS http://127.0.0.1:8080/api/miniweb/status
 try_or_warn "nginx root" "curl -sI http://127.0.0.1/ | head -n1"
 try_or_warn "ui kiosk log" "tail -n 50 /var/log/bascula/ui.log"
 
+log "[inst] Verificaciones finales (nginx/audio)..."
+if command -v nginx >/dev/null 2>&1; then
+  captures_count=$(grep -R "location /captures/" -n /etc/nginx/sites-enabled/bascula 2>/dev/null | wc -l | tr -d ' ')
+  captures_count="${captures_count:-0}"
+  if [[ "${captures_count}" -le 1 ]]; then
+    log "[verif][ok] Nginx /captures sin duplicados"
+  else
+    warn "[verif] Nginx /captures presenta múltiples bloques (${captures_count})"
+  fi
+
+  if nginx -t >/dev/null 2>&1; then
+    log "[verif][ok] nginx -t"
+  else
+    warn "[verif] nginx -t falló"
+  fi
+else
+  warn "[verif] nginx no disponible"
+fi
+
+if command -v ss >/dev/null 2>&1; then
+  if ss -lntp 2>/dev/null | grep -q ':8080'; then
+    log "[verif][ok] Puerto 8080 escuchando"
+  else
+    warn "[verif] Puerto 8080 no detectado"
+  fi
+else
+  warn "[verif] Herramienta ss no disponible"
+fi
+
+if command -v curl >/dev/null 2>&1; then
+  if command -v jq >/dev/null 2>&1; then
+    if curl -sf http://127.0.0.1:8080/api/miniweb/status | jq -e '.ok == true' >/dev/null 2>&1; then
+      log "[verif][ok] API miniweb responde"
+    else
+      warn "[verif] API miniweb no respondió ok=true"
+    fi
+  else
+    miniweb_json="$(curl -sf http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"
+    if [[ -n "${miniweb_json}" ]] && python3 - <<'PY' >/dev/null 2>&1 <<<"${miniweb_json}"; then
+import json
+import sys
+
+data = json.load(sys.stdin)
+sys.exit(0 if data.get("ok") is True else 1)
+PY
+    then
+      log "[verif][ok] API miniweb responde"
+    else
+      warn "[verif] API miniweb no respondió ok=true"
+    fi
+  fi
+else
+  warn "[verif] curl no disponible para comprobar API miniweb"
+fi
+
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if systemctl cat bascula-miniweb.service 2>/dev/null | grep -q 'Environment=BASCULA_AUDIO_DEVICE=bascula_out'; then
+    log "[verif][ok] Environment BASCULA_AUDIO_DEVICE"
+  else
+    warn "[verif] BASCULA_AUDIO_DEVICE no encontrado en unit"
+  fi
+  if systemctl cat bascula-miniweb.service 2>/dev/null | grep -q 'Environment=BASCULA_MIC_DEVICE=bascula_mix_in'; then
+    log "[verif][ok] Environment BASCULA_MIC_DEVICE"
+  else
+    warn "[verif] BASCULA_MIC_DEVICE no encontrado en unit"
+  fi
+else
+  warn "[verif] systemctl no disponible; omitiendo verificación de Environment"
+fi
+
+if [[ -f /etc/asound.conf ]]; then
+  if grep -q 'pcm.bascula_out' /etc/asound.conf && grep -q 'pcm.bascula_mix_in' /etc/asound.conf; then
+    log "[verif][ok] Aliases ALSA presentes"
+  else
+    warn "[verif] Falta alias ALSA esperado en /etc/asound.conf"
+  fi
+else
+  warn "[verif] /etc/asound.conf no encontrado"
+fi
+
 # Resumen dinámico previo al mensaje final
 if [[ "${SUMMARY_MINIWEB}" == "pending" ]]; then
   MINIWEB_JSON=""
@@ -2900,7 +2962,9 @@ if [[ "${SUMMARY_NGINX_CAPTURES}" == "pending" ]]; then
   nginx_conf="/etc/nginx/sites-available/bascula"
   if [[ -f "${nginx_conf}" ]]; then
     block="$(sed -n '/location \/captures\//,/}/p' "${nginx_conf}" 2>/dev/null)"
-    if [[ -n "${block}" ]] && grep -q 'deny all' <<< "${block}" && grep -q 'allow 127.0.0.1' <<< "${block}" && grep -q 'allow ::1' <<< "${block}"; then
+    if [[ -n "${block}" ]] && grep -q 'allow all' <<< "${block}"; then
+      SUMMARY_NGINX_CAPTURES="expuesto (allow all)"
+    elif [[ -n "${block}" ]] && grep -q 'deny all' <<< "${block}" && grep -q 'allow 127.0.0.1' <<< "${block}" && grep -q 'allow ::1' <<< "${block}"; then
       SUMMARY_NGINX_CAPTURES="localhost-only"
     else
       SUMMARY_NGINX_CAPTURES="revisar configuración"
