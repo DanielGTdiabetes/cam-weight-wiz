@@ -40,14 +40,49 @@ try_or_warn() {
   return ${status}
 }
 
+FRONTEND_BUILD_RESULT="pending"
+SUMMARY_MINIWEB="pending"
+SUMMARY_UI_TARGET="pending"
+SUMMARY_FRONTEND="pending"
+SUMMARY_CAPTURES="pending"
+SUMMARY_NGINX_CAPTURES="pending"
+SUMMARY_CAMERA="pending"
+SUMMARY_AUDIO="pending"
+CAMERA_SUMMARY_STATUS="UNKNOWN"
+CAMERA_SUMMARY_HINT=""
+
 build_frontend_once() {
   local project_dir="$1"
-  if [[ -f "${FRONTEND_MARKER}" ]]; then
-    if [[ -d "${project_dir}/dist" ]]; then
-      log "[inst][skip] Frontend ya compilado (${FRONTEND_MARKER})"
+  local dist_dir="${project_dir}/dist"
+  local commit=""
+  local recorded_commit=""
+
+  if [[ -n "${BASCULA_FRONTEND_COMMIT:-}" ]]; then
+    commit="${BASCULA_FRONTEND_COMMIT}"
+  elif [[ -f "${project_dir}/.ota_commit" ]]; then
+    commit="$(tr -d '\n\r' < "${project_dir}/.ota_commit" 2>/dev/null || echo "")"
+  elif [[ -d "${project_dir}/.git" ]] && command -v git >/dev/null 2>&1; then
+    commit="$(git -C "${project_dir}" rev-parse HEAD 2>/dev/null || echo "")"
+  fi
+
+  if [[ -f "${FRONTEND_COMMIT_FILE}" ]]; then
+    recorded_commit="$(tr -d '\n\r' < "${FRONTEND_COMMIT_FILE}" 2>/dev/null || echo "")"
+  fi
+
+  if [[ -f "${FRONTEND_MARKER}" && -d "${dist_dir}" ]]; then
+    if [[ -n "${commit}" && -n "${recorded_commit}" && "${commit}" == "${recorded_commit}" ]]; then
+      log "[inst][skip] Frontend ya compilado (commit ${commit})"
+      SUMMARY_FRONTEND="OK (skip, commit ${commit})"
+      FRONTEND_BUILD_RESULT="skip"
       return 0
     fi
-    log_warn "dist/ ausente pese a marcador ${FRONTEND_MARKER}; recompilando frontend"
+    if [[ -z "${commit}" && -f "${FRONTEND_MARKER}" ]]; then
+      log "[inst][skip] Frontend ya compilado (marcador existente)"
+      SUMMARY_FRONTEND="OK (skip, marcador existente)"
+      FRONTEND_BUILD_RESULT="skip"
+      return 0
+    fi
+    log_warn "dist/ presente pero commit cambió; recompilando frontend"
   fi
 
   if [[ ! -d "${project_dir}" ]]; then
@@ -62,13 +97,14 @@ build_frontend_once() {
 
   if [[ ! -f "package.json" ]]; then
     warn "package.json no encontrado; se omite build de frontend"
+    SUMMARY_FRONTEND="omitido (sin package.json)"
     popd >/dev/null || true
     return 0
   fi
 
   if ! command -v npm >/dev/null 2>&1; then
-    err "[ERROR] npm no disponible; instala Node/NPM antes de construir"
     popd >/dev/null || true
+    err "[ERROR] npm no disponible; instala Node/NPM antes de construir"
     return 1
   fi
 
@@ -98,8 +134,12 @@ build_frontend_once() {
   fi
 
   popd >/dev/null || true
+  install -d -m 0755 "${INSTALL_META_DIR}"
+  printf '%s\n' "${commit:-unknown}" > "${FRONTEND_COMMIT_FILE}"
   touch "${FRONTEND_MARKER}"
   log "[inst][done] Frontend compilado (npm ci + build)"
+  SUMMARY_FRONTEND="OK (built, commit ${commit:-unknown})"
+  FRONTEND_BUILD_RESULT="built"
   return 0
 }
 
@@ -116,10 +156,13 @@ VENV_MARKER="${STATE_DIR}/venv_ready"
 FRONTEND_MARKER="${STATE_DIR}/frontend_built"
 SERVICES_MARKER="${STATE_DIR}/services_provisioned"
 POSTINSTALL_DONE_MARKER="${STATE_DIR}/postinstall.done"
+INSTALL_META_DIR="${STATE_DIR}/install-meta"
+FRONTEND_COMMIT_FILE="${INSTALL_META_DIR}/frontend.sha"
 
 install -d -m 0755 -o root -g root "${STATE_DIR}"
 
 install -d -m 0755 -o root -g root "${REBOOT_STATE_DIR}"
+install -d -m 0755 -o root -g root "${INSTALL_META_DIR}"
 : > "${REBOOT_REASONS_FILE}" || true
 
 require_reboot() {
@@ -430,6 +473,60 @@ configure_usb_microphone() {
   printf '[install] Micrófono USB configurado (Mic=100%%, AGC=on). SoftMicGain listo en alsamixer.\n'
 }
 
+ensure_audio_playback_defaults() {
+  local volume="${BASCULA_AUDIO_VOLUME:-80%}"
+  local controls=(SoftSpeaker Digital Master PCM Speaker Playback)
+  local cards=(0 1)
+  local unmuted="no"
+  local any_control=0
+  local card_list=""
+
+  if command -v aplay >/dev/null 2>&1; then
+    card_list="$(aplay -l 2>/dev/null | awk 'BEGIN{ORS="; "}/^card/{printf "%s", $0} END{ORS=""}')"
+    card_list="${card_list%; }"
+  fi
+
+  if ! command -v amixer >/dev/null 2>&1; then
+    warn "amixer no disponible; no se puede asegurar volumen por defecto"
+    SUMMARY_AUDIO="desmuted=unknown (amixer no disponible)"
+    return
+  fi
+
+  for card in "${cards[@]}"; do
+    if ! amixer -c "${card}" scontrols >/dev/null 2>&1; then
+      continue
+    fi
+    for control in "${controls[@]}"; do
+      if amixer -c "${card}" scontrols 2>/dev/null | grep -Fq "'${control}'"; then
+        any_control=1
+        amixer -c "${card}" sset "${control}" "${volume}" unmute >/dev/null 2>&1 || true
+        if amixer -c "${card}" get "${control}" 2>/dev/null | grep -q '\[on\]'; then
+          unmuted="yes"
+        fi
+      fi
+    done
+  done
+
+  if command -v alsactl >/dev/null 2>&1; then
+    alsactl store >/dev/null 2>&1 || true
+  fi
+
+  if [[ -z "${card_list}" ]]; then
+    card_list="sin tarjetas detectadas"
+  fi
+
+  if [[ "${any_control}" -eq 0 ]]; then
+    warn "No se encontraron controles de mezcla conocidos para desmutear"
+  fi
+
+  SUMMARY_AUDIO="desmuted=${unmuted} (${card_list})"
+  if [[ "${unmuted}" != "yes" ]]; then
+    warn "No se pudo confirmar desmute de audio; revisa alsamixer"
+  else
+    log "Audio configurado con volumen ${volume} (unmute)"
+  fi
+}
+
 configure_miniweb_audio_env() {
   local override_dir="/etc/systemd/system/bascula-miniweb.service.d"
   local override_file="${override_dir}/21-audio.conf"
@@ -455,62 +552,80 @@ EOF
 }
 
 ensure_libcamera_ready() {
+  local status="WARN"
+  local hint="sin verificación"
+  local hello_output=""
+  local hello_rc=0
+  local list_output=""
+  local cameras_detected=0
+  local needs_reinstall=0
+
   if ! command -v libcamera-hello >/dev/null 2>&1; then
-    log_warn "libcamera-hello no está instalado; omitiendo verificación de cámara"
+    log_warn "libcamera-hello no está instalado; instala libcamera-apps/rpicam-apps"
+    CAMERA_SUMMARY_STATUS="FAIL"
+    CAMERA_SUMMARY_HINT="libcamera-hello ausente"
+    SUMMARY_CAMERA="FAIL (libcamera-hello ausente)"
     return
   fi
 
   try_or_warn "libcamera version" "libcamera-hello --version"
-  try_or_warn "listar cámaras" "libcamera-hello --list-cameras"
 
-  local list_output
+  hello_output="$(timeout 5 libcamera-hello -t 1000 2>&1)"
+  hello_rc=$?
+  if printf '%s' "${hello_output}" | grep -qi 'ipa_rpi_pisp\.so: undefined symbol'; then
+    needs_reinstall=1
+    hint="ipa_rpi_pisp.so undefined symbol"
+  elif [[ ${hello_rc} -ne 0 ]]; then
+    hint="libcamera-hello rc=${hello_rc}"
+  else
+    hint="libcamera-hello ok"
+  fi
+
   list_output="$(libcamera-hello --list-cameras 2>&1 || true)"
-  local needs_upgrade=0
-
+  cameras_detected=$(printf '%s' "${list_output}" | awk '/^[[:space:]]*[0-9]+[[:space:]]*:/ {count++} END {print count+0}')
   if printf '%s' "${list_output}" | grep -qiE 'ipa_rpi_pisp\\.so|Failed to load a suitable IPA'; then
-    needs_upgrade=1
+    needs_reinstall=1
+    hint="IPA no disponible"
+  elif [[ ${cameras_detected} -eq 0 ]]; then
+    hint="sin cámaras detectadas"
   fi
 
-  if ! printf '%s' "${list_output}" | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]*:'; then
-    needs_upgrade=1
-  fi
-
-  if [[ ${needs_upgrade} -eq 0 ]]; then
-    return
-  fi
-
-  log_warn "Problemas detectados con libcamera (IPA/PISP o sin cámaras). Intentando corregir mediante actualización"
-
-  if [[ "${NET_OK:-0}" -ne 1 ]]; then
-    log_warn "Sin red: no se puede ejecutar dist-upgrade para reparar libcamera"
-    return
-  fi
-
-  if ! apt-get update -y; then
-    log_warn "apt-get update falló; no se aplicó corrección de libcamera"
-  else
-    if ! apt-get -y dist-upgrade; then
-      log_warn "dist-upgrade falló; intentando full-upgrade"
-      apt-get -y full-upgrade || true
-    fi
-    apt-get install -y libcamera0 libcamera-apps libcamera-tools || true
-    log "[inst][info] Aplicado full-upgrade con libcamera"
-    if [[ -f /var/run/reboot-required ]]; then
-      touch /.needs-reboot-libcamera
-      require_reboot "actualizar libcamera (dist-upgrade)"
-      log_warn "Se detectó /var/run/reboot-required tras actualizar libcamera; se recomienda sudo reboot"
+  if [[ ${needs_reinstall} -eq 1 ]]; then
+    log_warn "Problemas detectados con libcamera (${hint}). Intentando reinstalar dependencias"
+    if [[ "${NET_OK:-0}" -ne 1 ]]; then
+      log_warn "Sin red: no se puede reinstalar libcamera0/libcamera-apps/rpicam-apps"
+    else
+      apt-get install --reinstall -y libcamera0 libcamera-apps rpicam-apps || true
+      hello_output="$(timeout 5 libcamera-hello -t 1000 2>&1)"
+      hello_rc=$?
+      list_output="$(libcamera-hello --list-cameras 2>&1 || true)"
+      cameras_detected=$(printf '%s' "${list_output}" | awk '/^[[:space:]]*[0-9]+[[:space:]]*:/ {count++} END {print count+0}')
+      if printf '%s' "${list_output}" | grep -qiE 'ipa_rpi_pisp\\.so|Failed to load a suitable IPA'; then
+        log_warn "Tras la reinstalación persiste el error IPA/PISP"
+      fi
+      if [[ ${cameras_detected} -gt 0 && ${hello_rc} -eq 0 ]]; then
+        hint="libcamera reinstalado; ${cameras_detected} cámaras"
+      fi
     fi
   fi
 
-  local retry_output
-  retry_output="$(libcamera-hello --list-cameras 2>&1 || true)"
-  if printf '%s' "${retry_output}" | grep -qiE 'ipa_rpi_pisp\\.so|Failed to load a suitable IPA'; then
-    log_warn "Tras la actualización, libcamera aún reporta problemas IPA/PISP"
-  elif ! printf '%s' "${retry_output}" | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]*:'; then
-    log_warn "Tras la actualización, libcamera sigue sin cámaras disponibles"
+  if [[ ${cameras_detected} -gt 0 && ${hello_rc} -eq 0 ]]; then
+    status="OK"
+    hint="${hint}; cámaras=${cameras_detected}"
+  elif [[ ${cameras_detected} -gt 0 ]]; then
+    status="WARN"
+    hint="cámaras=${cameras_detected}; rc=${hello_rc}"
+  elif [[ ${hello_rc} -eq 0 ]]; then
+    status="WARN"
+    hint="libcamera-hello ok pero sin cámaras"
   else
-    log "✓ libcamera operativo tras reintento"
+    status="FAIL"
+    hint="${hint}"
   fi
+
+  CAMERA_SUMMARY_STATUS="${status}"
+  CAMERA_SUMMARY_HINT="${hint}"
+  SUMMARY_CAMERA="${status} (${hint})"
 }
 
 log_env_audio() {
@@ -711,6 +826,8 @@ configure_bascula_ui_service() {
   local target_uid
   local tmp_file
   local previous_umask
+  local kiosk_wait="${BASCULA_KIOSK_WAIT_S_VALUE:-30}"
+  local kiosk_probe="${BASCULA_KIOSK_PROBE_MS_VALUE:-500}"
 
   target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || printf '%s' '1000')"
 
@@ -734,6 +851,8 @@ Environment=HOME=${TARGET_HOME}
 Environment=USER=${TARGET_USER}
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/${target_uid}
+Environment=BASCULA_KIOSK_WAIT_S=${kiosk_wait}
+Environment=BASCULA_KIOSK_PROBE_MS=${kiosk_probe}
 PermissionsStartOnly=yes
 ExecStartPre=/bin/sh -c 'install -d -m0700 -o ${TARGET_USER} -g ${TARGET_GROUP} /run/user/${target_uid} && \
   install -d -m0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula && \
@@ -952,6 +1071,9 @@ AP_NAME="${AP_NAME:-BasculaAP}"
 AP_POOL_START="${AP_POOL_START:-192.168.4.20}"
 AP_POOL_END="${AP_POOL_END:-192.168.4.99}"
 
+BASCULA_KIOSK_WAIT_S_VALUE="${BASCULA_KIOSK_WAIT_S:-30}"
+BASCULA_KIOSK_PROBE_MS_VALUE="${BASCULA_KIOSK_PROBE_MS:-500}"
+
 BOOTDIR="/boot/firmware"
 [[ ! -d "${BOOTDIR}" ]] && BOOTDIR="/boot"
 CONF="${BOOTDIR}/config.txt"
@@ -1006,6 +1128,7 @@ if [[ "${NET_OK}" -eq 1 ]]; then
         libjpeg-dev zlib1g-dev libpng-dev
         alsa-utils pulseaudio sox ffmpeg
         libzbar0 gpiod python3-rpi.gpio
+        libcamera-apps rpicam-apps
         network-manager dnsmasq-base dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
         uuid-runtime
     )
@@ -1328,6 +1451,7 @@ ensure_enable_uart "${CONF}"
 
 configure_hifiberry_audio
 configure_usb_microphone
+ensure_audio_playback_defaults
 
 install -m 0755 "${SCRIPT_DIR}/test-audio.sh" /usr/local/bin/bascula-test-audio
 /usr/local/bin/bascula-test-audio || true
@@ -2493,6 +2617,102 @@ try_or_warn "miniweb status" "curl -fsS http://127.0.0.1:8080/api/miniweb/status
 try_or_warn "nginx root" "curl -sI http://127.0.0.1/ | head -n1"
 try_or_warn "ui kiosk log" "tail -n 50 /var/log/bascula/ui.log"
 
+# Resumen dinámico previo al mensaje final
+if [[ "${SUMMARY_MINIWEB}" == "pending" ]]; then
+  MINIWEB_JSON=""
+  if command -v curl >/dev/null 2>&1; then
+    MINIWEB_JSON="$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"
+  fi
+  if [[ -n "${MINIWEB_JSON}" ]]; then
+    parsed="$(printf '%s' "${MINIWEB_JSON}" | python3 - <<'PY'
+import json
+import sys
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    print("error|parse")
+    sys.exit(0)
+
+ok = bool(data.get("ok"))
+mode = data.get("effective_mode") or data.get("mode") or "unknown"
+print(f"{ok}|{mode}")
+PY
+    )"
+    IFS='|' read -r ok_flag mode_value <<< "${parsed}"
+    if [[ "${ok_flag}" == "True" ]]; then
+      SUMMARY_MINIWEB=":8080 ok (mode=${mode_value})"
+    elif [[ "${ok_flag}" == "False" ]]; then
+      SUMMARY_MINIWEB=":8080 responde pero ok=false (mode=${mode_value})"
+    else
+      SUMMARY_MINIWEB=":8080 respuesta no parseable"
+    fi
+    if [[ "${SUMMARY_UI_TARGET}" == "pending" && -f "${BASCULA_CURRENT_LINK}/scripts/choose_kiosk_target.py" ]]; then
+      chooser_result="$(BASCULA_KIOSK_STATUS_JSON="${MINIWEB_JSON}" BASCULA_KIOSK_WAIT_S=0 BASCULA_KIOSK_PROBE_MS=100 python3 "${BASCULA_CURRENT_LINK}/scripts/choose_kiosk_target.py" 2>/dev/null || true)"
+      if [[ -n "${chooser_result}" ]]; then
+        chooser_state="${chooser_result%%|*}"
+        chooser_url="${chooser_result#*|}"
+        SUMMARY_UI_TARGET="${chooser_state}:${chooser_url}"
+      fi
+    fi
+  else
+    SUMMARY_MINIWEB=":8080 sin respuesta"
+  fi
+fi
+
+if [[ "${SUMMARY_UI_TARGET}" == "pending" ]]; then
+  SUMMARY_UI_TARGET="sin datos"
+fi
+
+if [[ "${SUMMARY_CAPTURES}" == "pending" ]]; then
+  if stat_info=$(stat -c '%#a|%A|%U|%G' /run/bascula/captures 2>/dev/null); then
+    IFS='|' read -r perm_octal perm_text owner_user owner_group <<< "${stat_info}"
+    group_bit="${perm_text:5:1}"
+    if [[ "${group_bit}" == "s" || "${group_bit}" == "S" ]]; then
+      setgid_state="g+s"
+    else
+      setgid_state="sin g+s"
+    fi
+    SUMMARY_CAPTURES="${perm_octal} ${setgid_state} owner=${owner_user}:${owner_group}"
+  else
+    SUMMARY_CAPTURES="directorio no encontrado"
+  fi
+fi
+
+if [[ "${SUMMARY_NGINX_CAPTURES}" == "pending" ]]; then
+  nginx_conf="/etc/nginx/sites-available/bascula"
+  if [[ -f "${nginx_conf}" ]]; then
+    block="$(sed -n '/location \/captures\//,/}/p' "${nginx_conf}" 2>/dev/null)"
+    if [[ -n "${block}" ]] && grep -q 'deny all' <<< "${block}" && grep -q 'allow 127.0.0.1' <<< "${block}" && grep -q 'allow ::1' <<< "${block}"; then
+      SUMMARY_NGINX_CAPTURES="localhost-only"
+    else
+      SUMMARY_NGINX_CAPTURES="revisar configuración"
+    fi
+  else
+    SUMMARY_NGINX_CAPTURES="configuración no encontrada"
+  fi
+fi
+
+if [[ "${SUMMARY_AUDIO}" == "pending" ]]; then
+  SUMMARY_AUDIO="sin verificación"
+fi
+
+if [[ "${SUMMARY_CAMERA}" == "pending" ]]; then
+  if [[ -n "${CAMERA_SUMMARY_STATUS}" && "${CAMERA_SUMMARY_STATUS}" != "UNKNOWN" ]]; then
+    SUMMARY_CAMERA="${CAMERA_SUMMARY_STATUS} (${CAMERA_SUMMARY_HINT})"
+  else
+    SUMMARY_CAMERA="sin verificación"
+  fi
+fi
+
+if [[ "${SUMMARY_FRONTEND}" == "pending" ]]; then
+  if [[ -d "${BASCULA_CURRENT_LINK}/dist" ]]; then
+    SUMMARY_FRONTEND="dist presente"
+  else
+    SUMMARY_FRONTEND="no generado"
+  fi
+fi
+
 # Final message
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 log "============================================"
@@ -2502,13 +2722,13 @@ log "  OTA releases: ${BASCULA_RELEASES_DIR}"
 log "  OTA activo -> ${BASCULA_CURRENT_LINK}"
 log "  Configuración -> ${CFG_PATH}"
 log "  Entorno Python -> ${BASCULA_CURRENT_LINK}/.venv"
-if [[ -d "${BASCULA_CURRENT_LINK}/dist" ]]; then
-  log "  Frontend compilado: dist/ (npm ci + npm run build)"
-else
-  warn "  Frontend no generado (dist/ ausente)"
-fi
-log "  Servicios habilitados: nginx bascula-miniweb bascula-backend bascula-ui ocr-service"
-log "  Capturas servidas desde: /run/bascula/captures (grupo www-data)"
+log "  mini-web        : ${SUMMARY_MINIWEB}"
+log "  UI kiosk target : ${SUMMARY_UI_TARGET}"
+log "  frontend build  : ${SUMMARY_FRONTEND}"
+log "  captures dir    : ${SUMMARY_CAPTURES}"
+log "  nginx /captures : ${SUMMARY_NGINX_CAPTURES}"
+log "  camera          : ${SUMMARY_CAMERA}"
+log "  audio           : ${SUMMARY_AUDIO}"
 log "Accesos tras el reinicio:"
 log "  http://${IP:-<IP>} o http://localhost"
 log "  Mini-Web -> http://${IP:-<IP>}:8080 (consulta /api/miniweb/pin en AP o en pantalla)"

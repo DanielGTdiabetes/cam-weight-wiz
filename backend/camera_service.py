@@ -148,9 +148,10 @@ class Picamera2Service:
             raise CameraUnavailableError("La cámara se ha cerrado previamente")
 
         attempts = 0
+        max_attempts = 3
         last_error: Optional[BaseException] = None
 
-        while attempts < 2:
+        while attempts < max_attempts:
             attempts += 1
             with self._camera_lock:
                 if self._camera is not None:
@@ -176,6 +177,15 @@ class Picamera2Service:
                         rotation if rotation is not None else "sin especificar",
                     )
                     return temp_camera
+                except IndexError as exc:
+                    last_error = exc
+                    LOG_CAMERA.warning(
+                        "Picamera2 no lista (intento %d): %s",
+                        attempts,
+                        exc,
+                        exc_info=False,
+                    )
+                    self._release_camera()
                 except (RuntimeError, CameraUnavailableError) as exc:
                     last_error = exc
                     LOG_CAMERA.warning(
@@ -199,8 +209,8 @@ class Picamera2Service:
                         except Exception:
                             LOG_CAMERA.debug("Error al cerrar la cámara temporal", exc_info=True)
 
-            if attempts < 2:
-                time.sleep(0.3)
+            if attempts < max_attempts:
+                time.sleep(0.3 * attempts)
 
         LOG_CAMERA.error("No se detectó cámara Picamera2 tras %d intentos", attempts)
         if last_error is not None:
