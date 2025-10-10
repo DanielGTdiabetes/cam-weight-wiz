@@ -24,6 +24,7 @@ StandardInput=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
+ExecStartPre=/usr/bin/curl -sf --retry 20 --retry-delay 1 http://127.0.0.1:8080/api/miniweb/status
 ExecStartPre=/bin/sh -c '\
   echo "[kiosk] waiting miniweb ${KIOSK_WAIT_SECS}s..."; \
   for i in $(seq 1 ${KIOSK_WAIT_SECS}); do \
