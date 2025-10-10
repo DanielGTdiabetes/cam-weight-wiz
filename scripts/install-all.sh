@@ -433,11 +433,18 @@ server {
     listen [::1]:80;
     server_name _;
 
+    root /var/www/bascula;
+    index index.html;
+
     access_log /var/log/nginx/bascula.access.log;
     error_log /var/log/nginx/bascula.error.log;
 
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
     location /captures/ {
-        root /run/bascula;
+        alias /run/bascula/captures/;
         autoindex off;
         add_header Cache-Control "no-store" always;
     }
@@ -454,6 +461,125 @@ EOF
   ln -sfn "${site_path}" "${enabled_link}"
   nginx -t
   systemctl restart nginx
+}
+
+ensure_node() {
+  if ! command -v node >/dev/null 2>&1; then
+    log "Instalando Node.js 20.x"
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+  fi
+  log "Node $(node -v), npm $(npm -v)"
+  corepack enable 2>/dev/null || true
+  corepack prepare yarn@stable --activate 2>/dev/null || true
+  corepack prepare pnpm@latest --activate 2>/dev/null || true
+}
+
+detect_frontend_dir() {
+  for d in frontend ui web app; do
+    if [ -d "${REPO_DIR:-/opt/bascula/current}/$d" ]; then
+      echo "${REPO_DIR:-/opt/bascula/current}/$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+build_frontend() {
+  local front_dir
+  front_dir="$(detect_frontend_dir)" || {
+    log_warn "No se encontró carpeta de frontend (frontend/ui/web/app). Omitiendo build."
+    return 0
+  }
+  log "Frontend: ${front_dir}"
+
+  pushd "${front_dir}" >/dev/null
+
+  if [ -f pnpm-lock.yaml ]; then
+    if ! command -v pnpm >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
+      corepack prepare pnpm@latest --activate 2>/dev/null || true
+    fi
+    if command -v pnpm >/dev/null 2>&1; then
+      log "Usando pnpm"
+      pnpm install --frozen-lockfile
+      pnpm run build
+    else
+      popd >/dev/null
+      log_err "UI: pnpm requerido pero no disponible"
+      exit 1
+    fi
+  elif [ -f yarn.lock ]; then
+    if ! command -v yarn >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
+      corepack prepare yarn@stable --activate 2>/dev/null || true
+    fi
+    if command -v yarn >/dev/null 2>&1; then
+      log "Usando yarn"
+      yarn install --frozen-lockfile
+      yarn build
+    else
+      popd >/dev/null
+      log_err "UI: yarn requerido pero no disponible"
+      exit 1
+    fi
+  else
+    log "Usando npm"
+    (npm ci || npm install)
+    npm run build
+  fi
+
+  local out
+  for out in dist build public; do
+    if [ -f "$out/index.html" ]; then
+      popd >/dev/null
+      echo "${front_dir}/${out}"
+      return 0
+    fi
+  done
+
+  popd >/dev/null
+  log_err "UI: falta index.html tras build (no se encontró en dist/build/public)"
+  exit 1
+}
+
+deploy_frontend() {
+  local out_dir
+  out_dir="$(build_frontend)" || return 0
+  [ -z "${out_dir}" ] && return 0
+
+  local docroot="/var/www/bascula"
+  mkdir -p "${docroot}"
+  rsync -a --delete "${out_dir}/" "${docroot}/"
+
+  chown -R root:root "${docroot}"
+  find "${docroot}" -type d -print0 | xargs -0 chmod 0755
+  find "${docroot}" -type f -print0 | xargs -0 chmod 0644
+
+  if [ ! -f "${docroot}/index.html" ]; then
+    log_err "UI: falta ${docroot}/index.html después del despliegue"
+    exit 1
+  fi
+  log "UI desplegado en ${docroot}"
+}
+
+configure_nginx_ui_root() {
+  if [ -e /etc/nginx/sites-enabled/default ]; then
+    rm -f /etc/nginx/sites-enabled/default
+  fi
+
+  if grep -Rsl "root /var/www/bascula" /etc/nginx/sites-available /etc/nginx/conf.d 2>/dev/null; then
+    :
+  else
+    log_warn "Revisar plantillas Nginx: establecer root /var/www/bascula en el server que sirve '/'"
+  fi
+
+  nginx -t
+  systemctl reload nginx || true
+
+  local preview
+  preview="$(curl -sS http://127.0.0.1/ | head -c 200 || true)"
+  if [ -n "${preview}" ]; then
+    log "HTTP 127.0.0.1 preview: ${preview}"
+  fi
 }
 
 check_ui_static() {
@@ -514,7 +640,7 @@ main() {
     ffmpeg git rsync curl jq nginx \
     alsa-utils libcamera-apps \
     xserver-xorg xinit chromium-browser matchbox-window-manager \
-    fonts-dejavu-core nodejs npm
+    fonts-dejavu-core
 
   ensure_boot_overlays || true
 
@@ -545,79 +671,10 @@ main() {
   install_nginx_site
   install_systemd_units
 
-  ensure_packages nodejs npm
-  if command -v corepack >/dev/null 2>&1; then
-    if ! corepack enable >/dev/null 2>&1; then
-      log_warn "UI: no se pudo habilitar corepack"
-    fi
-  fi
-
-  log "UI: preparando build"
-  if [[ -d "${RELEASE_DIR}/ui" ]]; then
-    pushd "${RELEASE_DIR}/ui" >/dev/null
-
-    local PKG_MANAGER="npm"
-    if [[ -f pnpm-lock.yaml ]]; then
-      PKG_MANAGER="pnpm"
-      if ! command -v pnpm >/dev/null 2>&1; then
-        if command -v corepack >/dev/null 2>&1; then
-          log "UI: instalando pnpm vía corepack"
-          if ! corepack prepare pnpm@latest --activate; then
-            log_err "UI: no se pudo activar pnpm"
-            exit 1
-          fi
-        else
-          log_err "UI: pnpm requerido pero corepack no está disponible"
-          exit 1
-        fi
-      fi
-    fi
-
-    if [[ "${PKG_MANAGER}" = "pnpm" ]]; then
-      log "UI: pnpm install"
-      if ! pnpm install --frozen-lockfile; then
-        log_err "UI: pnpm install falló"
-        exit 1
-      fi
-      log "UI: pnpm build"
-      if ! pnpm build; then
-        log_err "UI: pnpm build falló"
-        exit 1
-      fi
-    else
-      log "UI: npm ci"
-      if ! npm ci --no-audit --no-fund --legacy-peer-deps; then
-        log_err "UI: npm ci falló"
-        exit 1
-      fi
-      log "UI: npm run build"
-      if ! npm run build; then
-        log_err "UI: npm run build falló"
-        exit 1
-      fi
-    fi
-
-    local UI_DIST=""
-    for d in dist build; do
-      if [[ -d "${d}" ]]; then
-        UI_DIST="${d}"
-        break
-      fi
-    done
-    if [[ -z "${UI_DIST}" ]]; then
-      log_err "UI: no se encontró carpeta de build (dist/build)"
-      exit 1
-    fi
-
-    popd >/dev/null
-
-    local WEB_ROOT="/var/www/bascula"
-    mkdir -p "${WEB_ROOT}"
-    rsync -a --delete "${RELEASE_DIR}/ui/${UI_DIST}/" "${WEB_ROOT}/"
-    log "UI: publicado en ${WEB_ROOT}"
-  else
-    log_warn "UI: carpeta ui/ no existe en el release; se omite build"
-  fi
+  REPO_DIR="${CURRENT_LINK}"
+  ensure_node
+  deploy_frontend
+  configure_nginx_ui_root
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
     log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Omitiendo pruebas de audio (arecord/aplay)."
