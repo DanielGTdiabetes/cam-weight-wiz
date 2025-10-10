@@ -10,7 +10,7 @@
 
 set -euo pipefail
 IFS=$'\n\t'
-trap 'echo "[inst][err] línea $LINENO"; exit 1' ERR
+trap 'echo "[inst][error] fallo en línea $LINENO (cmd: $BASH_COMMAND)"; exit 1' ERR
 
 exec 9>/var/lock/bascula.install && flock -n 9 || { echo "[inst] otro instalador en marcha"; exit 0; }
 
@@ -312,8 +312,8 @@ ensure_bootcfg_line() {
   local bootcfg="$1"
   local re="$2"
   local line="$3"
-  if grep -Eq "^[[:space:]]*#?[[:space:]]*$re[[:space:]]*$" "${bootcfg}"; then
-    sed -ri "s~^[[:space:]]*#?[[:space:]]*$re[[:space:]]*$~${line}~g" "${bootcfg}"
+  if grep -Eq "^[[:space:]]*#?[[:space:]]*${re}[[:space:]]*$" "${bootcfg}"; then
+    sed -ri "s~^[[:space:]]*#?[[:space:]]*${re}[[:space:]]*$~${line}~g" "${bootcfg}"
   else
     printf '%s\n' "${line}" >> "${bootcfg}"
   fi
@@ -441,7 +441,10 @@ EOF
   if [[ -f "${asound_conf}" ]] && cmp -s "${tmp_conf}" "${asound_conf}"; then
     log "✓ /etc/asound.conf sin cambios"
   else
-    install -D -m 0644 "${tmp_conf}" "${asound_conf}"
+    if ! install -m 0644 /dev/stdin "${asound_conf}" < "${tmp_conf}"; then
+      rm -f "${tmp_conf}" || true
+      fail "No se pudo escribir ${asound_conf}"
+    fi
     log "✓ /etc/asound.conf actualizado"
   fi
   chmod 0644 "${asound_conf}" || warn "No se pudo ajustar permisos de ${asound_conf}"
@@ -2400,51 +2403,40 @@ if [[ "${NET_OK}" -eq 1 ]]; then
 else
   warn "Sin red: omitiendo instalación de Nginx"
 fi
-systemctl_safe enable nginx
+
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -d -m 0755 /etc/nginx/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
 chmod g+s /run/bascula /run/bascula/captures || true
-# asegurar que el usuario pi pertenece al grupo www-data
 usermod -aG www-data pi || true
 
 nginx_conf_src="${PROJECT_ROOT}/nginx/bascula.conf"
 nginx_conf_dst="/etc/nginx/sites-available/bascula"
 nginx_conf_link="/etc/nginx/sites-enabled/bascula"
-previous_nginx_conf=""
-previous_link_type=""
-previous_link_target=""
-previous_link_backup=""
 
 if [[ ! -f "${nginx_conf_src}" ]]; then
   fail "No se encontró ${nginx_conf_src} para desplegar configuración de Nginx"
 fi
 
-if [[ -f "${nginx_conf_dst}" ]]; then
-  previous_nginx_conf="$(mktemp)"
-  cp -f "${nginx_conf_dst}" "${previous_nginx_conf}"
-fi
-
-if [[ -L "${nginx_conf_link}" ]]; then
-  previous_link_type="symlink"
-  previous_link_target="$(readlink "${nginx_conf_link}")"
-elif [[ -e "${nginx_conf_link}" ]]; then
-  previous_link_type="file"
-  previous_link_backup="$(mktemp)"
-  cp -a "${nginx_conf_link}" "${previous_link_backup}"
-fi
-
 rm -f "${nginx_conf_link}"
 rm -f "${nginx_conf_dst}"
 
-install -D -m 0644 "${nginx_conf_src}" "${nginx_conf_dst}"
-ln -sfn "${nginx_conf_dst}" "${nginx_conf_link}"
+if ! tee "${nginx_conf_dst}" < "${nginx_conf_src}" >/dev/null; then
+  fail "No se pudo escribir ${nginx_conf_dst}"
+fi
+chmod 0644 "${nginx_conf_dst}" || warn "No se pudo ajustar permisos de ${nginx_conf_dst}"
+
+if ! ln -s "${nginx_conf_dst}" "${nginx_conf_link}"; then
+  fail "No se pudo crear enlace simbólico de configuración de Nginx"
+fi
+
 rm -f /etc/nginx/sites-enabled/default
 rm -f /etc/nginx/sites-enabled/bascula-captures /etc/nginx/sites-available/bascula-captures
 
 if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
-  if python3 - "$nginx_conf_dst" <<'PY'; then
+  if python3 - "$nginx_conf_dst" <<'PY'
+  then
 import pathlib
 import re
 import sys
@@ -2464,38 +2456,39 @@ PY
   fi
 fi
 
-if ! nginx -t; then
-  rm -f "${nginx_conf_link}"
-  if [[ -n "${previous_nginx_conf}" && -f "${previous_nginx_conf}" ]]; then
-    install -D -m 0644 "${previous_nginx_conf}" "${nginx_conf_dst}"
-  else
-    rm -f "${nginx_conf_dst}"
-  fi
-
-  if [[ "${previous_link_type}" == "symlink" && -n "${previous_link_target}" ]]; then
-    ln -s "${previous_link_target}" "${nginx_conf_link}" 2>/dev/null || true
-  elif [[ "${previous_link_type}" == "file" && -n "${previous_link_backup}" && -f "${previous_link_backup}" ]]; then
-    install -D -m 0644 "${previous_link_backup}" "${nginx_conf_link}"
-  fi
-
-  [[ -n "${previous_nginx_conf}" ]] && rm -f "${previous_nginx_conf}" || true
-  [[ -n "${previous_link_backup}" ]] && rm -f "${previous_link_backup}" || true
-
-  fail "nginx -t falló tras desplegar bascula.conf; se restauró la configuración previa"
+captures_count=$(grep -c 'location /captures/' "${nginx_conf_link}" 2>/dev/null || true)
+if (( captures_count == 0 )); then
+  echo "[inst][error] No se encontró bloque location /captures/ en ${nginx_conf_link}" >&2
+  exit 1
+fi
+if (( captures_count > 1 )); then
+  echo "[inst][error] Duplicado de location /captures/ detectado" >&2
+  exit 1
 fi
 
-[[ -n "${previous_nginx_conf}" ]] && rm -f "${previous_nginx_conf}" || true
-[[ -n "${previous_link_backup}" ]] && rm -f "${previous_link_backup}" || true
+if ! nginx -t; then
+  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+    systemctl status nginx --no-pager -l || true
+    if command -v journalctl >/dev/null 2>&1; then
+      journalctl -xeu nginx --no-pager -l | tail -n 80 || true
+    fi
+  fi
+  echo "[inst][error] nginx -t falló; revisa configuración" >&2
+  exit 1
+fi
 
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if ! systemctl enable --now nginx; then
+    fail "systemctl enable --now nginx falló"
+  fi
   if ! systemctl reload nginx; then
     warn "systemctl reload nginx falló; intentando restart"
     if ! systemctl restart nginx; then
-      warn "systemctl restart nginx también falló"
+      fail "systemctl restart nginx falló"
     fi
   fi
 else
-  warn "systemd no disponible; omitiendo reload de nginx"
+  warn "systemd no disponible; omitiendo enable/reload de nginx"
 fi
 log "✓ Nginx configurado"
 
@@ -2854,17 +2847,14 @@ if command -v curl >/dev/null 2>&1; then
     fi
   else
     miniweb_json="$(curl -sf http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"
-    if [[ -n "${miniweb_json}" ]] && python3 - <<'PY' >/dev/null 2>&1 <<<"${miniweb_json}"; then
-import json
-import sys
-
-data = json.load(sys.stdin)
-sys.exit(0 if data.get("ok") is True else 1)
-PY
-    then
-      log "[verif][ok] API miniweb responde"
+    if [[ -n "${miniweb_json}" ]]; then
+      if python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data.get("ok") is True else 1)' >/dev/null 2>&1 <<<"${miniweb_json}"; then
+        log "[verif][ok] API miniweb responde"
+      else
+        warn "[verif] API miniweb no respondió ok=true"
+      fi
     else
-      warn "[verif] API miniweb no respondió ok=true"
+      warn "[verif] API miniweb no devolvió contenido"
     fi
   fi
 else
@@ -2903,12 +2893,18 @@ if [[ "${SUMMARY_MINIWEB}" == "pending" ]]; then
     MINIWEB_JSON="$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"
   fi
   if [[ -n "${MINIWEB_JSON}" ]]; then
-    parsed="$(printf '%s' "${MINIWEB_JSON}" | python3 - <<'PY'
+    parsed="$(MINIWEB_STATUS_JSON="${MINIWEB_JSON}" python3 - <<'PY'
 import json
+import os
 import sys
 
+payload = os.environ.get("MINIWEB_STATUS_JSON")
+if not payload:
+    print("error|parse")
+    sys.exit(0)
+
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(payload)
 except Exception:
     print("error|parse")
     sys.exit(0)
