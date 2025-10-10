@@ -1,11 +1,11 @@
 [Unit]
-Description=Espera a que miniweb responda ok=true
-After=bascula-miniweb.service
-Wants=bascula-miniweb.service
+Description=Espera a que miniweb (8080) y backend (8081) estén disponibles
+After=bascula-miniweb.service bascula-backend.service
+Wants=bascula-miniweb.service bascula-backend.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'i=0; until [ "$i" -ge 120 ]; do out="$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"; echo "$out" | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true" && exit 0; sleep 1; i=$((i+1)); done; exit 1'
+ExecStart=/opt/bascula/current/systemd/bin/bascula-health-wait.sh
 
 [Install]
 WantedBy=multi-user.target
