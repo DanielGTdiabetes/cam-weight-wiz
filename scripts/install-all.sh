@@ -1,3208 +1,445 @@
 #!/bin/bash
 #
-# Script de instalación completa para Báscula Digital Pro (bascula-cam)
-# Raspberry Pi 5 + Bookworm Lite 64-bit
-# - Instala estructura OTA con versionado
-# - Configura HDMI (1024x600), KMS, I2S audio, UART, Camera Module 3
-# - Instala Piper TTS, Tesseract OCR, servicios y NetworkManager AP fallback
-# - Idempotente con verificaciones exhaustivas
+# Instalador principal para Báscula Digital Pro en Raspberry Pi OS Bookworm Lite
+# Requisitos clave:
+#   - Idempotente, seguro ante re-ejecuciones
+#   - Gestiona releases OTA en /opt/bascula/releases/<timestamp>
+#   - Configura audio, nginx, systemd y dependencias mínimas para Pi 5
+#   - Ejecuta verificaciones básicas y controla reinicios diferidos
 #
 
 set -euo pipefail
 IFS=$'\n\t'
-trap 'echo "[inst][error] fallo en línea $LINENO (cmd: $BASH_COMMAND)"; exit 1' ERR
 
-exec 9>/var/lock/bascula.install
-if ! flock -n 9; then
-  echo "[inst] otro instalador en marcha"
-  exit 0
-fi
+LOG_PREFIX="[install]"
+RELEASES_DIR="/opt/bascula/releases"
+CURRENT_LINK="/opt/bascula/current"
+DEFAULT_USER="pi"
+WWW_GROUP="www-data"
+STATE_DIR="/var/lib/bascula"
+TMPFILES_DEST="/etc/tmpfiles.d"
+SYSTEMD_DEST="/etc/systemd/system"
+NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
+NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
+NGINX_SITE_NAME="bascula.conf"
+ASOUND_CONF="/etc/asound.conf"
+AUDIO_ENV_FILE="/etc/default/bascula-audio"
+BOOT_FIRMWARE_DIR="/boot/firmware"
+BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
+REBOOT_FLAG=0
 
-log() { printf '[inst] %s\n' "$*"; }
-log_err() { printf '[inst][err] %s\n' "$*" >&2; }
-log_warn() { printf '[inst][warn] %s\n' "$*"; }
+umask 022
 
-warn() { log_warn "$@"; }
-err() { log_err "$@"; }
-fail() { log_err "$*"; exit 1; }
+log() {
+  printf '%s %s\n' "${LOG_PREFIX}" "$*"
+}
 
-try_or_warn() {
+log_warn() {
+  printf '%s[warn] %s\n' "${LOG_PREFIX}" "$*" >&2
+}
+
+log_err() {
+  printf '%s[err] %s\n' "${LOG_PREFIX}" "$*" >&2
+}
+
+abort() {
+  log_err "$*"
+  exit 1
+}
+
+require_root() {
+  if [[ $(id -u) -ne 0 ]]; then
+    abort "Este instalador debe ejecutarse como root"
+  fi
+}
+
+run_checked() {
   local label="$1"
-  shift || true
-  local command="$*"
-  log "[check] ${label}"
-  if [[ -z "${command}" ]]; then
-    log_warn "${label} sin comando para ejecutar"
+  shift
+  log "check: ${label}"
+  if "$@"; then
+    log "check OK: ${label}"
+  else
+    log_warn "check falló (${label})"
     return 1
   fi
-  if bash -lc "${command}"; then
-    log "[check][ok] ${label}"
-    return 0
-  fi
-  local status=$?
-  log_warn "${label} falló (status ${status}). Comando: ${command}"
-  return ${status}
 }
 
-SUMMARY_MINIWEB="pending"
-SUMMARY_UI_TARGET="pending"
-SUMMARY_FRONTEND="pending"
-SUMMARY_CAPTURES="pending"
-SUMMARY_NGINX_CAPTURES="pending"
-SUMMARY_CAMERA="pending"
-SUMMARY_AUDIO="pending"
-CAMERA_SUMMARY_STATUS="UNKNOWN"
-CAMERA_SUMMARY_HINT=""
-AUDIO_RECORD_STATUS="pending"
-AUDIO_PLAY_STATUS="pending"
-NEED_REBOOT=0
-
-build_frontend_once() {
-  local project_dir="$1"
-  local dist_dir="${project_dir}/dist"
-  local commit=""
-  local recorded_commit=""
-
-  if [[ -n "${BASCULA_FRONTEND_COMMIT:-}" ]]; then
-    commit="${BASCULA_FRONTEND_COMMIT}"
-  elif [[ -f "${project_dir}/.ota_commit" ]]; then
-    commit="$(tr -d '\n\r' < "${project_dir}/.ota_commit" 2>/dev/null || echo "")"
-  elif [[ -d "${project_dir}/.git" ]] && command -v git >/dev/null 2>&1; then
-    commit="$(git -C "${project_dir}" rev-parse HEAD 2>/dev/null || echo "")"
-  fi
-
-  if [[ -f "${FRONTEND_COMMIT_FILE}" ]]; then
-    recorded_commit="$(tr -d '\n\r' < "${FRONTEND_COMMIT_FILE}" 2>/dev/null || echo "")"
-  fi
-
-  if [[ -f "${FRONTEND_MARKER}" && -d "${dist_dir}" ]]; then
-    if [[ -n "${commit}" && -n "${recorded_commit}" && "${commit}" == "${recorded_commit}" ]]; then
-      log "[inst][skip] Frontend ya compilado (commit ${commit})"
-      SUMMARY_FRONTEND="OK (skip, commit ${commit})"
-      return 0
-    fi
-    if [[ -z "${commit}" && -f "${FRONTEND_MARKER}" ]]; then
-      log "[inst][skip] Frontend ya compilado (marcador existente)"
-      SUMMARY_FRONTEND="OK (skip, marcador existente)"
-      return 0
-    fi
-    log_warn "dist/ presente pero commit cambió; recompilando frontend"
-  fi
-
-  if [[ ! -d "${project_dir}" ]]; then
-    err "Directorio de proyecto inexistente para build frontend: ${project_dir}"
-    return 1
-  fi
-
-  pushd "${project_dir}" >/dev/null || {
-    err "No se pudo acceder a ${project_dir} para compilar frontend"
-    return 1
-  }
-
-  if [[ ! -f "package.json" ]]; then
-    warn "package.json no encontrado; se omite build de frontend"
-    SUMMARY_FRONTEND="omitido (sin package.json)"
-    popd >/dev/null || true
-    return 0
-  fi
-
-  if ! command -v npm >/dev/null 2>&1; then
-    popd >/dev/null || true
-    err "[ERROR] npm no disponible; instala Node/NPM antes de construir"
-    return 1
-  fi
-
-  log "Iniciando compilación única de frontend..."
-  if ! npm ci; then
-    popd >/dev/null || true
-    err "[ERROR] npm ci falló"
-    return 1
-  fi
-
-  if command -v node >/dev/null 2>&1 && [[ -f "scripts/generate-service-worker.mjs" ]]; then
-    if ! node scripts/generate-service-worker.mjs; then
-      warn "No se pudo generar service worker"
-    fi
-  fi
-
-  if ! npm run build; then
-    popd >/dev/null || true
-    err "[ERROR] npm run build falló"
-    return 1
-  fi
-
-  if [[ ! -d "dist" ]]; then
-    popd >/dev/null || true
-    err "[ERROR] dist/ no generado"
-    return 1
-  fi
-
-  popd >/dev/null || true
-  install -d -m 0755 "${INSTALL_META_DIR}"
-  printf '%s\n' "${commit:-unknown}" > "${FRONTEND_COMMIT_FILE}"
-  touch "${FRONTEND_MARKER}"
-  log "[inst][done] Frontend compilado (npm ci + build)"
-  SUMMARY_FRONTEND="OK (built, commit ${commit:-unknown})"
-  return 0
-}
-
-OVERLAY_ADDED=0
-INSTALL_LOG=""
-
-REBOOT_STATE_DIR="/var/lib/bascula"
-REBOOT_FLAG_FILE="${REBOOT_STATE_DIR}/reboot-required"
-REBOOT_QUEUE_MARK="${REBOOT_STATE_DIR}/reboot-queued"
-REBOOT_REASONS_FILE="${REBOOT_STATE_DIR}/reboot-reasons.txt"
-
-STATE_DIR="${REBOOT_STATE_DIR}"
-VENV_MARKER="${STATE_DIR}/venv_ready"
-FRONTEND_MARKER="${STATE_DIR}/frontend_built"
-SERVICES_MARKER="${STATE_DIR}/services_provisioned"
-POSTINSTALL_DONE_MARKER="${STATE_DIR}/postinstall.done"
-INSTALL_META_DIR="${STATE_DIR}/install-meta"
-FRONTEND_COMMIT_FILE="${INSTALL_META_DIR}/frontend.sha"
-
-install -d -m 0755 -o root -g root "${STATE_DIR}"
-
-install -d -m 0755 -o root -g root "${REBOOT_STATE_DIR}"
-install -d -m 0755 -o root -g root "${INSTALL_META_DIR}"
-: > "${REBOOT_REASONS_FILE}" || true
-
-require_reboot() {
+set_reboot_required() {
   local reason="$1"
-  touch "${REBOOT_FLAG_FILE}"
-  printf '%s\n' "${reason}" >> "${REBOOT_REASONS_FILE}"
+  REBOOT_FLAG=1
+  mkdir -p "${STATE_DIR}"
+  printf '%s\n' "${reason}" >> "${STATE_DIR}/reboot-reasons.txt"
 }
 
-disable_cloud_init() {
-  local bootcfg_dir="/boot/firmware"
-  local mark_file="${bootcfg_dir}/cloud-init.disabled"
-  local cmdline="${bootcfg_dir}/cmdline.txt"
-
-  echo "[install] Disabling cloud-init (if present)"
-
-  if [ -d "${bootcfg_dir}" ]; then
-    if [ ! -f "${mark_file}" ]; then
-      touch "${mark_file}" || true
-      echo "[install] Created ${mark_file}"
-    else
-      echo "[install] Marker already present: ${mark_file}"
-    fi
-
-    if [ -f "${cmdline}" ] && ! grep -q 'cloud-init=disabled' "${cmdline}"; then
-      sed -i '1 s|$| cloud-init=disabled|' "${cmdline}" || true
-      echo "[install] Appended cloud-init=disabled to ${cmdline}"
-    fi
-  else
-    echo "[install] ${bootcfg_dir} not found; skipping boot markers"
-  fi
-
-  if [[ "${HAS_SYSTEMD:-0}" -eq 1 ]]; then
-    if systemctl list-unit-files | grep -q '^cloud-init\\.service'; then
-      systemctl disable --now cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service || true
-      systemctl mask cloud-init.service cloud-init-local.service cloud-config.service cloud-final.service || true
-      echo "[install] cloud-init services disabled & masked"
-    else
-      echo "[install] cloud-init services not found (ok)"
-    fi
-  else
-    echo "[install] systemd not available; skipping cloud-init services"
-  fi
-
-  echo "[install] cloud-init disabled (reboot recommended)"
-}
-
-apt_has() {
-  dpkg -s "$1" >/dev/null 2>&1
-}
-
-apt_install() {
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"
-}
-
-ensure_pkg() {
+APT_UPDATED=0
+ensure_packages() {
+  local pkgs=("$@")
+  local missing=()
   local pkg
-  for pkg in "$@"; do
-    apt_has "${pkg}" || apt_install "${pkg}"
+  for pkg in "${pkgs[@]}"; do
+    if ! dpkg -s "${pkg}" >/dev/null 2>&1; then
+      missing+=("${pkg}")
+    fi
   done
-}
-
-apt_candidate_exists() {
-  local candidate
-  candidate=$(apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ {print $2; exit}')
-  [[ -n "${candidate}" && "${candidate}" != "(none)" ]]
-}
-
-ensure_user_in_group() {
-  local user="$1"
-  local group="$2"
-  if ! id -u "${user}" >/dev/null 2>&1; then
-    warn "Usuario ${user} no existe; omitiendo adición a ${group}"
-    return
-  fi
-  if ! getent group "${group}" >/dev/null 2>&1; then
-    warn "Grupo ${group} no existe; omitiendo adición de ${user}"
-    return
-  fi
-  if id -nG "${user}" | tr ' ' '\n' | grep -qx "${group}"; then
-    log "Usuario ${user} ya pertenece al grupo ${group}"
-    return
-  fi
-  if usermod -aG "${group}" "${user}"; then
-    log "Añadido usuario ${user} al grupo ${group}"
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    if [[ ${APT_UPDATED} -eq 0 ]]; then
+      log "Ejecutando apt-get update"
+      apt-get update
+      APT_UPDATED=1
+    fi
+    log "Instalando paquetes: ${missing[*]}"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
   else
-    warn "No se pudo añadir ${user} al grupo ${group}"
+    log "Paquetes ya instalados"
   fi
 }
 
-ensure_enable_uart() {
-  local conf_file="$1"
-  if [[ ${SKIP_HARDWARE_CONFIG:-0} == 1 ]]; then
-    warn "SKIP_HARDWARE_CONFIG=1, omitiendo forzar enable_uart"
+ensure_boot_config_line() {
+  local line="$1"
+  local file="${BOOT_CONFIG_FILE}"
+  if [[ ! -f "${file}" ]]; then
+    abort "No se encontró ${file}; verifique montaje de /boot"
+  fi
+  if grep -Fxq "${line}" "${file}"; then
+    return 0
+  fi
+  log "Añadiendo '${line}' a ${file}"
+  printf '\n%s\n' "${line}" >> "${file}"
+  set_reboot_required "boot-config: ${line}"
+}
+
+ensure_boot_overlays() {
+  if [[ ! -d "${BOOT_FIRMWARE_DIR}" ]]; then
+    log_warn "${BOOT_FIRMWARE_DIR} no encontrado; omitiendo configuración de overlays"
     return
   fi
-  if [[ ! -f "${conf_file}" ]]; then
-    warn "No se encontró ${conf_file}; creando archivo para habilitar UART"
-    if ! touch "${conf_file}"; then
-      warn "No se pudo crear ${conf_file}; UART no configurado"
-      return
+  ensure_boot_config_line "dtoverlay=vc4-kms-v3d-pi5"
+  ensure_boot_config_line "dtoverlay=disable-bt"
+  ensure_boot_config_line "dtoverlay=hifiberry-dac"
+  ensure_boot_config_line "enable_uart=1"
+}
+
+current_commit() {
+  if command -v git >/dev/null 2>&1 && git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
+    git -C "${REPO_ROOT}" rev-parse HEAD
+  else
+    printf 'unknown\n'
+  fi
+}
+
+select_release_dir() {
+  local commit="$1"
+  local existing_target
+  if [[ -L "${CURRENT_LINK}" ]]; then
+    existing_target=$(readlink -f "${CURRENT_LINK}")
+    if [[ -n "${existing_target}" && -f "${existing_target}/.release-commit" ]]; then
+      if [[ $(cat "${existing_target}/.release-commit") == "${commit}" ]]; then
+        log "Reutilizando release actual ${existing_target}".
+        RELEASE_DIR="${existing_target}"
+        return 0
+      fi
     fi
   fi
-  if grep -qE '^\s*enable_uart=1\b' "${conf_file}"; then
-    log "UART ya habilitado en ${conf_file}"
-    return
-  fi
-  if grep -qE '^\s*enable_uart=' "${conf_file}"; then
-    if sed -i 's/^\s*enable_uart=.*/enable_uart=1/' "${conf_file}"; then
-      log "Actualizado enable_uart=1 en ${conf_file}"
-      require_reboot "enable_uart=1 en ${conf_file}"
-    else
-      warn "No se pudo actualizar enable_uart en ${conf_file}"
-    fi
-  else
-    {
-      printf '\n# Habilitado por instalador de Báscula\n'
-      printf 'enable_uart=1\n'
-    } >>"${conf_file}" || warn "No se pudo escribir enable_uart en ${conf_file}"
-    log "Añadido enable_uart=1 a ${conf_file}"
-    require_reboot "enable_uart=1 en ${conf_file}"
-  fi
-}
-
-backup_boot_config_once() {
-  local bootcfg="$1"
-  local ts="$2"
-  if [[ ! -f "${bootcfg}" ]]; then
-    warn "config.txt no existe en ${bootcfg}"
-    return 1
-  fi
-  local backup_path="${bootcfg}.bak-${ts}"
-  if cp -a "${bootcfg}" "${backup_path}"; then
-    printf '[install] Backup: %s\n' "${backup_path}"
-  else
-    warn "No se pudo crear copia de seguridad ${backup_path}"
-    return 1
-  fi
-}
-
-ensure_bootcfg_line() {
-  local bootcfg="$1"
-  local re="$2"
-  local line="$3"
-  if grep -Eq "^[[:space:]]*#?[[:space:]]*${re}[[:space:]]*$" "${bootcfg}"; then
-    sed -ri "s~^[[:space:]]*#?[[:space:]]*${re}[[:space:]]*$~${line}~g" "${bootcfg}"
-  else
-    printf '%s\n' "${line}" >> "${bootcfg}"
-  fi
-}
-
-configure_pi_boot_hardware() {
-  local bootcfg="${CONF}"
   local ts
-  ts="$(date +%Y%m%d-%H%M%S)"
-  local dac_name="${HW_DAC_NAME:-hifiberry-dac}"
-  local block_start="# --- Bascula-Cam: Hardware Configuration ---"
-  local block_end="# --- Bascula-Cam (end) ---"
-
-  if [[ ! -f "${bootcfg}" ]]; then
-    warn "config.txt no existe en ${bootcfg}"
-    return 1
-  fi
-
-  if [[ ! -w "${bootcfg}" ]]; then
-    warn "No se puede escribir en ${bootcfg}"
-    return 1
-  fi
-
-  backup_boot_config_once "${bootcfg}" "${ts}" || true
-
-  local cleaned="${bootcfg}.clean.$$"
-  if awk -v start="${block_start}" -v end="${block_end}" '
-    BEGIN {skip=0}
-    $0 == start {skip=1; next}
-    skip && $0 == end {skip=0; next}
-    !skip {print}
-  ' "${bootcfg}" > "${cleaned}"; then
-    mv "${cleaned}" "${bootcfg}"
+  if [[ -n "${BASCULA_RELEASE_ID:-}" ]]; then
+    ts="${BASCULA_RELEASE_ID}"
   else
-    rm -f "${cleaned}"
-    warn "No se pudo limpiar bloque previo Bascula-Cam en ${bootcfg}"
+    ts=$(date +%Y%m%d-%H%M%S)
   fi
+  RELEASE_DIR="${RELEASES_DIR}/${ts}"
+  install -d -m 0755 -o root -g root "${RELEASE_DIR}"
+}
 
-  if {
-    printf '\n%s\n' "${block_start}"
-    printf '# (autoconfig generado por install-all.sh)\n'
-    printf 'dtparam=i2c_arm=on\n'
-    printf 'dtparam=i2s=on\n'
-    printf 'dtparam=spi=on\n'
-    printf 'dtparam=audio=off\n'
-    printf 'dtoverlay=i2s-mmap\n'
-    printf 'dtoverlay=%s\n' "${dac_name}"
-    printf 'camera_auto_detect=1\n'
-    printf 'dtoverlay=imx708\n'
-    printf '%s\n' "${block_end}"
-  } >> "${bootcfg}"; then
-    require_reboot "configuracion de overlays I2C/I2S/SPI/imx708 (${dac_name})"
-  else
-    warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
+sync_release_contents() {
+  log "Sincronizando release en ${RELEASE_DIR}"
+  rsync -a --delete --exclude='.git' --exclude='.venv' "${REPO_ROOT}/" "${RELEASE_DIR}/"
+  printf '%s\n' "${COMMIT}" > "${RELEASE_DIR}/.release-commit"
+  ln -sfn "${RELEASE_DIR}" "${CURRENT_LINK}"
+}
+
+ensure_python_venv() {
+  local venv_dir="${RELEASE_DIR}/.venv"
+  if [[ ! -d "${venv_dir}" ]]; then
+    log "Creando entorno virtual en ${venv_dir}"
+    python3 -m venv "${venv_dir}"
   fi
-
-  local tmp_file="${bootcfg}.tmp.$$"
-  if awk 'NR==1 {prev=$0; print; next} {if ($0 != prev) print; prev=$0}' "${bootcfg}" > "${tmp_file}"; then
-    mv "${tmp_file}" "${bootcfg}"
-  else
-    rm -f "${tmp_file}"
-    warn "No se pudo limpiar duplicados en ${bootcfg}"
+  source "${venv_dir}/bin/activate"
+  pip install --upgrade pip wheel
+  local pip_index="${PIP_EXTRA_INDEX_URL:-https://www.piwheels.org/simple}"
+  pip install --extra-index-url "${pip_index}" -r "${RELEASE_DIR}/requirements.txt"
+  if [[ -f "${RELEASE_DIR}/requirements-voice.txt" ]]; then
+    pip install --extra-index-url "${pip_index}" -r "${RELEASE_DIR}/requirements-voice.txt"
   fi
-
-  printf '[install] Cámara Picamera2 configurada\n'
-  printf '[install] Boot overlays activados (I2C/I2S/SPI + %s + imx708). Requiere reboot.\n' "${dac_name}"
+  deactivate || true
 }
 
-configure_hifiberry_audio() {
-  local asound_conf="/etc/asound.conf"
-  local defaults_conf="/etc/default/bascula-audio"
-  local tmp_conf tmp_defaults
-
-  tmp_conf="$(mktemp)"
-  cat <<'EOF' > "${tmp_conf}"
-pcm.dmix_dac {
-type dmix
-ipc_key 1024
-ipc_perm 0666
-slave {
-pcm "hw:1,0"
-rate 44100
-channels 2
-format S16_LE
-period_time 0
-buffer_time 0
-}
-}
-pcm.dsnoop_mic {
-type dsnoop
-ipc_key 2048
-ipc_perm 0666
-slave {
-pcm "hw:0,0"
-channels 1
-rate 16000
-format S16_LE
-}
-}
-pcm.bascula_out { type plug; slave.pcm "dmix_dac"; }
-pcm.bascula_mix_in { type plug; slave.pcm "dsnoop_mic"; }
-pcm.!default bascula_out
-ctl.!default bascula_out
-EOF
-
-  if [[ -f "${asound_conf}" ]]; then
-    if cmp -s "${tmp_conf}" "${asound_conf}"; then
-      log "✓ /etc/asound.conf sin cambios"
-    else
-      local ts
-      ts="$(date +%Y%m%d-%H%M%S)"
-      if cp -a "${asound_conf}" "${asound_conf}.bak-${ts}"; then
-        log "[inst] Backup creado: ${asound_conf}.bak-${ts}"
-      else
-        warn "No se pudo crear backup previo de ${asound_conf}"
-      fi
-      if ! install -m 0644 "${tmp_conf}" "${asound_conf}"; then
-        rm -f "${tmp_conf}" || true
-        fail "No se pudo escribir ${asound_conf}"
-      fi
-      log "✓ /etc/asound.conf actualizado"
-    fi
-  else
-    if ! install -m 0644 "${tmp_conf}" "${asound_conf}"; then
-      rm -f "${tmp_conf}" || true
-      fail "No se pudo escribir ${asound_conf}"
-    fi
-    log "✓ /etc/asound.conf creado"
-  fi
-  chmod 0644 "${asound_conf}" || warn "No se pudo ajustar permisos de ${asound_conf}"
-  rm -f "${tmp_conf}" || true
-
-  tmp_defaults="$(mktemp)"
-  cat <<'EOF' >"${tmp_defaults}"
+ensure_audio_env_file() {
+  cat <<'EOF' > "${AUDIO_ENV_FILE}.tmp"
 BASCULA_AUDIO_DEVICE=bascula_out
 BASCULA_MIC_DEVICE=bascula_mix_in
 BASCULA_SAMPLE_RATE=16000
 EOF
+  install -o root -g root -m 0644 "${AUDIO_ENV_FILE}.tmp" "${AUDIO_ENV_FILE}"
+  rm -f "${AUDIO_ENV_FILE}.tmp"
+}
 
-  if [[ ! -f "${defaults_conf}" ]]; then
-    install -D -m 0644 "${tmp_defaults}" "${defaults_conf}"
-    log "✓ /etc/default/bascula-audio creado"
-  elif cmp -s "${tmp_defaults}" "${defaults_conf}"; then
-    log "✓ /etc/default/bascula-audio sin cambios"
-  else
-    log_warn "/etc/default/bascula-audio personalizado; se mantiene contenido existente"
-  fi
-  rm -f "${tmp_defaults}" || true
-
+get_playback_hw() {
   if command -v aplay >/dev/null 2>&1; then
-    if aplay -D bascula_out /dev/zero >/dev/null 2>&1; then
-      AUDIO_PLAY_STATUS="ok"
-      log "[check][ok] aplay -D bascula_out /dev/zero"
-    else
-      AUDIO_PLAY_STATUS="fail"
-      log_warn "aplay -D bascula_out /dev/zero falló; revisa salida de audio"
+    local list
+    list=$(aplay -L 2>/dev/null)
+    local hifiberry
+    hifiberry=$(printf '%s
+' "${list}" | awk '/^hw:CARD=sndrpihifiberry/ {print; exit}')
+    if [[ -n "${hifiberry}" ]]; then
+      printf '%s
+' "${hifiberry}"
+      return 0
     fi
-  else
-    AUDIO_PLAY_STATUS="skipped"
-    log_warn "aplay no disponible; omitiendo verificación de salida"
-  fi
-
-  if command -v arecord >/dev/null 2>&1; then
-    if arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1 -q -t raw /dev/null >/dev/null 2>&1; then
-      AUDIO_RECORD_STATUS="ok"
-      log "[check][ok] arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1"
-    else
-      AUDIO_RECORD_STATUS="fail"
-      log_warn "arecord -D bascula_mix_in falló; revisa micrófono"
-    fi
-  else
-    AUDIO_RECORD_STATUS="skipped"
-    log_warn "arecord no disponible; omitiendo verificación de entrada"
-  fi
-}
-
-configure_usb_microphone() {
-  if ! amixer -c 0 scontrols >/dev/null 2>&1; then
-    warn "No se pudo acceder a controles de la tarjeta 0; omitiendo Mic"
-    return
-  fi
-
-  if ! amixer -c 0 scontrols 2>/dev/null | grep -q "'Mic'"; then
-    warn "Control 'Mic' no disponible en la tarjeta 0"
-    return
-  fi
-
-  amixer -c 0 sset 'Mic' 16 cap >/dev/null 2>&1 || true
-  amixer -c 0 sset 'Auto Gain Control' on >/dev/null 2>&1 || true
-
-  printf '[install] Micrófono USB configurado (Mic=100%%, AGC=on). SoftMicGain listo en alsamixer.\n'
-}
-
-ensure_audio_playback_defaults() {
-  local volume="${BASCULA_AUDIO_VOLUME:-80%}"
-  local controls=(SoftSpeaker Digital Master PCM Speaker Playback)
-  local cards=(0 1)
-  local unmuted="no"
-  local any_control=0
-  local card_list=""
-
-  if command -v aplay >/dev/null 2>&1; then
-    card_list="$(aplay -l 2>/dev/null | awk 'BEGIN{ORS="; "}/^card/{printf "%s", $0} END{ORS=""}')"
-    card_list="${card_list%; }"
-  fi
-
-  if ! command -v amixer >/dev/null 2>&1; then
-    warn "amixer no disponible; no se puede asegurar volumen por defecto"
-    SUMMARY_AUDIO="desmuted=unknown (amixer no disponible)"
-    return
-  fi
-
-  for card in "${cards[@]}"; do
-    if ! amixer -c "${card}" scontrols >/dev/null 2>&1; then
-      continue
-    fi
-    for control in "${controls[@]}"; do
-      if amixer -c "${card}" scontrols 2>/dev/null | grep -Fq "'${control}'"; then
-        any_control=1
-        amixer -c "${card}" sset "${control}" "${volume}" unmute >/dev/null 2>&1 || true
-        if amixer -c "${card}" get "${control}" 2>/dev/null | grep -q '\[on\]'; then
-          unmuted="yes"
-        fi
-      fi
-    done
-  done
-
-  if command -v alsactl >/dev/null 2>&1; then
-    alsactl store >/dev/null 2>&1 || true
-  fi
-
-  if [[ -z "${card_list}" ]]; then
-    card_list="sin tarjetas detectadas"
-  fi
-
-  if [[ "${any_control}" -eq 0 ]]; then
-    warn "No se encontraron controles de mezcla conocidos para desmutear"
-  fi
-
-  SUMMARY_AUDIO="desmuted=${unmuted} (${card_list})"
-  if [[ "${AUDIO_RECORD_STATUS}" != "pending" || "${AUDIO_PLAY_STATUS}" != "pending" ]]; then
-    SUMMARY_AUDIO+="; rec=${AUDIO_RECORD_STATUS}; play=${AUDIO_PLAY_STATUS}"
-  fi
-  if [[ "${unmuted}" != "yes" ]]; then
-    warn "No se pudo confirmar desmute de audio; revisa alsamixer"
-  else
-    log "Audio configurado con volumen ${volume} (unmute)"
-  fi
-}
-
-configure_miniweb_audio_env() {
-  local override_dir="/etc/systemd/system/bascula-miniweb.service.d"
-  local override_file="${override_dir}/21-audio.conf"
-  local tmp_override
-  local updated=0
-
-  install -d -m 0755 "${override_dir}"
-
-  tmp_override="$(mktemp)"
-  cat > "${tmp_override}" <<'EOF'
-[Service]
-Environment="BASCULA_AUDIO_DEVICE=bascula_out"
-Environment="BASCULA_MIC_DEVICE=bascula_mix_in"
-Environment="BASCULA_SAMPLE_RATE=16000"
-EOF
-
-  if [[ ! -f "${override_file}" ]]; then
-    install -D -m 0644 "${tmp_override}" "${override_file}"
-    updated=1
-  elif ! cmp -s "${tmp_override}" "${override_file}"; then
-    install -D -m 0644 "${tmp_override}" "${override_file}"
-    updated=1
-  else
-    log "✓ Override de audio sin cambios (21-audio.conf)"
-  fi
-
-  rm -f "${tmp_override}" || true
-
-  if [[ "${updated}" -eq 1 ]]; then
-    log "✓ Override de audio para bascula-miniweb.service actualizado"
-    if command -v systemctl >/dev/null 2>&1; then
-      systemctl daemon-reload || warn "systemctl daemon-reload falló"
-      systemctl restart bascula-miniweb || warn "No se pudo reiniciar bascula-miniweb"
-    else
-      warn "systemctl no disponible; no se pudo aplicar override de audio"
-    fi
-  fi
-}
-
-ensure_libcamera_stack() {
-  local packages=(
-    libcamera-apps
-    rpicam-apps
-    python3-libcamera
-    python3-picamera2
-    v4l-utils
-  )
-
-  log "Instalando pila libcamera/picamera2…"
-
-  if [[ "${NET_OK:-0}" -eq 1 ]]; then
-    if ! apt-get update; then
-      log_warn "apt-get update falló antes de instalar libcamera"
-    fi
-  else
-    log_warn "Sin red: instalando pila libcamera desde caché"
-  fi
-
-  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"; then
-    warn "Instalación de paquetes libcamera parcial; revisa conectividad"
-  fi
-
-  install -d -m 0755 -o pi -g www-data /run/bascula
-  install -d -m 02770 -o pi -g www-data /run/bascula/captures
-  chmod g+s /run/bascula/captures || true
-
-  if command -v rpicam-still >/dev/null 2>&1; then
-    timeout 5 rpicam-still -t 1000 -o /run/bascula/captures/selftest.jpg || true
-  fi
-
-  return 0
-}
-
-ensure_libcamera_ready() {
-  local status="WARN"
-  local hint="sin verificación"
-  local hello_output=""
-  local hello_rc=0
-  local list_output=""
-  local cameras_detected=0
-  local needs_reinstall=0
-
-  if [[ "${NET_OK:-0}" -eq 1 ]]; then
-    if ! apt-get install -y libcamera-apps; then
-      warn "No se pudo instalar/actualizar libcamera-apps"
-    fi
-  else
-    warn "Sin red: no se puede asegurar instalación de libcamera-apps"
-  fi
-
-  if command -v libcamera-hello >/dev/null 2>&1; then
-    if ! timeout 5 libcamera-hello -t 1000 >/dev/null 2>&1; then
-      log_warn "libcamera-hello falló"
-    fi
-  fi
-
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - <<'PY'
-try:
-    from picamera2 import Picamera2
-except Exception as exc:  # noqa: BLE001
-    print("[warn] Picamera2 error:", exc)
-else:
-    try:
-        cams = Picamera2.global_camera_info()
-        print(f"[check] cámaras detectadas: {len(cams)} -> {cams}")
-    except Exception as exc:  # noqa: BLE001
-        print("[warn] Picamera2 error:", exc)
-PY
-  else
-    log_warn "python3 no disponible para comprobar Picamera2"
-  fi
-
-  if ! command -v libcamera-hello >/dev/null 2>&1; then
-    log_warn "libcamera-hello ausente tras verificación de pila (posible reboot pendiente)"
-    if [[ "${NEED_REBOOT}" = "1" ]]; then
-      CAMERA_SUMMARY_STATUS="WARN"
-      CAMERA_SUMMARY_HINT="libcamera pendiente de reinicio"
-      SUMMARY_CAMERA="WARN (reboot pendiente libcamera)"
-    else
-      CAMERA_SUMMARY_STATUS="FAIL"
-      CAMERA_SUMMARY_HINT="libcamera-hello ausente"
-      SUMMARY_CAMERA="FAIL (libcamera-hello ausente)"
-    fi
-    return
-  fi
-
-  try_or_warn "libcamera version" "libcamera-hello --version"
-
-  hello_output="$(timeout 5 libcamera-hello -t 1000 2>&1)"
-  hello_rc=$?
-  if printf '%s' "${hello_output}" | grep -qi 'ipa_rpi_pisp\.so: undefined symbol'; then
-    needs_reinstall=1
-    hint="ipa_rpi_pisp.so undefined symbol"
-  elif [[ ${hello_rc} -ne 0 ]]; then
-    hint="libcamera-hello rc=${hello_rc}"
-  else
-    hint="libcamera-hello ok"
-  fi
-
-  list_output="$(libcamera-hello --list-cameras 2>&1 || true)"
-  cameras_detected=$(printf '%s' "${list_output}" | awk '/^[[:space:]]*[0-9]+[[:space:]]*:/ {count++} END {print count+0}')
-  if printf '%s' "${list_output}" | grep -qiE 'ipa_rpi_pisp\\.so|Failed to load a suitable IPA'; then
-    needs_reinstall=1
-    hint="IPA no disponible"
-  elif [[ ${cameras_detected} -eq 0 ]]; then
-    hint="sin cámaras detectadas"
-  fi
-
-  if [[ ${needs_reinstall} -eq 1 ]]; then
-    log_warn "Problemas detectados con libcamera (${hint}). Intentando reinstalar dependencias"
-    if [[ "${NET_OK:-0}" -ne 1 ]]; then
-      log_warn "Sin red: no se puede reinstalar libcamera0/libcamera-apps/rpicam-apps"
-    else
-      apt-get install --reinstall -y libcamera0 libcamera-apps rpicam-apps || true
-      hello_output="$(timeout 5 libcamera-hello -t 1000 2>&1)"
-      hello_rc=$?
-      list_output="$(libcamera-hello --list-cameras 2>&1 || true)"
-      cameras_detected=$(printf '%s' "${list_output}" | awk '/^[[:space:]]*[0-9]+[[:space:]]*:/ {count++} END {print count+0}')
-      if printf '%s' "${list_output}" | grep -qiE 'ipa_rpi_pisp\\.so|Failed to load a suitable IPA'; then
-        log_warn "Tras la reinstalación persiste el error IPA/PISP"
-      fi
-      if [[ ${cameras_detected} -gt 0 && ${hello_rc} -eq 0 ]]; then
-        hint="libcamera reinstalado; ${cameras_detected} cámaras"
-      fi
-    fi
-  fi
-
-  if [[ ${cameras_detected} -gt 0 && ${hello_rc} -eq 0 ]]; then
-    status="OK"
-    hint="${hint}; cámaras=${cameras_detected}"
-  elif [[ ${cameras_detected} -gt 0 ]]; then
-    status="WARN"
-    hint="cámaras=${cameras_detected}; rc=${hello_rc}"
-  elif [[ ${hello_rc} -eq 0 ]]; then
-    status="WARN"
-    hint="libcamera-hello ok pero sin cámaras"
-  else
-    status="FAIL"
-  fi
-
-  if [[ "${NEED_REBOOT}" = "1" && "${status}" = "FAIL" ]]; then
-    status="WARN"
-    hint="${hint}; reboot pendiente"
-  fi
-
-  CAMERA_SUMMARY_STATUS="${status}"
-  CAMERA_SUMMARY_HINT="${hint}"
-  SUMMARY_CAMERA="${status} (${hint})"
-}
-
-log_env_audio() {
-  if [[ "${HAS_SYSTEMD}" -ne 1 ]]; then
-    warn "systemd no disponible; no se puede inspeccionar entorno de bascula-miniweb"
-    return
-  fi
-
-  log "Inspeccionando entorno de audio de bascula-miniweb"
-
-  local env_output
-  if ! env_output=$(systemctl show -p Environment bascula-miniweb 2>/dev/null); then
-    warn "No se pudo obtener entorno de bascula-miniweb"
-    return
-  fi
-
-  env_output=${env_output#Environment=}
-  if [[ -z "${env_output}" ]]; then
-    warn "variables de audio no presentes en entorno de bascula-miniweb"
-    return
-  fi
-
-  local env_lines
-  env_lines=$(printf '%s' "${env_output}" | tr ' ' '\n')
-
-  local audio_dev mic_dev sample_rate
-  audio_dev=$(printf '%s\n' "${env_lines}" | sed -n 's/^BASCULA_AUDIO_DEVICE=//p' | head -n1)
-  mic_dev=$(printf '%s\n' "${env_lines}" | sed -n 's/^BASCULA_MIC_DEVICE=//p' | head -n1)
-  sample_rate=$(printf '%s\n' "${env_lines}" | sed -n 's/^BASCULA_SAMPLE_RATE=//p' | head -n1)
-
-  if [[ -z "${audio_dev}" || -z "${mic_dev}" || -z "${sample_rate}" ]]; then
-    warn "variables de audio no presentes en entorno de bascula-miniweb"
-  else
-    printf '[inst] BASCULA_AUDIO_DEVICE=%s\n' "${audio_dev}"
-    printf '[inst] BASCULA_MIC_DEVICE=%s\n' "${mic_dev}"
-    printf '[inst] BASCULA_SAMPLE_RATE=%s\n' "${sample_rate}"
-  fi
-}
-
-check_playback() {
-  log "Verificando SALIDA (HiFiBerry) con aplay/speaker-test"
-
-  if ! command -v aplay >/dev/null 2>&1; then
-    warn "aplay no disponible; omitiendo prueba de salida"
-    return
-  fi
-
-  local cmd_bascula_out=(aplay -D "bascula_out" -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
-  if "${cmd_bascula_out[@]}"; then
-    printf '[inst][ok] salida OK via bascula_out\n'
-    return
-  fi
-
-  warn "aplay falló via bascula_out (intento 1); reintentando en 2s"
-  sleep 2
-  if "${cmd_bascula_out[@]}"; then
-    printf '[inst][ok] salida OK via bascula_out\n'
-    return
-  fi
-
-  warn "aplay falló via bascula_out tras reintento; probando hw:1,0"
-  local cmd_hw_fallback=(aplay -D "hw:1,0" -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
-  if "${cmd_hw_fallback[@]}"; then
-    printf '[inst][ok] salida OK via hw:1,0 (fallback)\n'
-    return
-  fi
-
-  if command -v speaker-test >/dev/null 2>&1; then
-    warn "aplay falló via hw:1,0; probando speaker-test"
-    if speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1; then
-      log "speaker-test completado tras reintentos"
-      printf '[inst][ok] salida OK via bascula_out\n'
-      return
-    fi
-  else
-    warn "speaker-test no disponible; omitiendo prueba de tono"
-  fi
-
-  warn "reproducción falló en bascula_out y hw:1,0"
-}
-
-run_audio_io_self_tests() {
-  local restart_service="${1:-1}"
-  local waited_param="${2:-0}"
-  local waited=0
-
-  if [[ "${restart_service}" -eq 1 ]]; then
-    if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-      log "Recargando systemd y reiniciando bascula-miniweb para aplicar audio I/O"
-      if systemctl daemon-reload; then
-        if systemctl restart bascula-miniweb; then
-          sleep 5
-          waited=1
-        else
-          warn "No se pudo reiniciar bascula-miniweb"
-        fi
-      else
-        warn "systemctl daemon-reload falló"
-      fi
-    else
-      warn "systemd no disponible o ALLOW_SYSTEMD!=1; no se reinició bascula-miniweb"
-    fi
-  fi
-
-  if [[ "${waited}" -eq 0 && "${waited_param}" -eq 0 ]]; then
-    sleep 5
-    waited=1
-  fi
-
-  log_env_audio
-
-  log "Verificando MIC (arecord vía bascula_mix_in a 16 kHz y 48 kHz)"
-  if command -v arecord >/dev/null 2>&1; then
-    local rate
-    for rate in 16000 48000; do
-      local mic_test="/tmp/alsa_mic_test_${rate}.wav"
-      if arecord -q -D bascula_mix_in -f S16_LE -r "${rate}" -c 1 -d 2 "${mic_test}"; then
-        printf '[inst][ok] MIC grabó correctamente a %s Hz: %s\n' "${rate}" "${mic_test}"
-      else
-        warn "MIC no disponible a ${rate} Hz. Revisa /etc/asound.conf y arecord -l"
-      fi
-    done
-  else
-    warn "arecord no disponible; omitiendo prueba de micrófono"
-  fi
-
-  if command -v curl >/dev/null 2>&1; then
-    log "Comprobando wake status"
-    if curl -s http://localhost:8080/api/voice/wake/status | grep -q '"running":true'; then
-      printf '[inst][ok] Wake activo y escuchando\n'
-    else
-      warn "Wake no activo. Revisa logs y envs"
-    fi
-  else
-    warn "curl no disponible; omitiendo comprobación de wake"
-  fi
-
-  check_playback
-}
-
-post_install_hardware_checks() {
-  if aplay -l >/dev/null 2>&1; then
-    printf '[install] aplay -l ok\n'
-  else
-    warn "Verificación aplay -l falló"
-  fi
-
-  if arecord -l >/dev/null 2>&1; then
-    printf '[install] arecord -l ok\n'
-  else
-    warn "Verificación arecord -l falló"
-  fi
-
-  local picamera_msg
-  if picamera_msg=$(python3 -c "from picamera2 import Picamera2; print('Picamera2 OK')" 2>/dev/null); then
-    if [[ -n "${picamera_msg}" ]]; then
-      printf '[install] %s\n' "${picamera_msg}"
-    else
-      printf '[install] Picamera2 OK\n'
-    fi
-  else
-    warn "Picamera2 no disponible o falló la prueba"
-  fi
-}
-
-# --- Require root privileges ---
-if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  err "Ejecuta con sudo: sudo ./install-all.sh"
-  exit 1
-fi
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
-# Detect systemd availability early
-HAS_SYSTEMD=0
-[ -d /run/systemd/system ] && HAS_SYSTEMD=1
-if [[ "${HAS_SYSTEMD}" -eq 0 ]]; then
-  warn "systemd no está activo (PID 1); se omitirán comandos systemctl"
-fi
-
-ALLOW_SYSTEMD="${ALLOW_SYSTEMD:-1}"
-
-systemctl_safe() {
-  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-    if ! systemctl "$@"; then
-      warn "systemctl $* falló"
-    fi
-  else
-    warn "systemd no disponible: systemctl $* omitido"
-  fi
-}
-
-configure_bascula_ui_service() {
-  local unit="/etc/systemd/system/bascula-ui.service"
-  local override_dir="${unit}.d"
-  local override_file="${override_dir}/override.conf"
-  local target_uid
-  local tmp_file
-  local previous_umask
-  local kiosk_wait="${BASCULA_KIOSK_WAIT_S_VALUE:-30}"
-  local kiosk_probe="${BASCULA_KIOSK_PROBE_MS_VALUE:-500}"
-  local chrome_env_line=""
-
-  target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || printf '%s' '1000')"
-
-  if [[ -n "${BASCULA_CHROME_BIN_VALUE:-}" ]]; then
-    printf -v chrome_env_line 'Environment=BASCULA_CHROME_BIN=%s\nEnvironment=CHROME=%s' \
-      "${BASCULA_CHROME_BIN_VALUE}" "${BASCULA_CHROME_BIN_VALUE}"
-  fi
-
-  install -d -m 0755 "${override_dir}"
-
-  previous_umask="$(umask)"
-  umask 022
-  tmp_file="$(mktemp "${override_dir}/override.conf.tmp.XXXXXX")"
-  cat > "${tmp_file}" <<EOF
-[Unit]
-After=network-online.target bascula-miniweb.service systemd-user-sessions.service
-Wants=network-online.target bascula-miniweb.service
-StartLimitIntervalSec=0
-
-[Service]
-ExecStart=
-ExecStartPre=
-User=${TARGET_USER}
-Group=${TARGET_GROUP}
-Environment=HOME=${TARGET_HOME}
-Environment=USER=${TARGET_USER}
-Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/${target_uid}
-${chrome_env_line}
-Environment=BASCULA_KIOSK_WAIT_S=${kiosk_wait}
-Environment=BASCULA_KIOSK_PROBE_MS=${kiosk_probe}
-PermissionsStartOnly=yes
-ExecStartPre=/bin/sh -c 'install -d -m0700 -o ${TARGET_USER} -g ${TARGET_GROUP} /run/user/${target_uid} && \
-  install -d -m0755 -o ${TARGET_USER} -g ${TARGET_GROUP} /var/log/bascula && \
-  install -o ${TARGET_USER} -g ${TARGET_GROUP} -m0644 /dev/null /var/log/bascula/ui.log && \
-  rm -f /tmp/.X0-lock'
-ExecStart=/usr/bin/startx ${BASCULA_CURRENT_LINK}/.xinitrc -- :0 vt1 -nocursor
-Restart=always
-RestartSec=3
-EOF
-  sed -i 's/\r$//' "${tmp_file}"
-  if [[ $(tail -c1 "${tmp_file}" 2>/dev/null || printf '\n') != $'\n' ]]; then
-    printf '\n' >> "${tmp_file}"
-  fi
-  umask "${previous_umask}"
-
-  if [[ -f "${override_file}" ]] && cmp -s "${tmp_file}" "${override_file}"; then
-    log "Override sin cambios"
-  else
-    install -m0644 "${tmp_file}" "${override_file}"
-    log "Override actualizado"
-  fi
-  rm -f "${tmp_file}"
-
-  if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-    systemctl daemon-reload
-    if ! systemd-analyze verify bascula-ui.service; then
-      log_err "verify falló"
-      journalctl -u bascula-ui -b -n 200 || true
-      exit 1
-    fi
-    log "systemd-analyze verify bascula-ui.service ok"
-
-    if ! systemctl enable --now bascula-miniweb.service; then
-      log_err "No se pudo habilitar bascula-miniweb.service"
-      systemctl status bascula-miniweb.service --no-pager || true
-      exit 1
-    fi
-
-    local backend_ready=0
-    if command -v curl >/dev/null 2>&1; then
-      local response
-      for _ in {1..15}; do
-        if response=$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null); then
-          if printf '%s' "${response}" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
-            backend_ready=1
-            break
-          fi
-        fi
-        sleep 1
-      done
-      if (( backend_ready == 1 )); then
-        log "Mini-web saludable (status 200 /api/miniweb/status)"
-      else
-        warn "Mini-web no respondió con ok=true en /api/miniweb/status"
-      fi
-    else
-      warn "curl no disponible para verificar miniweb"
-    fi
-
-    if [[ -x "${SCRIPT_DIR}/test-x-kms.sh" ]]; then
-      log "Ejecutando verificación KMS (/dev/dri)..."
-      "${SCRIPT_DIR}/test-x-kms.sh"
-    else
-      warn "scripts/test-x-kms.sh no disponible o sin permisos de ejecución"
-    fi
-
-    # Confirmar presencia de /dev/dri (necesario para X/Chromium)
-    if [ ! -d /dev/dri ]; then
-      echo "[inst][error] No se detecta /dev/dri; probablemente falta el overlay KMS."
-      echo "[inst][hint] Revisa /boot/firmware/config.txt y asegúrate de tener dtoverlay=vc4-kms-v3d-pi5"
-      exit 1
-    fi
-
-    if ! systemctl enable bascula-ui.service; then
-      log_err "No se pudo habilitar bascula-ui.service"
-      systemctl status bascula-ui.service --no-pager || true
-      exit 1
-    fi
-
-    if ! systemctl restart bascula-ui.service; then
-      log_err "No se pudo reiniciar bascula-ui.service"
-      journalctl -u bascula-ui.service -n 50 || true
-      exit 1
-    fi
-
-    if ! systemctl is-active --quiet bascula-ui.service; then
-      log_err "bascula-ui no activo"
-      systemctl status bascula-ui --no-pager -l || true
-      exit 1
-    fi
-    log "UI activa"
-  else
-    warn "systemd no disponible o ALLOW_SYSTEMD!=1; se omitió verificación/reinicio de bascula-ui.service"
-  fi
-
-  local kiosk_procs
-  if kiosk_procs="$(pgrep -a -f 'Xorg|startx|openbox|chromium' 2>/dev/null)"; then
-    log "Procesos kiosk detectados:"
-    printf '%s\n' "${kiosk_procs}"
-  else
-    warn "No se detectaron procesos kiosk (Xorg/startx/openbox/chromium)"
-    if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-      journalctl -u bascula-ui.service -n 50 || true
-    fi
-  fi
-
-  if command -v curl >/dev/null 2>&1; then
-    log "miniweb status (curl http://127.0.0.1:8080/api/miniweb/status):"
-    if ! curl -sS http://127.0.0.1:8080/api/miniweb/status; then
-      warn "No se pudo consultar miniweb status"
-    fi
-  else
-    warn "curl no disponible para consultar miniweb status"
-  fi
-}
-
-safe_install() {
-  local src="$1"
-  local dst="$2"
-  if [ -e "${src}" ] && [ -e "${dst}" ]; then
-    local src_real dst_real
-    src_real=$(readlink -f "${src}" 2>/dev/null || echo "")
-    dst_real=$(readlink -f "${dst}" 2>/dev/null || echo "")
-    if [[ -n "${src_real}" && -n "${dst_real}" && "${src_real}" == "${dst_real}" ]]; then
-      echo "[inst][info] skip install: ${dst} ya es el mismo fichero"
+    local hdmi
+    hdmi=$(printf '%s
+' "${list}" | awk '/^hw:CARD=vc4hdmi/ {print; exit}')
+    if [[ -n "${hdmi}" ]]; then
+      printf '%s
+' "${hdmi}"
       return 0
     fi
   fi
-  install -m 0755 "${src}" "${dst}"
+  printf 'hw:0,0
+'
 }
 
-install_x735() {
-  echo "[inst] [X735] Configurando soporte x735 (fan/power)…"
-
-  if ! command -v git >/dev/null 2>&1; then
-    if [[ "${NET_OK:-0}" -eq 1 ]]; then
-      ensure_pkg git || warn "[X735] No se pudo instalar git"
-    else
-      echo "[inst] [X735][warn] git no disponible y sin red; los servicios se configurarán en cuanto esté disponible"
+get_capture_hw() {
+  if command -v arecord >/dev/null 2>&1; then
+    local list
+    list=$(arecord -L 2>/dev/null)
+    local preferred
+    preferred=$(printf '%s
+' "${list}" | awk '/^hw:CARD=/ {print}' | grep -Ei 'usb|mic|seeed|input' | head -n1)
+    if [[ -n "${preferred}" ]]; then
+      printf '%s
+' "${preferred}"
+      return 0
+    fi
+    local first
+    first=$(printf '%s
+' "${list}" | awk '/^hw:CARD=/ {print; exit}')
+    if [[ -n "${first}" ]]; then
+      printf '%s
+' "${first}"
+      return 0
     fi
   fi
-
-  # Sello de idempotencia
-  install -d -m 0755 /var/lib
-
-  # Script ensure (se reintenta en cada boot hasta ver PWM)
-  install -d -m 0755 /usr/local/sbin
-  install -d -m 0755 /etc/systemd/system
-
-  # X735 ensure: instalar, habilitar y EJECUTAR ahora
-  install -m 0755 system/os/x735-ensure.sh /usr/local/sbin/x735-ensure.sh
-  install -m 0644 system/os/x735-ensure.service /etc/systemd/system/x735-ensure.service || true
-  chmod +x /usr/local/sbin/x735-ensure.sh
-
-  if [ -d /run/systemd/system ]; then
-    systemctl daemon-reload
-    systemctl enable x735-ensure.service || true
-    systemctl start x735-ensure.service || true
-    systemctl enable --now x735-fan.service 2>/dev/null || true
-    systemctl enable --now x735-pwr.service 2>/dev/null || true
-    systemctl is-active --quiet x735-ensure.service && echo "[inst] ✓ X735 ensure ejecutado (sin reboot)"
-    systemctl is-active --quiet x735-fan.service && echo "[inst] ✓ X735 fan activo"
-    systemctl is-active --quiet x735-pwr.service && echo "[inst] ✓ X735 power activo"
-  else
-    /usr/local/sbin/x735-ensure.sh --oneshot || /usr/local/sbin/x735-ensure.sh || true
-  fi
-
-  echo "[inst] ✓ X735 configurado (ensure service instalado)"
+  printf 'hw:1,0
+'
 }
 
-# --- Configuration variables ---
-TARGET_USER="${SUDO_USER:-pi}"
-TARGET_ENTRY="$(getent passwd "$TARGET_USER" || true)"
-if [[ -z "${TARGET_ENTRY}" ]]; then
-  warn "Usuario ${TARGET_USER} no encontrado; usando $(id -un)"
-  TARGET_USER="$(id -un)"
-  TARGET_ENTRY="$(getent passwd "$TARGET_USER" || true)"
-fi
-
-TARGET_GROUP="${TARGET_USER}"
-if [[ -n "${TARGET_ENTRY}" ]]; then
-  TARGET_GID="$(printf '%s' "${TARGET_ENTRY}" | cut -d: -f4)"
-  TARGET_HOME="$(printf '%s' "${TARGET_ENTRY}" | cut -d: -f6)"
-  if [[ -n "${TARGET_GID}" ]]; then
-    TARGET_GROUP="$(getent group "${TARGET_GID}" | cut -d: -f1)"
-  fi
-else
-  TARGET_HOME="${HOME:-/root}"
-fi
-
-if [[ -z "${TARGET_HOME}" ]]; then
-  err "No se pudo determinar el home de ${TARGET_USER}"
-  exit 1
-fi
-
-# Asegura que el grupo existe; si el gid no se resolvió usa el del usuario
-if [[ -z "${TARGET_GROUP}" ]] || ! getent group "${TARGET_GROUP}" &>/dev/null; then
-  TARGET_GROUP="$(id -gn "${TARGET_USER}")"
-fi
-
-BASCULA_ROOT="/opt/bascula"
-BASCULA_RELEASES_DIR="${BASCULA_ROOT}/releases"
-BASCULA_CURRENT_LINK="${BASCULA_ROOT}/current"
-CFG_DIR="${TARGET_HOME}/.bascula"
-CFG_PATH="${CFG_DIR}/config.json"
-STATE_DIR="/var/lib/bascula"
-STATE_FILE="${STATE_DIR}/scale.json"
-LOG_DIR="/var/log/bascula"
-INSTALL_LOG="${LOG_DIR}/install.log"
-
-AP_IFACE="wlan0"
-AP_GATEWAY="192.168.4.1"
-AP_SSID="${AP_SSID:-Bascula-AP}"
-AP_PASS="${AP_PASS:-Bascula1234}"
-AP_NAME="${AP_NAME:-BasculaAP}"
-AP_POOL_START="${AP_POOL_START:-192.168.4.20}"
-AP_POOL_END="${AP_POOL_END:-192.168.4.99}"
-
-BASCULA_KIOSK_WAIT_S_VALUE="${BASCULA_KIOSK_WAIT_S:-30}"
-BASCULA_KIOSK_PROBE_MS_VALUE="${BASCULA_KIOSK_PROBE_MS:-500}"
-
-BOOTDIR="/boot/firmware"
-[[ ! -d "${BOOTDIR}" ]] && BOOTDIR="/boot"
-CONF="${BOOTDIR}/config.txt"
-
-log "============================================"
-log "  Instalación Completa - Báscula Digital Pro"
-log "============================================"
-log "Target user      : $TARGET_USER ($TARGET_GROUP)"
-log "Target home      : $TARGET_HOME"
-log "OTA current link : $BASCULA_CURRENT_LINK"
-log "AP (NM)          : SSID=${AP_SSID} PASS=<oculto> IFACE=${AP_IFACE}"
-
-# Check internet connection
-log "[1/20] Verificando conexión a Internet..."
-if ! ping -c 1 google.com &> /dev/null; then
-    warn "Sin conexión a Internet. Instalación limitada."
-    NET_OK=0
-else
-    log "✓ Conexión verificada"
-    NET_OK=1
-fi
-
-# Detect architecture
-ARCH=$(uname -m)
-if [ "$ARCH" != "aarch64" ] && [ "$ARCH" != "armv7l" ]; then
-    warn "No se detectó arquitectura ARM. Este script está diseñado para Raspberry Pi."
-fi
-
-# Update system
-log "[2/20] Actualizando el sistema..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-    if ! apt-get update; then
-        warn "apt-get update falló; continúa con el resto de la instalación"
-    elif ! apt-get upgrade -y; then
-        warn "apt-get upgrade falló; continúa con el resto de la instalación"
-    else
-        log "✓ Sistema actualizado"
-    fi
-else
-    warn "Sin red: omitiendo apt-get update/upgrade"
-fi
-
-# Install base system packages
-log "[3/20] Instalando dependencias del sistema..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-    BASE_PACKAGES=(
-        git curl ca-certificates build-essential cmake pkg-config
-        python3 python3-venv python3-pip python3-dev python3-tk python3-numpy python3-serial
-        python3-pil python3-pil.imagetk python3-xdg
-        x11-xserver-utils xserver-xorg-legacy xinit openbox
-        fonts-dejavu-core fonts-noto-core
-        libjpeg-dev zlib1g-dev libpng-dev
-        alsa-utils pulseaudio sox ffmpeg
-        libzbar0 gpiod python3-rpi.gpio
-        libcamera-apps rpicam-apps
-        network-manager dnsmasq-base dnsutils jq sqlite3 tesseract-ocr tesseract-ocr-spa espeak-ng
-        uuid-runtime
-    )
-    if apt_install "${BASE_PACKAGES[@]}"; then
-        log "✓ Dependencias base instaladas"
-    else
-        warn "No se pudieron instalar todas las dependencias base"
-    fi
-
-    # Ensure global dnsmasq daemon is never installed/active (only dnsmasq-base needed)
-    log "Asegurando que dnsmasq global no esté activo..."
-    if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-      systemctl disable --now dnsmasq 2>/dev/null || true
-      systemctl mask dnsmasq 2>/dev/null || true
-    else
-      warn "systemd no disponible: omitiendo systemctl para dnsmasq"
-    fi
-    apt-get -y purge dnsmasq 2>/dev/null || true
-    # Install only dnsmasq-base (library for NetworkManager)
-    ensure_pkg dnsmasq-base
-    log "✓ dnsmasq-base instalado (dnsmasq global removido)"
-
-    kiosk_packages=(
-      xserver-xorg
-      xserver-xorg-legacy
-      xinit
-      openbox
-      x11-xserver-utils
-      unclutter
-      python3-serial
-    )
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${kiosk_packages[@]}"; then
-      warn "No se pudieron instalar todas las dependencias base del kiosk"
-    fi
-else
-    warn "Sin red: omitiendo la instalación de dependencias base"
-    warn "Instala manualmente python3-serial para el backend UART"
-fi
-
-CHROME_PKG=""
-if apt_candidate_exists chromium; then
-  CHROME_PKG="chromium"
-fi
-if apt_candidate_exists chromium-browser; then
-  CHROME_PKG="${CHROME_PKG:-chromium-browser}"
-fi
-
-if [[ -n "${CHROME_PKG}" ]]; then
-  if [[ "${NET_OK}" -eq 1 ]]; then
-    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${CHROME_PKG}"; then
-      warn "No se pudo instalar ${CHROME_PKG}"
-    fi
-  fi
-  log "✓ Paquete Chromium seleccionado: ${CHROME_PKG}"
-else
-  fail "No se encontró paquete Chromium disponible en apt-cache"
-fi
-
-POLKIT_PKG=""
-if apt_candidate_exists policykit-1; then
-  POLKIT_PKG="policykit-1"
-fi
-if apt_candidate_exists polkitd; then
-  POLKIT_PKG="${POLKIT_PKG:-polkitd}"
-fi
-
-if [[ -n "${POLKIT_PKG}" && "${NET_OK}" -eq 1 ]]; then
-  ensure_pkg "${POLKIT_PKG}"
-  log "✓ Paquete Polkit seleccionado: ${POLKIT_PKG}"
-elif [[ -n "${POLKIT_PKG}" ]]; then
-  log "✓ Paquete Polkit detectado: ${POLKIT_PKG}"
-else
-  warn "No se encontró paquete Polkit disponible en apt-cache"
-fi
-
-STARTX_BIN="$(command -v startx || command -v xinit || true)"
-if [[ -z "${STARTX_BIN}" ]]; then
-  fail "Falta startx/xinit tras la instalación"
-fi
-log "✓ Binario X detectado: ${STARTX_BIN}"
-
-if ! command -v openbox >/dev/null 2>&1; then
-  fail "Falta openbox tras la instalación"
-fi
-
-CHROME="$(command -v chromium-browser || command -v chromium || true)"
-if [[ -z "${CHROME}" ]]; then
-  fail "Falta Chromium tras la instalación"
-fi
-log "✓ Binario Chromium detectado: ${CHROME}"
-CHROME_BIN="${CHROME}"
-BASCULA_CHROME_BIN_VALUE="${CHROME}"
-
-POLICY_DIR="/etc/chromium/policies/managed"
-POLICY_PATH="${POLICY_DIR}/bascula_policy.json"
-install -d -m 0755 "${POLICY_DIR}"
-cat <<'EOF' > "${POLICY_PATH}.tmp"
-{
-  "AudioCaptureAllowed": true,
-  "VideoCaptureAllowed": true,
-  "AutoplayAllowed": true,
-  "DefaultAudioCaptureSetting": 1,
-  "DefaultVideoCaptureSetting": 1,
-  "URLAllowlist": [
-    "http://127.0.0.1:8080",
-    "http://localhost:8080"
-  ]
-}
-EOF
-install -m 0644 "${POLICY_PATH}.tmp" "${POLICY_PATH}"
-rm -f "${POLICY_PATH}.tmp"
-log "✓ Política gestionada de Chromium actualizada en ${POLICY_PATH}"
-
-log "Configurando GPIO para HX711 y persistencia de báscula..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-  ensure_pkg python3-lgpio
-else
-  warn "Sin red: instala python3-lgpio manualmente para habilitar el backend lgpio"
-fi
-
-if [[ "${NET_OK}" -eq 1 ]]; then
-  if apt_candidate_exists python3-pigpio; then
-    ensure_pkg python3-pigpio
-  else
-    log "python3-pigpio no disponible en apt-cache; se omite instalación"
-  fi
-  if apt_candidate_exists pigpiod; then
-    ensure_pkg pigpiod
-  else
-    log "pigpiod no disponible en apt-cache; se omite instalación"
-  fi
-else
-  log "Sin red: omitiendo instalación opcional de python3-pigpio/pigpiod"
-fi
-
-PIGPIOD_SERVICE_FILE=""
-for candidate in /lib/systemd/system/pigpiod.service /etc/systemd/system/pigpiod.service; do
-  if [[ -f "${candidate}" ]]; then
-    PIGPIOD_SERVICE_FILE="${candidate}"
-    break
-  fi
-done
-
-if [[ -n "${PIGPIOD_SERVICE_FILE}" ]]; then
-  log "Servicio pigpiod detectado; habilitando si es posible"
-  systemctl_safe enable pigpiod
-  systemctl_safe start pigpiod
-else
-  log "Servicio pigpiod no disponible; se omite enable/start"
-fi
-
-if getent group pigpio >/dev/null 2>&1; then
-  ensure_user_in_group "${TARGET_USER}" pigpio
-else
-  log "Grupo pigpio no encontrado; se omite adición de ${TARGET_USER}"
-fi
-
-mkdir -p "${STATE_DIR}"
-chown "${TARGET_USER}:${TARGET_GROUP}" "${STATE_DIR}" 2>/dev/null || true
-if [[ ! -f "${STATE_FILE}" ]]; then
-  cat > "${STATE_FILE}" <<'EOF'
-{
-  "calibration_factor": 1.0,
-  "tare_offset": 0.0
-}
-EOF
-  log "Archivo de estado de báscula inicializado en ${STATE_FILE}"
-fi
-chmod 664 "${STATE_FILE}" 2>/dev/null || true
-chown "${TARGET_USER}:${TARGET_GROUP}" "${STATE_FILE}" 2>/dev/null || true
-
-mkdir -p "${LOG_DIR}"
-touch "${LOG_DIR}/app.log"
-touch "${INSTALL_LOG}"
-chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}" 2>/dev/null || true
-chown "${TARGET_USER}:${TARGET_GROUP}" "${LOG_DIR}/app.log" 2>/dev/null || true
-chown "${TARGET_USER}:${TARGET_GROUP}" "${INSTALL_LOG}" 2>/dev/null || true
-chmod 664 "${LOG_DIR}/app.log" 2>/dev/null || true
-chmod 664 "${INSTALL_LOG}" 2>/dev/null || true
-
-# Ensure NetworkManager service is enabled and running
-log "[3a/20] Reinstalando NetworkManager..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-    if ! apt-get install -y network-manager; then
-        warn "No se pudo reinstalar NetworkManager"
-    fi
-else
-    warn "Sin red: omitiendo reinstalación de NetworkManager"
-fi
-systemctl_safe enable NetworkManager --now
-systemctl_safe enable NetworkManager-wait-online.service
-
-# Install camera dependencies
-ensure_libcamera_stack
-log "[4/20] Instalando dependencias de cámara..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-    if apt-get install -y rpicam-apps libcamera-apps v4l-utils python3-picamera2; then
-        log "✓ Dependencias de cámara instaladas"
-    else
-        warn "No se pudieron instalar dependencias de cámara"
-    fi
-else
-    warn "Sin red: omitiendo dependencias de cámara"
-fi
-
-ensure_libcamera_ready
-
-log "[4a/20] Instalando herramientas de audio..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-    if apt-get install -y alsa-utils pulseaudio sox ffmpeg; then
-        log "✓ Herramientas de audio instaladas"
-    else
-        warn "No se pudieron instalar herramientas de audio"
-    fi
-else
-    warn "Sin red: omitiendo herramientas de audio"
-fi
-
-ensure_vosk_es() {
-  set -euo pipefail
-  local dest_dir="/opt/vosk"
-  local model_dir="${dest_dir}/es-small"
-  local tmp_zip="/tmp/vosk-es-small.$$"
-  local url="https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip"
-  local expected_hash="09b239888f633ef2f0b4e09736e3d9936acfd810bc65d53fad45261762c6511f"
-
-  mkdir -p "${dest_dir}"
-
-  if [[ -d "${model_dir}" ]]; then
-    log "[install] Modelo Vosk ES ya presente"
-    return
-  fi
-
-  if [[ "${NET_OK}" != "1" ]]; then
-    warn "Sin red: omitiendo descarga de modelo Vosk"
-    return
-  fi
-
-  log "[install] Descargando modelo Vosk ES (small)"
-  rm -f "${tmp_zip}" "${tmp_zip}.zip"
-  tmp_zip="${tmp_zip}.zip"
-  if ! curl -fsSL -o "${tmp_zip}" "${url}"; then
-    warn "No se pudo descargar el modelo Vosk ES; la URL podría haber cambiado"
-    rm -f "${tmp_zip}"
-    return
-  fi
-
-  if [[ ! -s "${tmp_zip}" ]]; then
-    warn "Modelo Vosk ES descargado vacío; revisa la URL"
-    rm -f "${tmp_zip}"
-    return
-  fi
-
-  local file_hash
-  file_hash="$(sha256sum "${tmp_zip}" | awk '{print $1}')"
-  if [[ "${file_hash}" != "${expected_hash}" ]]; then
-    err "[install] ERROR checksum voz Vosk: esperado ${expected_hash}, obtenido ${file_hash}"
-    rm -f "${tmp_zip}"
-    return
-  fi
-
-  mkdir -p "${dest_dir}"/tmp_extract
-  if unzip -q "${tmp_zip}" -d "${dest_dir}"/tmp_extract; then
-    rm -f "${tmp_zip}"
-    if [[ -d "${dest_dir}"/tmp_extract/vosk-model-small-es-0.42 ]]; then
-      mv "${dest_dir}"/tmp_extract/vosk-model-small-es-0.42 "${model_dir}"
-      log "✓ Modelo Vosk ES instalado"
-    else
-      warn "No se encontró el directorio esperado tras descomprimir Vosk"
-    fi
-  else
-    warn "No se pudo descomprimir el modelo Vosk"
-  fi
-  rm -rf "${dest_dir}"/tmp_extract || true
+install_asound_conf() {
+  local playback_hw capture_hw playback_card capture_card
+  playback_hw=$(get_playback_hw)
+  capture_hw=$(get_capture_hw)
+  playback_card=$(printf '%s' "${playback_hw}" | sed -E 's#^hw:(CARD=)?([^,]+).*$#\2#')
+  capture_card=$(printf '%s' "${capture_hw}" | sed -E 's#^hw:(CARD=)?([^,]+).*$#\2#')
+  cat <<EOF > "${ASOUND_CONF}.tmp"
+pcm.bascula_out {
+    type plug
+    slave.pcm "bascula_out_dmix"
 }
 
-ensure_vosk_es || true
-
-# Install Node.js
-log "[5/20] Instalando Node.js..."
-if ! command -v node &> /dev/null; then
-    if [[ "${NET_OK}" -eq 1 ]]; then
-        if curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; then
-            if apt-get install -y nodejs; then
-                log "✓ Node.js $(node --version) instalado"
-            else
-                warn "No se pudo instalar Node.js"
-            fi
-        else
-            warn "No se pudo descargar el instalador de NodeSource"
-        fi
-    else
-        warn "Sin red: omitiendo instalación de Node.js"
-    fi
-else
-    log "✓ Node.js $(node --version) instalado"
-fi
-
-# Configure hardware permissions
-log "[6/20] Configurando permisos de hardware..."
-HARDWARE_GROUPS=(video render input dialout i2c gpio audio netdev)
-for grp in "${HARDWARE_GROUPS[@]}"; do
-  if getent group "${grp}" >/dev/null 2>&1; then
-    usermod -aG "${grp}" "${TARGET_USER}" || warn "No se pudo añadir ${TARGET_USER} al grupo ${grp}"
-  else
-    warn "Grupo ${grp} no existe en el sistema; omitiendo"
-  fi
-done
-if ! usermod -aG video,render,input,dialout "${TARGET_USER}"; then
-  warn "No se pudieron añadir grupos básicos de hardware a ${TARGET_USER}"
-fi
-log "✓ Usuario ${TARGET_USER} añadido a grupos disponibles"
-
-# Garantiza acceso a UART para usuario pi
-ensure_user_in_group "pi" "dialout"
-
-# Configure boot config
-log "[7/20] Configurando boot/config.txt..."
-
-if [[ ! -f "${CONF}" ]]; then
-  warn "No se encontró ${CONF}; omitiendo configuración de arranque"
-elif [[ "${SKIP_HARDWARE_CONFIG:-0}" == "1" ]]; then
-  warn "SKIP_HARDWARE_CONFIG=1, saltando modificación de config.txt"
-elif grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
-  disable_cloud_init || true
-  if ! configure_pi_boot_hardware; then
-    warn "No se pudo completar la autoconfiguración de hardware"
-  fi
-else
-  warn "Equipo no identificado como Raspberry Pi; omitiendo autoconfiguración de hardware"
-fi
-
-ensure_enable_uart "${CONF}"
-
-configure_hifiberry_audio
-configure_usb_microphone
-ensure_audio_playback_defaults
-
-install -m 0755 "${SCRIPT_DIR}/test-audio.sh" /usr/local/bin/bascula-test-audio
-/usr/local/bin/bascula-test-audio || true
-
-# --- KMS check (Pi5) ---
-if grep -q "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null; then
-  CONFIG_FILE="${BOOTDIR}/config.txt"
-  if [[ ! -f "${CONFIG_FILE}" ]]; then
-    echo "[inst][warn] ${CONFIG_FILE} no existe; no se puede insertar overlay vc4-kms-v3d-pi5"
-  elif ! grep -qE "^dtoverlay=vc4-kms-v3d-pi5" "${CONFIG_FILE}"; then
-    echo "[inst][warn] Overlay vc4-kms-v3d-pi5 ausente; insertando..."
-    if printf '%s\n' "dtoverlay=vc4-kms-v3d-pi5" >> "${CONFIG_FILE}"; then
-      overlay_added_msg="[inst][info] Overlay añadido; se aplicará tras reinicio."
-      echo "${overlay_added_msg}"
-      OVERLAY_ADDED=1
-      if [[ -n "${INSTALL_LOG}" ]]; then
-        printf '%s\n' "${overlay_added_msg}" >> "${INSTALL_LOG}" 2>/dev/null || true
-      fi
-    else
-      echo "[inst][error] No se pudo escribir dtoverlay=vc4-kms-v3d-pi5 en ${CONFIG_FILE}"
-    fi
-  else
-    echo "[inst][ok] Overlay vc4-kms-v3d-pi5 ya presente."
-  fi
-else
-  echo "[inst][info] Dispositivo no Pi5; se omite overlay KMS."
-fi
-
-# Disable Bluetooth UART
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if systemctl list-unit-files | grep -q '^hciuart.service'; then
-    if systemctl disable --now hciuart 2>/dev/null; then
-      require_reboot "desactivar bluetooth (hciuart)"
-    else
-      warn "No se pudo deshabilitar hciuart"
-    fi
-  else
-    log "hciuart.service no existe; nada que deshabilitar"
-  fi
-else
-  warn "systemd no disponible: hciuart no puede deshabilitarse en esta sesión"
-fi
-systemctl_safe disable --now serial-getty@ttyAMA0.service
-systemctl_safe disable --now serial-getty@ttyS0.service
-
-# Run fix-serial script
-log "Ejecutando fix-serial.sh..."
-bash "${SCRIPT_DIR}/fix-serial.sh" || warn "fix-serial.sh falló, continuar de todos modos"
-log "✓ Serial configurado"
-
-# Configure Xwrapper
-log "[8/20] Configurando Xwrapper..."
-for config in /etc/Xwrapper.config /etc/X11/Xwrapper.config; do
-    install -D -m 0644 /dev/null "${config}"
-    cat > "${config}" <<'EOF'
-allowed_users=anybody
-needs_root_rights=yes
-EOF
-done
-if [[ -f /usr/lib/xorg/Xorg ]]; then
-  chown root:root /usr/lib/xorg/Xorg || warn "No se pudo ajustar propietario de Xorg"
-  chmod 4755 /usr/lib/xorg/Xorg || warn "No se pudo ajustar permisos de Xorg"
-else
-  warn "/usr/lib/xorg/Xorg no existe; omitiendo ajustes de permisos"
-fi
-if ! echo "xserver-xorg-legacy xserver-xorg-legacy/allowed_users select Anybody" | debconf-set-selections; then
-  warn "No se pudo aplicar debconf-set-selections para xserver-xorg-legacy"
-fi
-DEBIAN_FRONTEND=noninteractive dpkg-reconfigure xserver-xorg-legacy || true
-log "✓ Xwrapper configurado"
-
-# Configure Xorg to use KMS/modesetting instead of fbdev
-log "[8b/20] Configurando Xorg para KMS (modesetting driver)..."
-# Remove fbdev driver if installed to prevent framebuffer mode
-apt-get purge -y xserver-xorg-video-fbdev 2>/dev/null || true
-apt-get autoremove -y || true
-
-# Remove any fbdev config files
-rm -f /usr/share/X11/xorg.conf.d/*fbdev*.conf /etc/X11/xorg.conf.d/*fbdev*.conf 2>/dev/null || true
-
-# Force modesetting driver (KMS/DRM) for Raspberry Pi 5
-install -d -m 0755 /etc/X11/xorg.conf.d
-cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
-Section "Device"
-  Identifier "Modesetting"
-  Driver "modesetting"
-  Option "AccelMethod" "glamor"
-EndSection
-EOF
-
-log "✓ Xorg configurado para KMS (modesetting)"
-
-# Configure Xorg to use correct DRM card (vc4 = card1)
-log "[8c/20] Configurando Xorg para usar card1 (vc4)..."
-cat > /etc/X11/xorg.conf.d/10-modesetting.conf <<'EOF'
-Section "Device"
-  Identifier "vc4"
-  Driver "modesetting"
-  Option "AccelMethod" "glamor"
-  Option "kmsdev" "/dev/dri/card1"
-EndSection
-
-Section "Screen"
-  Identifier "Screen0"
-  Device "vc4"
-EndSection
-EOF
-log "✓ Xorg configurado para DRM card1"
-
-# Configure Polkit rules
-log "[9/20] Configurando Polkit..."
-install -d -m 0755 /etc/polkit-1/rules.d
-
-ensure_user_in_group "${TARGET_USER}" netdev
-if [[ "${TARGET_USER}" != "pi" ]]; then
-  ensure_user_in_group pi netdev
-fi
-
-POLKIT_RULE_SRC="${PROJECT_ROOT}/packaging/polkit/49-nmcli.rules"
-if [[ -f "${POLKIT_RULE_SRC}" ]]; then
-  install -m 0644 "${POLKIT_RULE_SRC}" /etc/polkit-1/rules.d/49-nmcli.rules
-else
-  warn "No se encontró ${POLKIT_RULE_SRC}; creando regla básica"
-  install -m 0644 /dev/null /etc/polkit-1/rules.d/49-nmcli.rules
-    cat > /etc/polkit-1/rules.d/49-nmcli.rules <<'EOF'
-polkit.addRule(function(action, subject) {
-  if (subject.isInGroup("netdev") || subject.user == "pi") {
-    if (action.id == "org.freedesktop.NetworkManager.settings.modify.system") {
-      return polkit.Result.YES;
+pcm.bascula_out_dmix {
+    type dmix
+    ipc_key 8675309
+    slave {
+        pcm "${playback_hw}"
+        channels 2
+        rate 48000
+        format S16_LE
     }
-    if (action.id == "org.freedesktop.NetworkManager.settings.modify.own") {
-      return polkit.Result.YES;
-    }
-    if (action.id == "org.freedesktop.NetworkManager.network-control") {
-      return polkit.Result.YES;
-    }
-    if (action.id == "org.freedesktop.NetworkManager.wifi.scan") {
-      return polkit.Result.YES;
-    }
-    if (action.id == "org.freedesktop.NetworkManager.enable-disable-wifi") {
-      return polkit.Result.YES;
-    }
-  }
-});
-EOF
-fi
-
-cat > /etc/polkit-1/rules.d/51-bascula-systemd.rules <<EOF
-polkit.addRule(function(action, subject) {
-  var id = action.id;
-  var unit = action.lookup("unit") || "";
-  function allowed(u) {
-    return u == "bascula-miniweb.service" || u == "bascula-ui.service" || u == "ocr-service.service";
-  }
-  if ((subject.user == "${TARGET_USER}" || subject.isInGroup("${TARGET_GROUP}")) &&
-      (id == "org.freedesktop.systemd1.manage-units" ||
-       id == "org.freedesktop.systemd1.restart-unit" ||
-       id == "org.freedesktop.systemd1.start-unit" ||
-       id == "org.freedesktop.systemd1.stop-unit") &&
-      allowed(unit)) {
-    return polkit.Result.YES;
-  }
-});
-EOF
-
-if id -u pi >/dev/null 2>&1 && ! id -nG pi | tr ' ' '\n' | grep -qw netdev; then
-  fail "pi no pertenece a netdev tras la instalación"
-fi
-
-if [[ -f /etc/polkit-1/rules.d/49-nmcli.rules ]]; then
-  log "Regla Polkit 49-nmcli.rules instalada"
-else
-  fail "No se encontró /etc/polkit-1/rules.d/49-nmcli.rules"
-fi
-
-# === Bascula AP profile + polkit + recargas ===
-set -e
-
-# Instalar siempre la regla polkit (ya creada antes)
-if [ -f system/os/10-bascula-nm.rules ]; then
-  install -D -m 0644 system/os/10-bascula-nm.rules /etc/polkit-1/rules.d/10-bascula-nm.rules
-else
-  warn "No se encontró system/os/10-bascula-nm.rules; instalando regla básica"
-  cat >/etc/polkit-1/rules.d/10-bascula-nm.rules <<'EOF'
-polkit.addRule(function(action, subject) {
-  if (subject.user === "pi") {
-    if (action.id.startsWith("org.freedesktop.NetworkManager.")) {
-      return polkit.Result.YES;
-    }
-    if (action.id.startsWith("org.freedesktop.NetworkManager.settings.")) {
-      return polkit.Result.YES;
-    }
-  }
-});
-EOF
-fi
-
-# Configurar el perfil AP de provisión (persistente y estable)
-if command -v nmcli >/dev/null 2>&1; then
-  log "Asegurando perfil AP ${AP_NAME} (solo provisión)"
-
-  rfkill unblock wifi || true
-  nmcli radio wifi on || true
-
-  install -d -m 0700 /etc/NetworkManager/system-connections
-  target_ap_path="/etc/NetworkManager/system-connections/${AP_NAME}.nmconnection"
-
-  ap_uuid=""
-  if [[ -f "${target_ap_path}" ]]; then
-    ap_uuid="$(awk -F= 'tolower($1)=="uuid"{print $2; exit}' "${target_ap_path}" | tr -d '[:space:]' || true)"
-  fi
-  if [[ -z "${ap_uuid}" ]]; then
-    if command -v uuidgen >/dev/null 2>&1; then
-      ap_uuid="$(uuidgen)"
-    else
-      ap_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-    fi
-  fi
-
-  tmp_ap_cfg="$(mktemp)"
-  cat >"${tmp_ap_cfg}" <<EOF
-[connection]
-id=${AP_NAME}
-uuid=${ap_uuid}
-type=wifi
-interface-name=${AP_IFACE}
-autoconnect=false
-autoconnect-priority=-999
-autoconnect-retries=0
-permissions=user:root
-
-[wifi]
-mode=ap
-ssid=${AP_SSID}
-band=bg
-channel=1
-hidden=true
-
-[wifi-security]
-key-mgmt=wpa-psk
-psk=${AP_PASS}
-proto=rsn
-pmf=1
-
-[ipv4]
-method=shared
-address1=${AP_GATEWAY}/24,${AP_GATEWAY}
-never-default=true
-
-[ipv6]
-method=ignore
-EOF
-  install -m 0600 "${tmp_ap_cfg}" "${target_ap_path}"
-  rm -f "${tmp_ap_cfg}"
-  chmod 600 "${target_ap_path}" || warn "No se pudieron ajustar permisos de ${target_ap_path}"
-  chown root:root "${target_ap_path}" || warn "No se pudo ajustar propietario de ${target_ap_path}"
-
-  if ! nmcli connection reload >/dev/null 2>&1; then
-    warn "No se pudo recargar conexiones NM tras actualizar ${AP_NAME}"
-  fi
-
-  if ! nmcli con load "${target_ap_path}" >/dev/null 2>&1; then
-    warn "No se pudo cargar ${AP_NAME} desde ${target_ap_path}"
-  fi
-
-  nmcli con modify "${AP_NAME}" \
-    connection.id "${AP_NAME}" \
-    connection.interface-name "${AP_IFACE}" \
-    connection.autoconnect no \
-    connection.autoconnect-priority -999 \
-    connection.autoconnect-retries 0 \
-    connection.permissions "user:root" \
-    802-11-wireless.mode ap \
-    802-11-wireless.ssid "${AP_SSID}" \
-    802-11-wireless.band bg \
-    802-11-wireless.channel 1 \
-    802-11-wireless.hidden yes \
-    wifi-sec.key-mgmt wpa-psk \
-    wifi-sec.proto rsn \
-    802-11-wireless-security.pmf 1 \
-    wifi-sec.psk "${AP_PASS}" \
-    ipv4.method shared \
-    ipv4.addresses "${AP_GATEWAY}/24 ${AP_GATEWAY}" \
-    ipv4.never-default yes \
-    ipv6.method ignore >/dev/null 2>&1 || warn "No se pudieron fijar parámetros de ${AP_NAME}"
-
-  while IFS=: read -r name uuid filename; do
-    [[ "${name}" != "${AP_NAME}" ]] && continue
-    [[ -z "${uuid}" ]] && continue
-    [[ "${filename}" == "${target_ap_path}" ]] && continue
-    nmcli con delete uuid "${uuid}" >/dev/null 2>&1 || true
-  done < <(nmcli -t -f NAME,UUID,FILENAME con show 2>/dev/null || true)
-
-  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-    systemctl disable --now dnsmasq 2>/dev/null || true
-  fi
-
-  verify_line="$(nmcli -t -f NAME,AUTOCONNECT,AUTOCONNECT-PRIORITY,FILENAME con show 2>/dev/null | grep "^${AP_NAME}:" || true)"
-  if [[ -n "${verify_line}" ]]; then
-    log "[inst] BasculaAP verificada: ${verify_line}"
-  else
-    warn "No se pudo verificar BasculaAP en la salida de nmcli"
-  fi
-else
-  warn "nmcli no disponible; no se pudo configurar ${AP_NAME}"
-fi
-
-WPA_SUPP_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
-if [[ -f "${WPA_SUPP_CONF}" ]] && grep -qE '^\s*network=' "${WPA_SUPP_CONF}"; then
-  BACKUP_PATH="${WPA_SUPP_CONF}.preinstall"
-  if [[ ! -f "${BACKUP_PATH}" ]]; then
-    cp "${WPA_SUPP_CONF}" "${BACKUP_PATH}" || warn "No se pudo crear copia de ${WPA_SUPP_CONF}"
-  fi
-  SOURCE_PATH="${BACKUP_PATH}"
-  [[ -f "${SOURCE_PATH}" ]] || SOURCE_PATH="${WPA_SUPP_CONF}"
-  log "Limpiando redes preconfiguradas en ${WPA_SUPP_CONF}"
-  awk 'BEGIN{network_seen=0} {if($0 ~ /^\s*network=/){network_seen=1;exit} print}' "${SOURCE_PATH}" >"${WPA_SUPP_CONF}" || true
-  cat >>"${WPA_SUPP_CONF}" <<'EOF'
-
-# Redes Wi-Fi preconfiguradas eliminadas por el instalador de Báscula
-# Añade nuevas redes mediante la interfaz de usuario.
-EOF
-  chmod 600 "${WPA_SUPP_CONF}" || true
-fi
-
-if [[ -f "${WPA_SUPP_CONF}" ]]; then
-  if ! grep -qE '^\s*country=ES\b' "${WPA_SUPP_CONF}"; then
-    if grep -qE '^\s*country=' "${WPA_SUPP_CONF}"; then
-      if sed -i 's/^\s*country=.*/country=ES/' "${WPA_SUPP_CONF}"; then
-        log "Actualizado country=ES en ${WPA_SUPP_CONF}"
-      else
-        warn "No se pudo actualizar la directiva country en ${WPA_SUPP_CONF}"
-      fi
-    else
-      if sed -i '1icountry=ES' "${WPA_SUPP_CONF}"; then
-        log "Añadido country=ES a ${WPA_SUPP_CONF}"
-      else
-        warn "No se pudo añadir country=ES a ${WPA_SUPP_CONF}"
-      fi
-    fi
-  fi
-fi
-
-# Si hay systemd, recargar polkit/NM
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if systemctl list-unit-files | grep -q '^polkit\.service'; then
-    systemctl reload polkit || true
-  fi
-  if systemctl list-unit-files | grep -q '^NetworkManager\.service'; then
-    systemctl reload NetworkManager || true
-  fi
-else
-  warn "systemd no disponible: omitiendo recarga de polkit y NetworkManager"
-fi
-
-# Nota: La UI, al conectar a una nueva Wi-Fi, deberá:
-#  - crear/actualizar esa conexión con autoconnect=yes y prioridad 120
-#  - mantener BasculaAP con autoconnect=no (para no competir)
-
-if command -v nmcli >/dev/null 2>&1; then
-  while IFS= read -r PRECONF_UUID; do
-    [[ -z "${PRECONF_UUID}" ]] && continue
-    NAME=$(nmcli -g connection.id connection show "${PRECONF_UUID}" 2>/dev/null || true)
-    if [[ -n "${NAME}" && "${NAME,,}" == *preconfig* ]]; then
-      log "Eliminando perfil Wi-Fi preconfigurado: ${NAME}"
-      nmcli connection delete "${PRECONF_UUID}" >/dev/null 2>&1 || true
-    fi
-  done < <(nmcli -t -f UUID connection show 2>/dev/null | sed 's/^UUID://')
-
-  nmcli dev status || true
-  nmcli -t -f NAME,AUTOCONNECT,AUTOCONNECT-PRIORITY,FILENAME con show | grep -E 'BasculaAP|802-11-wireless' || true
-fi
-
-if ! nmcli general status >/dev/null 2>&1; then
-  err "ERR: nmcli no responde"
-  exit 1
-fi
-
-if ! runuser -l "${TARGET_USER}" -c "nmcli device wifi list" >/dev/null 2>&1; then
-  fail "nmcli device wifi list falló para ${TARGET_USER} sin sudo"
-fi
-log "✓ nmcli usable sin sudo para ${TARGET_USER}"
-
-log "Chequeos rápidos de nmcli (PolicyKit)..."
-set +e
-__nmcli_wifi_status_output="$(nmcli -t -f WIFI general status 2>&1)"
-__nmcli_wifi_status_rc=$?
-set -e
-if [[ ${__nmcli_wifi_status_rc} -ne 0 ]]; then
-  if printf '%s' "${__nmcli_wifi_status_output}" | grep -qiE "(not authorized|access denied|permission denied)"; then
-    fail "PolicyKit denegó 'nmcli -t -f WIFI general status': ${__nmcli_wifi_status_output}"
-  else
-    warn "nmcli WIFI status devolvió código ${__nmcli_wifi_status_rc}: ${__nmcli_wifi_status_output}"
-  fi
-else
-  log "nmcli WIFI status: ${__nmcli_wifi_status_output}"
-fi
-
-set +e
-__nmcli_wifi_list_output="$(nmcli -t -f SSID,SECURITY,SIGNAL device wifi list ifname wlan0 --rescan yes 2>&1)"
-__nmcli_wifi_list_rc=$?
-set -e
-if [[ ${__nmcli_wifi_list_rc} -ne 0 ]]; then
-  if printf '%s' "${__nmcli_wifi_list_output}" | grep -qiE "(not authorized|access denied|permission denied)"; then
-    fail "PolicyKit denegó 'nmcli device wifi list': ${__nmcli_wifi_list_output}"
-  else
-    warn "nmcli device wifi list devolvió código ${__nmcli_wifi_list_rc}: ${__nmcli_wifi_list_output}"
-  fi
-else
-  log "Listado Wi-Fi detectado correctamente"
-fi
-
-log "✓ Polkit configurado"
-
-# Create config.json
-log "[10/20] Creando configuración por defecto..."
-install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${CFG_DIR}"
-if [[ ! -s "${CFG_PATH}" ]]; then
-  cat > "${CFG_PATH}" <<'PY'
-{
-  "general": {
-    "sound_enabled": true,
-    "volume": 70,
-    "tts_enabled": true
-  },
-  "scale": {
-    "port": "/dev/serial0",
-    "baud": 115200,
-    "hx711_dt": 5,
-    "hx711_sck": 6,
-    "calib_factor": 1.0,
-    "smoothing": 5,
-    "decimals": 0,
-    "unit": "g",
-    "ml_factor": 1.0
-  },
-  "network": {
-    "miniweb_enabled": true,
-    "miniweb_port": 8080,
-    "miniweb_pin": ""
-  },
-  "diabetes": {
-    "diabetes_enabled": false,
-    "ns_url": "",
-    "ns_token": "",
-    "hypo_alarm": 70,
-    "hyper_alarm": 180,
-    "mode_15_15": false,
-    "insulin_ratio": 12.0,
-    "insulin_sensitivity": 50.0,
-    "target_glucose": 110
-  },
-  "audio": {
-    "audio_device": "default"
-  }
 }
-PY
-  chown "${TARGET_USER}:${TARGET_GROUP}" "${CFG_PATH}" || true
-fi
-log "✓ Configuración creada en ${CFG_PATH}"
 
-# OTA: Setup release directory structure
-log "[11/20] Configurando estructura OTA..."
-install -d -m 0755 "${BASCULA_RELEASES_DIR}"
-current_stamp="$(date +%Y%m%d-%H%M%S)"
-DEST="${BASCULA_RELEASES_DIR}/${current_stamp}"
-if [[ -e "${DEST}" ]]; then
-  suffix=1
-  while [[ -e "${DEST}-${suffix}" ]]; do
-    suffix=$((suffix + 1))
+ctl.bascula_out {
+    type hw
+    card "${playback_card}"
+}
+
+pcm.bascula_mix_in {
+    type dsnoop
+    ipc_key 8675310
+    slave {
+        pcm "${capture_hw}"
+        channels 1
+        rate 16000
+        format S16_LE
+    }
+}
+
+ctl.bascula_mix_in {
+    type hw
+    card "${capture_card}"
+}
+EOF
+  if [[ -f "${ASOUND_CONF}" ]] && cmp -s "${ASOUND_CONF}.tmp" "${ASOUND_CONF}"; then
+    rm -f "${ASOUND_CONF}.tmp"
+    log "asound.conf sin cambios"
+  else
+    install -o root -g root -m 0644 "${ASOUND_CONF}.tmp" "${ASOUND_CONF}"
+    log "asound.conf desplegado (playback=${playback_hw}, capture=${capture_hw})"
+  fi
+}
+
+ensure_capture_dirs() {
+  install -d -m 0755 -o "${DEFAULT_USER}" -g "${WWW_GROUP}" /run/bascula
+  install -d -m 02770 -o "${DEFAULT_USER}" -g "${WWW_GROUP}" /run/bascula/captures
+  chmod g+s /run/bascula/captures
+}
+
+install_tmpfiles_config() {
+  install -D -m 0644 "${RELEASE_DIR}/systemd/tmpfiles.d/bascula.conf" "${TMPFILES_DEST}/bascula.conf"
+}
+
+install_systemd_unit() {
+  local name="$1"
+  local src="${RELEASE_DIR}/systemd/${name}"
+  local dest="${SYSTEMD_DEST}/${name}"
+  if [[ ! -f "${src}" ]]; then
+    abort "No se encontró unidad systemd ${src}"
+  fi
+  if [[ -f "${dest}" ]] && cmp -s "${src}" "${dest}"; then
+    log "Unidad ${name} sin cambios"
+  else
+    install -D -m 0644 "${src}" "${dest}"
+    log "Unidad ${name} instalada"
+  fi
+  if [[ -d "${src}.d" ]]; then
+    rsync -a --delete "${src}.d/" "${dest}.d/"
+  fi
+}
+
+install_systemd_units() {
+  local units=(
+    bascula-miniweb.service
+    bascula-backend.service
+    bascula-health-wait.service
+    bascula-ui.service
+  )
+  local unit
+  for unit in "${units[@]}"; do
+    install_systemd_unit "${unit}"
   done
-  DEST="${DEST}-${suffix}"
-fi
-log "Copiando proyecto a ${DEST}..."
-install -d -m 0755 "${DEST}"
-(cd "${PROJECT_ROOT}" && tar --exclude .git --exclude .venv --exclude __pycache__ --exclude '*.pyc' --exclude node_modules -cf - .) | tar -xf - -C "${DEST}"
-ln -sfn "${DEST}" "${BASCULA_CURRENT_LINK}"
-log "✓ Release actualizado -> ${DEST}"
-chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}"
-log "✓ Estructura OTA configurada"
-
-POSTINSTALL_SRC="${PROJECT_ROOT}/scripts/postinstall-resume.sh"
-POSTINSTALL_DST="${BASCULA_CURRENT_LINK}/scripts/postinstall-resume.sh"
-if [[ -f "${POSTINSTALL_SRC}" ]]; then
-  install -D -m 0755 "${POSTINSTALL_SRC}" "${POSTINSTALL_DST}"
-  chown "${TARGET_USER}:${TARGET_GROUP}" "${POSTINSTALL_DST}" || true
-  log "✓ Script postinstall-resume desplegado"
-else
-  warn "scripts/postinstall-resume.sh no encontrado en el repositorio"
-fi
-
-# Setup Python virtual environment
-log "[12/20] Preparando entorno Python (.venv)..."
-if [[ ! -f "${VENV_MARKER}" || ! -d "${BASCULA_CURRENT_LINK}/.venv" ]]; then
-  pushd "${BASCULA_CURRENT_LINK}" >/dev/null || fail "No se pudo acceder a ${BASCULA_CURRENT_LINK}"
-  if [[ ! -d ".venv" ]]; then
-    python3 -m venv .venv
-  fi
-  VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
-  VENV_PY="${VENV_DIR}/bin/python"
-  VENV_PIP="${VENV_DIR}/bin/pip"
-  chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
-
-  # Allow venv to see system packages (picamera2)
-  VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
-  if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
-    echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
-  fi
-
-  export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BINARY=1
-  export PIP_INDEX_URL="https://www.piwheels.org/simple"
-  export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
-
-  if [[ "${NET_OK}" -eq 1 ]]; then
-    if ! "${VENV_PY}" -m pip install --upgrade pip setuptools; then
-      fail "No se pudo actualizar pip/setuptools en la venv"
-    fi
-
-    req_files=()
-    if [[ -f "requirements.txt" ]]; then
-      req_files+=("requirements.txt")
-    else
-      fail "No se encontró ${BASCULA_CURRENT_LINK}/requirements.txt; instala las dependencias manualmente"
-    fi
-
-    while IFS= read -r extra_req; do
-      extra_req="${extra_req#./}"
-      if [[ "${extra_req}" != "requirements.txt" ]]; then
-        req_files+=("${extra_req}")
-      fi
-    done < <(find . -maxdepth 1 -type f -name 'requirements-*.txt' -print | sort)
-
-    for req in "${req_files[@]}"; do
-      if [[ "${req}" == "requirements.txt" ]]; then
-        if ! "${VENV_PIP}" install -r "${req}"; then
-          fail "No se pudieron instalar las dependencias Python desde ${req}"
-        fi
-      else
-        if ! "${VENV_PIP}" install -r "${req}"; then
-          warn "${req} no se pudo instalar completamente"
-        fi
-      fi
-    done
-    unset req req_files
-  else
-    warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
-  fi
-
-  popd >/dev/null || true
-  touch "${VENV_MARKER}"
-  log "[inst][done] Entorno Python configurado (${VENV_MARKER})"
-else
-  log "[inst][skip] Entorno Python ya preparado (${VENV_MARKER})"
-fi
-
-VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
-VENV_PY="${VENV_DIR}/bin/python"
-VENV_PIP="${VENV_DIR}/bin/pip"
-
-if [[ ! -x "${VENV_PY}" ]]; then
-  fail "no existe ${VENV_PY}"
-fi
-
-if ! "${VENV_PY}" - <<'PY'
-import fastapi
-import httpx
-import pydantic
-import rapidfuzz
-import uvicorn
-print("py_deps_ok")
-PY
-then
-  err "[ERROR] Dependencias Python faltantes"
-  exit 1
-fi
-
-log "✓ Entorno Python verificado"
-
-# Install Piper TTS
-log "[13/20] Instalando Piper TTS..."
-install -d -m 0755 /opt/piper/models /opt/piper/bin
-if ! command -v piper >/dev/null 2>&1; then
-  PIPER_BIN_URL=""
-  case "${ARCH}" in
-    aarch64) PIPER_BIN_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz" ;;
-    armv7l) PIPER_BIN_URL="https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_armv7l.tar.gz" ;;
-  esac
-  if [[ -n "${PIPER_BIN_URL}" && "${NET_OK}" = "1" ]]; then
-    TMP_TGZ="/tmp/piper_bin_$$.tgz"
-    if curl -fL --retry 2 -m 20 -o "${TMP_TGZ}" "${PIPER_BIN_URL}" 2>/dev/null; then
-      tar -xzf "${TMP_TGZ}" -C /opt/piper/bin || true
-      rm -f "${TMP_TGZ}" || true
-      F_BIN="$(find /opt/piper/bin -maxdepth 2 -type f -name 'piper' | head -n1)"
-      if [[ -n "${F_BIN}" ]]; then
-        chmod +x "${F_BIN}" || true
-        ln -sf "${F_BIN}" /usr/local/bin/piper || true
-      fi
-    fi
-  fi
-fi
-
-# Download Spanish voice models with checksum validation
-VOICE_DIR="/opt/bascula/voices"
-install -d -m 0755 "${VOICE_DIR}"
-
-declare -A VOICE_HASHES=(
-  ["es_ES-carlfm-x_low.onnx"]="d69677323a907cd4963f42b29c20a98b5d6bfa7f3e64df339915e4650c00d125"
-  ["es_ES-carlfm-x_low.onnx.json"]="d9bdfa9ff01eb2bc9e62e7d2593939d1e4c4d8eb7cf75f972731539d12399966"
-  ["es_ES-davefx-medium.onnx"]="6658b03b1a6c316ee4c265a9896abc1393353c2d9e1bca7d66c2c442e222a917"
-  ["es_ES-davefx-medium.onnx.json"]="0e0dda87c732f6f38771ff274a6380d9252f327dca77aa2963d5fbdf9ec54842"
-  ["es_ES-sharvard-medium.onnx"]="40febfb1679c69a4505ff311dc136e121e3419a13a290ef264fdf43ddedd0fb1"
-  ["es_ES-sharvard-medium.onnx.json"]="7438c9b699c72b0c3388dae1b68d3f364dc66a2150fe554a1c11f03372957b2c"
-)
-
-VOICE_BASE_URL="https://github.com/DanielGTdiabetes/bascula-cam/releases/download/voices-v1"
-
-for voice in "${!VOICE_HASHES[@]}"; do
-  dest="${VOICE_DIR}/${voice}"
-  expected_hash="${VOICE_HASHES[${voice}]}"
-  if [[ -s "${dest}" ]]; then
-    current_hash="$(sha256sum "${dest}" 2>/dev/null | awk '{print $1}')"
-    if [[ "${current_hash}" == "${expected_hash}" ]]; then
-      log "[info] Voz ${voice} ya instalada con checksum válido"
-      continue
-    fi
-    warn "Checksum de ${voice} no coincide; re-descargando"
-    rm -f "${dest}"
-  fi
-
-  if [[ "${NET_OK}" != "1" ]]; then
-    warn "Sin red: omitiendo descarga de ${voice}"
-    continue
-  fi
-
-  tmpfile="/tmp/${voice}.tmp.$$"
-  rm -f "${tmpfile}"
-  log "Descargando voz: ${voice}"
-  if ! curl -fsSL -o "${tmpfile}" "${VOICE_BASE_URL}/${voice}"; then
-    rm -f "${tmpfile}"
-    warn "No se pudo descargar ${voice} (saltando)"
-    continue
-  fi
-
-  if [[ ! -s "${tmpfile}" ]]; then
-    rm -f "${tmpfile}"
-    warn "Archivo ${voice} descargado vacío"
-    continue
-  fi
-
-  file_hash="$(sha256sum "${tmpfile}" | awk '{print $1}')"
-  if [[ "${file_hash}" != "${expected_hash}" ]]; then
-    rm -f "${tmpfile}"
-    err "[install] ERROR checksum voice ${voice}: esperado ${expected_hash}, obtenido ${file_hash}"
-    continue
-  fi
-
-  install -m 0644 "${tmpfile}" "${dest}"
-  rm -f "${tmpfile}"
-  log "✓ Voz ${voice} instalada con checksum verificado"
-done
-
-install -d -m 0755 /opt/piper
-if [[ ! -e /opt/piper/models && ! -L /opt/piper/models ]]; then
-  ln -s /opt/bascula/voices /opt/piper/models
-fi
-
-# Create say.sh wrapper
-cat > /usr/local/bin/say.sh <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-TEXT="${*:-Prueba de voz}"
-VOICE="${PIPER_VOICE:-es_ES-sharvard-medium}"
-MODEL=""
-CONFIG=""
-for BASE in /opt/bascula/voices /opt/piper/models; do
-  if [[ -f "${BASE}/${VOICE}.onnx" ]]; then
-    MODEL="${BASE}/${VOICE}.onnx"
-    CONFIG="${BASE}/${VOICE}.onnx.json"
-    break
-  fi
-done
-BIN="$(command -v piper || echo "/opt/piper/bin/piper")"
-
-if [[ -x "${BIN}" && -n "${MODEL}" && -f "${MODEL}" && -f "${CONFIG}" ]]; then
-  echo -n "${TEXT}" | "${BIN}" -m "${MODEL}" -c "${CONFIG}" --length-scale 1.0 --noise-scale 0.5 | aplay -q -r 22050 -f S16_LE -t raw -
-else
-  espeak-ng -v es -s 170 "${TEXT}" >/dev/null 2>&1 || true
-fi
-EOF
-chmod 0755 /usr/local/bin/say.sh
-log "✓ Piper TTS instalado"
-
-install_x735
-
-# Setup OCR service
-log "[14/20] Configurando servicio OCR..."
-install -d -m 0755 /opt/ocr-service
-cat > /opt/ocr-service/app.py <<'PY'
-import io
-from fastapi import FastAPI, UploadFile, File, Form
-from fastapi.responses import JSONResponse, PlainTextResponse
-from PIL import Image
-import pytesseract
-
-app = FastAPI(title="OCR Service", version="1.0")
-
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-
-@app.get("/")
-async def root():
-    return PlainTextResponse("ok")
-
-@app.post("/ocr")
-async def ocr_endpoint(file: UploadFile = File(...), lang: str = Form("spa")):
-    try:
-        data = await file.read()
-        img = Image.open(io.BytesIO(data))
-        txt = pytesseract.image_to_string(img, lang=lang)
-        return JSONResponse({"ok": True, "text": txt})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-PY
-
-cat > /etc/systemd/system/ocr-service.service <<EOF
-[Unit]
-Description=Bascula OCR Service
-After=network.target
-
-[Service]
-Type=simple
-User=${TARGET_USER}
-Group=${TARGET_GROUP}
-WorkingDirectory=/opt/ocr-service
-ExecStart=${VENV_DIR}/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8078
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl_safe daemon-reload
-systemctl_safe enable ocr-service.service
-systemctl_safe restart ocr-service.service
-log "✓ Servicio OCR configurado"
-
-# Setup Frontend (preparación)
-log "[15/20] Configurando frontend (single build)..."
-cd "${BASCULA_CURRENT_LINK}"
-if [[ -f "package.json" ]]; then
-  if [[ -f ".env.device" ]]; then
-    cp -f .env.device .env
-  fi
-  log "Entorno frontend listo para compilar"
-else
-  warn "package.json no encontrado; se omite build de frontend"
-fi
-
-build_frontend_once "${BASCULA_CURRENT_LINK}"
-if [[ -d "${BASCULA_CURRENT_LINK}/dist" ]]; then
-  touch "${BASCULA_CURRENT_LINK}/.frontend_built"
-fi
-
-# Install and configure Nginx
-log "[16/20] Instalando y configurando Nginx..."
-if [[ "${NET_OK}" -eq 1 ]]; then
-  if ! apt-get install -y nginx; then
-    warn "No se pudo instalar Nginx"
-  fi
-else
-  warn "Sin red: omitiendo instalación de Nginx"
-fi
-
-install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
-install -d -m 0755 /etc/nginx/bascula
-install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula/captures || true
-usermod -aG www-data pi || true
-
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  systemctl stop bascula-ui.service || true
-  systemctl stop nginx || true
-fi
-
-nginx_conf_src="${PROJECT_ROOT}/nginx/bascula.conf"
-nginx_conf_dst="/etc/nginx/sites-available/bascula"
-nginx_conf_link="/etc/nginx/sites-enabled/bascula"
-
-if [[ ! -f "${nginx_conf_src}" ]]; then
-  fail "No se encontró ${nginx_conf_src} para desplegar configuración de Nginx"
-fi
-
-rm -f "${nginx_conf_link}"
-rm -f "${nginx_conf_dst}"
-
-if ! install -m 0644 -o root -g root "${nginx_conf_src}" "${nginx_conf_dst}"; then
-  fail "No se pudo escribir ${nginx_conf_dst}"
-fi
-
-if ! ln -sfn "${nginx_conf_dst}" "${nginx_conf_link}"; then
-  fail "No se pudo crear enlace simbólico de configuración de Nginx"
-fi
-
-rm -f /etc/nginx/sites-enabled/default
-rm -f /etc/nginx/sites-enabled/bascula-captures /etc/nginx/sites-available/bascula-captures
-
-captures_snippet="/etc/nginx/snippets/bascula_captures_allowlan.conf"
-if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
-  snippet_tmp="$(mktemp)"
-  cat <<'EOF' > "${snippet_tmp}"
-# Autogenerado por install-all.sh: reglas LAN para /captures/
-# Ajusta esta lista según tus rangos privados.
-allow 10.0.0.0/8;
-allow 172.16.0.0/12;
-allow 192.168.0.0/16;
-allow fe80::/10;
-deny all;
-EOF
-  install -D -m 0644 "${snippet_tmp}" "${captures_snippet}"
-  rm -f "${snippet_tmp}"
-  if python3 - "$nginx_conf_dst" <<'PY'
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-text = path.read_text()
-include_line = "    include /etc/nginx/snippets/bascula_captures_allowlan.conf;"
-if include_line in text:
-    sys.exit(0)
-needle = "    deny all;"
-if needle not in text:
-    sys.exit(1)
-text = text.replace(needle, f"{include_line}\n{needle}", 1)
-path.write_text(text)
-PY
-  then
-    log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1)"
-  else
-    warn "No se pudo habilitar include para /captures/; revisa ${nginx_conf_dst}"
-  fi
-else
-  rm -f "${captures_snippet}"
-fi
-
-captures_count=$(grep -c 'location /captures/' "${nginx_conf_link}" 2>/dev/null || true)
-if (( captures_count == 0 )); then
-  echo "[inst][error] No se encontró bloque location /captures/ en ${nginx_conf_link}" >&2
-  exit 1
-fi
-if (( captures_count > 1 )); then
-  echo "[inst][error] Duplicado de location /captures/ detectado" >&2
-  exit 1
-fi
-
-if ! nginx -t; then
-  if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-    systemctl status nginx --no-pager -l || true
-    if command -v journalctl >/dev/null 2>&1; then
-      journalctl -xeu nginx --no-pager -l | tail -n 80 || true
-    fi
-  fi
-  echo "[inst][error] nginx -t falló; revisa configuración" >&2
-  exit 1
-fi
-
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if ! systemctl enable --now nginx; then
-    fail "systemctl enable --now nginx falló"
-  fi
-  if ! systemctl reload nginx; then
-    warn "systemctl reload nginx falló; intentando restart"
-    if ! systemctl restart nginx; then
-      fail "systemctl restart nginx falló"
-    fi
-  fi
-else
-  warn "systemd no disponible; omitiendo enable/reload de nginx"
-fi
-log "✓ Nginx configurado"
-
-# Create mini-web backend service
-log "[17/20] Configurando servicio mini-web..."
-install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" "${CFG_DIR}"
-
-SYSTEMD_SRC="${PROJECT_ROOT}/packaging/systemd/bascula-miniweb.service"
-if [[ ! -f "${SYSTEMD_SRC}" ]]; then
-  err "No se encontró ${SYSTEMD_SRC}"
-  exit 1
-fi
-
-install -m 0644 "${SYSTEMD_SRC}" /etc/systemd/system/bascula-miniweb.service
-log "✓ Mini-web backend configurado"
-
-# Install AP ensure service and script
-log "[17a/20] Configurando servicio de arranque de AP..."
-AP_ENSURE_SERVICE_INSTALLED=0
-
-AP_ENSURE_SCRIPT_SRC="${PROJECT_ROOT}/scripts/bascula-ap-ensure.sh"
-AP_ENSURE_SCRIPT_DST="${BASCULA_CURRENT_LINK}/scripts/bascula-ap-ensure.sh"
-if [[ -f "${AP_ENSURE_SCRIPT_SRC}" ]]; then
-  install -d "${BASCULA_CURRENT_LINK}/scripts"
-  safe_install "${AP_ENSURE_SCRIPT_SRC}" "${AP_ENSURE_SCRIPT_DST}"
-  chown "${TARGET_USER}:${TARGET_GROUP}" "${AP_ENSURE_SCRIPT_DST}" || true
-  log "✓ Script bascula-ap-ensure.sh desplegado en ${AP_ENSURE_SCRIPT_DST}"
-else
-  warn "No se encontró scripts/bascula-ap-ensure.sh"
-fi
-
-install -d /etc/systemd/system
-if [[ -f "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" ]]; then
-  install -m 0644 "${PROJECT_ROOT}/systemd/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
-  AP_ENSURE_SERVICE_INSTALLED=1
-elif [[ -f "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" ]]; then
-  warn "Usando servicio heredado de system/os/"
-  install -m 0644 "${PROJECT_ROOT}/system/os/bascula-ap-ensure.service" /etc/systemd/system/bascula-ap-ensure.service
-  AP_ENSURE_SERVICE_INSTALLED=1
-else
-  warn "No se encontró definición de servicio bascula-ap-ensure"
-fi
-
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if ! systemctl daemon-reload; then
-    warn "systemctl daemon-reload falló"
-  fi
-  systemctl disable --now bascula-ap-ensure.timer 2>/dev/null || true
-  if [[ "${AP_ENSURE_SERVICE_INSTALLED}" -eq 1 ]]; then
-    if systemctl enable --now bascula-ap-ensure.service bascula-miniweb.service; then
-      log "✓ Servicios bascula-ap-ensure y bascula-miniweb habilitados"
-    else
-      warn "No se pudieron habilitar bascula-ap-ensure/bascula-miniweb"
-      systemctl status bascula-ap-ensure.service --no-pager || true
-      systemctl status bascula-miniweb.service --no-pager || true
-    fi
-  else
-    warn "Servicio bascula-ap-ensure no instalado; habilitando solo bascula-miniweb"
-    if systemctl enable --now bascula-miniweb.service; then
-      log "✓ Servicio bascula-miniweb habilitado"
-    else
-      warn "No se pudo habilitar bascula-miniweb.service"
-      systemctl status bascula-miniweb.service --no-pager || true
-    fi
-  fi
-else
-  warn "systemd no disponible: BasculaAP dependerá de connection.autoconnect"
-fi
-
-# Setup UI kiosk service
-log "[18/20] Configurando servicio UI kiosk..."
-
-# Copiar .xinitrc del proyecto al home del usuario
-if [[ -f "${BASCULA_CURRENT_LINK}/.xinitrc" ]]; then
-  cp "${BASCULA_CURRENT_LINK}/.xinitrc" "${TARGET_HOME}/.xinitrc"
-  chmod +x "${TARGET_HOME}/.xinitrc"
-  chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.xinitrc"
-  log "✓ .xinitrc copiado desde el proyecto"
-else
-  warn ".xinitrc no encontrado en el proyecto, creando uno básico"
-  cat > "${TARGET_HOME}/.xinitrc" <<EOF
-#!/bin/sh
-set -e
-xset s off
-xset -dpms
-xset s noblank
-unclutter -idle 0.5 -root &
-openbox &
-sleep 2
-CHROME_BIN="\$(command -v ${CHROME_PKG} 2>/dev/null || command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || printf '%s' '${CHROME_BIN}')"
-exec "\${CHROME_BIN}" \
-  --kiosk \
-  --noerrdialogs \
-  --disable-infobars \
-  --no-first-run \
-  --enable-features=OverlayScrollbar \
-  --disable-translate \
-  --disable-features=TranslateUI \
-  --user-data-dir=/run/bascula/chrome-profile \
-  --disk-cache-dir=/run/bascula/chrome-cache \
-  --overscroll-history-navigation=0 \
-  --disable-pinch \
-  --check-for-update-interval=31536000 \
-  http://localhost:8080
-EOF
-  chmod +x "${TARGET_HOME}/.xinitrc"
-  chown "${TARGET_USER}:${TARGET_GROUP}" "${TARGET_HOME}/.xinitrc"
-fi
-
-# Instalar servicio bascula-ui actualizado
-SERVICE_FILE="${BASCULA_CURRENT_LINK}/systemd/bascula-ui.service"
-TARGET_UID="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || 1000)"
-if [[ -f "${SERVICE_FILE}" ]]; then
-  TMP_SERVICE_FILE="$(mktemp)"
-  sed -e "s|User=pi|User=${TARGET_USER}|g" \
-      -e "s|Group=pi|Group=${TARGET_GROUP}|g" \
-      -e "s|/opt/bascula/current|${BASCULA_CURRENT_LINK}|g" \
-      -e "s|Environment=HOME=/home/pi|Environment=HOME=${TARGET_HOME}|g" \
-      -e "s|Environment=USER=pi|Environment=USER=${TARGET_USER}|g" \
-      -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000|Environment=XDG_RUNTIME_DIR=/run/user/${TARGET_UID}|g" \
-      -e "s|-o pi -g pi|-o ${TARGET_USER} -g ${TARGET_GROUP}|g" \
-      -e "s|chown pi:pi|chown ${TARGET_USER}:${TARGET_GROUP}|g" \
-      "${SERVICE_FILE}" > "${TMP_SERVICE_FILE}"
-  install -m 0644 "${TMP_SERVICE_FILE}" /etc/systemd/system/bascula-ui.service
-  rm -f "${TMP_SERVICE_FILE}"
-  log "✓ bascula-ui.service actualizado"
-else
-  cat > /etc/systemd/system/bascula-ui.service <<EOF
-[Unit]
-Description=Bascula Digital Pro - UI (Chromium kiosk)
-After=systemd-user-sessions.service network-online.target bascula-miniweb.service sound.target
-Requires=bascula-miniweb.service
-Conflicts=getty@tty1.service
-StartLimitIntervalSec=0
-
-[Service]
-Type=simple
-User=${TARGET_USER}
-Group=${TARGET_GROUP}
-WorkingDirectory=${BASCULA_CURRENT_LINK}
-Environment=HOME=${TARGET_HOME}
-Environment=USER=${TARGET_USER}
-Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/${TARGET_UID}
-StandardOutput=journal
-StandardError=journal
-PermissionsStartOnly=yes
-ExecStart=/usr/bin/startx ${BASCULA_CURRENT_LINK}/.xinitrc -- :0 vt1 -nocursor
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  log "✓ bascula-ui.service generado por defecto"
-fi
-
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if [[ "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-    systemctl disable --now bascula-app.service 2>/dev/null || true
-    systemctl mask bascula-app.service 2>/dev/null || true
-    rm -f /etc/systemd/system/multi-user.target.wants/bascula-app.service 2>/dev/null || true
-    rm -f /etc/systemd/system/bascula-app.service 2>/dev/null || true
-    systemctl_safe disable getty@tty1.service
-  else
-    warn "ALLOW_SYSTEMD!=1: se omitió la habilitación de servicios"
-  fi
-else
-  warn "systemd no disponible: bascula-ui.service no se habilitó"
-fi
-
-configure_bascula_ui_service
-
-if command -v systemd-analyze >/dev/null 2>&1; then
-  try_or_warn "systemd verify bascula-miniweb" "systemd-analyze verify /etc/systemd/system/bascula-miniweb.service"
-  try_or_warn "systemd verify bascula-ui" "systemd-analyze verify /etc/systemd/system/bascula-ui.service"
-else
-  warn "systemd-analyze no disponible para verificar servicios bascula"
-fi
-
-# Chromium managed policies
-log "Configurando políticas de Chromium..."
-install -d -m 0755 /etc/chromium/policies/managed
-cat > /etc/chromium/policies/managed/bascula_policy.json <<'EOF'
-{
-  "AudioCaptureAllowed": true,
-  "VideoCaptureAllowed": true,
-  "AutoplayAllowed": true,
-  "DefaultAudioCaptureSetting": 1,
-  "DefaultVideoCaptureSetting": 1,
-  "URLAllowlist": ["http://127.0.0.1:8080", "http://localhost:8080"]
-}
-EOF
-log "✓ Políticas de Chromium configuradas"
-
-# Postinstall resume service (disponible tras copiar script)
-POSTINSTALL_UNIT_SRC="${PROJECT_ROOT}/systemd/bascula-postinstall.service"
-if [[ -f "${POSTINSTALL_UNIT_SRC}" ]]; then
-  install -m 0644 "${POSTINSTALL_UNIT_SRC}" /etc/systemd/system/bascula-postinstall.service
-  if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-    systemctl_safe daemon-reload
-    if [[ -f "${POSTINSTALL_DONE_MARKER}" ]]; then
-      log "[inst][skip] bascula-postinstall.service ya aplicado (${POSTINSTALL_DONE_MARKER})"
-    else
-      if ! systemctl enable bascula-postinstall.service; then
-        warn "No se pudo habilitar bascula-postinstall.service"
-      else
-        log "[inst][done] bascula-postinstall.service habilitado"
-      fi
-    fi
-  fi
-else
-  warn "systemd/bascula-postinstall.service no encontrado en el repositorio"
-fi
-
-# Setup tmpfiles
-log "[19/20] Configurando tmpfiles..."
-if [[ -f "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula.conf" ]]; then
-  install -m 0644 "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula.conf" /etc/tmpfiles.d/bascula.conf
-else
-  warn "systemd/tmpfiles.d/bascula.conf no encontrado en el repositorio"
-fi
-if [[ -f "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula-x11.conf" ]]; then
-  install -m 0644 "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula-x11.conf" /etc/tmpfiles.d/bascula-x11.conf
-fi
-if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-  systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
-  systemd-tmpfiles --create /etc/tmpfiles.d/bascula-x11.conf || true
-  systemd-tmpfiles --create || true
-else
-  warn "tmpfiles no ejecutado (systemd o ALLOW_SYSTEMD deshabilitado)"
-fi
-# Bootstrap defensivo: asegurar setgid y grupo correcto si tmpfiles aún no corrió
-install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula/captures || true
-chgrp www-data /run/bascula/captures || true
-log "✓ tmpfiles configurado"
-stat -c '[inst] captures perms: %A %U:%G %a %n' /run/bascula/captures || true
-
-# Ensure Python virtual environment and backend dependencies
-log "Verificando entorno Python en /opt/bascula/current..."
-if [[ ! -x "/opt/bascula/current/.venv/bin/python" ]]; then
-  echo "[ERR] no existe /opt/bascula/current/.venv/bin/python" >&2
-  exit 1
-fi
-
-if ! /opt/bascula/current/.venv/bin/python -m uvicorn --version >/dev/null 2>&1; then
-  warn "uvicorn no instalado en .venv; ejecuta pip install -r requirements.txt"
-fi
-
-# Runtime directories for captures served by Nginx
-install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -m 02770 -o pi -g www-data /run/bascula/captures
-chmod g+s /run/bascula/captures || true
-usermod -aG www-data pi || true
-
-# Final permissions
-log "[20/20] Ajustando permisos finales..."
-install -d -m 0755 -o "${TARGET_USER}" -g "${TARGET_GROUP}" /var/log/bascula
-chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}" /opt/ocr-service
-log "✓ Permisos ajustados"
-
-post_install_hardware_checks
-
-# Quick nmcli verification (logging only)
-if command -v nmcli >/dev/null 2>&1; then
-  log "Verificación rápida NetworkManager (no bloqueante)..."
-  nmcli dev status || true
-  nmcli -t -f NAME,TYPE,DEVICE con show || true
-  nmcli -g connection.interface-name,802-11-wireless.mode,ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns con show "${AP_NAME}" || true
-else
-  warn "nmcli no disponible para verificación rápida"
-fi
-
-# Asegurar servicios principales activos
-if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-  if [[ -f "${SERVICES_MARKER}" ]]; then
-    log "[inst][skip] Servicios principales ya provisionados (${SERVICES_MARKER})"
-  else
-    if ! sudo systemctl daemon-reload; then
-      warn "systemctl daemon-reload falló"
-    fi
-    local_services_ok=1
-    if ! sudo systemctl enable bascula-miniweb.service; then
-      warn "No se pudo habilitar bascula-miniweb.service"
-      local_services_ok=0
-    fi
-    if ! sudo systemctl enable bascula-backend.service; then
-      warn "No se pudo habilitar bascula-backend.service"
-      local_services_ok=0
-    fi
-    if ! sudo systemctl enable bascula-health-wait.service; then
-      warn "No se pudo habilitar bascula-health-wait.service"
-      local_services_ok=0
-    else
-      sudo systemctl start bascula-health-wait.service || true
-    fi
-    if ! sudo systemctl restart bascula-miniweb.service; then
-      warn "No se pudo reiniciar bascula-miniweb.service"
-      local_services_ok=0
-    fi
-    if ! sudo systemctl restart bascula-backend.service; then
-      warn "No se pudo reiniciar bascula-backend.service"
-      local_services_ok=0
-    fi
-    if command -v curl >/dev/null 2>&1; then
-      if ! curl -sf --retry 5 --retry-delay 1 http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
-        warn "La verificación /api/miniweb/status falló tras reiniciar miniweb/backend"
-        local_services_ok=0
-      fi
-    fi
-    if ! sudo systemctl enable bascula-ui.service; then
-      warn "No se pudo habilitar bascula-ui.service"
-      local_services_ok=0
-    fi
-    if ! sudo systemctl restart bascula-ui.service; then
-      warn "No se pudo reiniciar bascula-ui.service"
-      local_services_ok=0
-    fi
-    if [[ ${local_services_ok} -eq 1 ]]; then
-      touch "${SERVICES_MARKER}"
-      log "[inst][done] Servicios principales habilitados (${SERVICES_MARKER})"
-    fi
-  fi
-else
-  warn "systemd no disponible o ALLOW_SYSTEMD!=1; omitiendo enable/restart finales"
-fi
-
-# Smoke checks
-try_or_warn "miniweb status" "curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q '\"ok\"[[:space:]]*:[[:space:]]*true'"
-try_or_warn "nginx root" "curl -sI http://127.0.0.1/ | head -n1"
-try_or_warn "ui kiosk log" "tail -n 50 /var/log/bascula/ui.log"
-
-log "[inst] Verificaciones finales (nginx/audio)..."
-if command -v nginx >/dev/null 2>&1; then
-  captures_count=$(grep -R "location /captures/" -n /etc/nginx/sites-enabled/bascula 2>/dev/null | wc -l | tr -d ' ')
-  captures_count="${captures_count:-0}"
-  if [[ "${captures_count}" -le 1 ]]; then
-    log "[verif][ok] Nginx /captures sin duplicados"
-  else
-    warn "[verif] Nginx /captures presenta múltiples bloques (${captures_count})"
-  fi
-
-  if nginx -t >/dev/null 2>&1; then
-    log "[verif][ok] nginx -t"
-  else
-    warn "[verif] nginx -t falló"
-  fi
-else
-  warn "[verif] nginx no disponible"
-fi
-
-if command -v ss >/dev/null 2>&1; then
-  if ss -lntp 2>/dev/null | grep -q ':8080'; then
-    log "[verif][ok] Puerto 8080 escuchando"
-  else
-    warn "[verif] Puerto 8080 no detectado"
-  fi
-else
-  warn "[verif] Herramienta ss no disponible"
-fi
-
-if command -v curl >/dev/null 2>&1; then
-  if command -v jq >/dev/null 2>&1; then
-    if curl -sf http://127.0.0.1:8080/api/miniweb/status | jq -e '.ok == true' >/dev/null 2>&1; then
-      log "[verif][ok] API miniweb responde"
-    else
-      warn "[verif] API miniweb no respondió ok=true"
-    fi
-  else
-    miniweb_json="$(curl -sf http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"
-    if [[ -n "${miniweb_json}" ]]; then
-      if python3 -c 'import json,sys; data=json.load(sys.stdin); sys.exit(0 if data.get("ok") is True else 1)' >/dev/null 2>&1 <<<"${miniweb_json}"; then
-        log "[verif][ok] API miniweb responde"
-      else
-        warn "[verif] API miniweb no respondió ok=true"
-      fi
-    else
-      warn "[verif] API miniweb no devolvió contenido"
-    fi
-  fi
-else
-  warn "[verif] curl no disponible para comprobar API miniweb"
-fi
-
-if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if systemctl cat bascula-miniweb.service 2>/dev/null | grep -q 'Environment=BASCULA_AUDIO_DEVICE=bascula_out'; then
-    log "[verif][ok] Environment BASCULA_AUDIO_DEVICE"
-  else
-    warn "[verif] BASCULA_AUDIO_DEVICE no encontrado en unit"
-  fi
-  if systemctl cat bascula-miniweb.service 2>/dev/null | grep -q 'Environment=BASCULA_MIC_DEVICE=bascula_mix_in'; then
-    log "[verif][ok] Environment BASCULA_MIC_DEVICE"
-  else
-    warn "[verif] BASCULA_MIC_DEVICE no encontrado en unit"
-  fi
-else
-  warn "[verif] systemctl no disponible; omitiendo verificación de Environment"
-fi
-
-if [[ -f /etc/asound.conf ]]; then
-  if grep -q 'pcm.bascula_out' /etc/asound.conf && grep -q 'pcm.bascula_mix_in' /etc/asound.conf; then
-    log "[verif][ok] Aliases ALSA presentes"
-  else
-    warn "[verif] Falta alias ALSA esperado en /etc/asound.conf"
-  fi
-else
-  warn "[verif] /etc/asound.conf no encontrado"
-fi
-
-# Resumen dinámico previo al mensaje final
-if [[ "${SUMMARY_MINIWEB}" == "pending" ]]; then
-  MINIWEB_JSON=""
-  if command -v curl >/dev/null 2>&1; then
-    MINIWEB_JSON="$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"
-  fi
-  if [[ -n "${MINIWEB_JSON}" ]]; then
-    parsed="$(MINIWEB_STATUS_JSON="${MINIWEB_JSON}" python3 - <<'PY'
-import json
-import os
-import sys
-
-payload = os.environ.get("MINIWEB_STATUS_JSON")
-if not payload:
-    print("error|parse")
-    sys.exit(0)
-
-try:
-    data = json.loads(payload)
-except Exception:
-    print("error|parse")
-    sys.exit(0)
-
-ok = bool(data.get("ok"))
-mode = data.get("effective_mode") or data.get("mode") or "unknown"
-print(f"{ok}|{mode}")
-PY
-    )"
-    IFS='|' read -r ok_flag mode_value <<< "${parsed}"
-    if [[ "${ok_flag}" == "True" ]]; then
-      SUMMARY_MINIWEB=":8080 ok (mode=${mode_value})"
-    elif [[ "${ok_flag}" == "False" ]]; then
-      SUMMARY_MINIWEB=":8080 responde pero ok=false (mode=${mode_value})"
-    else
-      SUMMARY_MINIWEB=":8080 respuesta no parseable"
-    fi
-    if [[ "${SUMMARY_UI_TARGET}" == "pending" && -f "${BASCULA_CURRENT_LINK}/scripts/choose_kiosk_target.py" ]]; then
-      chooser_result="$(BASCULA_KIOSK_STATUS_JSON="${MINIWEB_JSON}" BASCULA_KIOSK_WAIT_S=0 BASCULA_KIOSK_PROBE_MS=100 python3 "${BASCULA_CURRENT_LINK}/scripts/choose_kiosk_target.py" 2>/dev/null || true)"
-      if [[ -n "${chooser_result}" ]]; then
-        chooser_state="${chooser_result%%|*}"
-        chooser_url="${chooser_result#*|}"
-        SUMMARY_UI_TARGET="${chooser_state}:${chooser_url}"
-      fi
-    fi
-  else
-    SUMMARY_MINIWEB=":8080 sin respuesta"
-  fi
-fi
-
-if [[ "${SUMMARY_UI_TARGET}" == "pending" ]]; then
-  SUMMARY_UI_TARGET="sin datos"
-fi
-
-if [[ "${SUMMARY_CAPTURES}" == "pending" ]]; then
-  if stat_info=$(stat -c '%#a|%A|%U|%G' /run/bascula/captures 2>/dev/null); then
-    IFS='|' read -r perm_octal perm_text owner_user owner_group <<< "${stat_info}"
-    group_bit="${perm_text:5:1}"
-    if [[ "${group_bit}" == "s" || "${group_bit}" == "S" ]]; then
-      setgid_state="g+s"
-    else
-      setgid_state="sin g+s"
-    fi
-    SUMMARY_CAPTURES="${perm_octal} ${setgid_state} owner=${owner_user}:${owner_group}"
-  else
-    SUMMARY_CAPTURES="directorio no encontrado"
-  fi
-fi
-
-if [[ "${SUMMARY_NGINX_CAPTURES}" == "pending" ]]; then
-  nginx_conf="/etc/nginx/sites-available/bascula"
-  if [[ -f "${nginx_conf}" ]]; then
-    block="$(sed -n '/location \/captures\//,/}/p' "${nginx_conf}" 2>/dev/null)"
-    if [[ -n "${block}" ]] && grep -q 'allow all' <<< "${block}"; then
-      SUMMARY_NGINX_CAPTURES="expuesto (allow all)"
-    elif [[ -n "${block}" ]] && grep -q 'deny all' <<< "${block}" && grep -q 'allow 127.0.0.1' <<< "${block}" && grep -q 'allow ::1' <<< "${block}"; then
-      SUMMARY_NGINX_CAPTURES="localhost-only"
-    else
-      SUMMARY_NGINX_CAPTURES="revisar configuración"
-    fi
-  else
-    SUMMARY_NGINX_CAPTURES="configuración no encontrada"
-  fi
-fi
-
-if [[ "${SUMMARY_AUDIO}" == "pending" ]]; then
-  SUMMARY_AUDIO="sin verificación"
-fi
-
-if [[ "${SUMMARY_CAMERA}" == "pending" ]]; then
-  if [[ -n "${CAMERA_SUMMARY_STATUS}" && "${CAMERA_SUMMARY_STATUS}" != "UNKNOWN" ]]; then
-    SUMMARY_CAMERA="${CAMERA_SUMMARY_STATUS} (${CAMERA_SUMMARY_HINT})"
-  else
-    SUMMARY_CAMERA="sin verificación"
-  fi
-fi
-
-if [[ "${SUMMARY_FRONTEND}" == "pending" ]]; then
-  if [[ -d "${BASCULA_CURRENT_LINK}/dist" ]]; then
-    SUMMARY_FRONTEND="dist presente"
-  else
-    SUMMARY_FRONTEND="no generado"
-  fi
-fi
-
-# Final message
-IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-log "============================================"
-log "  Resumen instalación Báscula Digital Pro"
-log "============================================"
-log "  OTA releases: ${BASCULA_RELEASES_DIR}"
-log "  OTA activo -> ${BASCULA_CURRENT_LINK}"
-log "  Configuración -> ${CFG_PATH}"
-log "  Entorno Python -> ${BASCULA_CURRENT_LINK}/.venv"
-log "  mini-web        : ${SUMMARY_MINIWEB}"
-log "  UI kiosk target : ${SUMMARY_UI_TARGET}"
-log "  frontend build  : ${SUMMARY_FRONTEND}"
-log "  captures dir    : ${SUMMARY_CAPTURES}"
-log "  nginx /captures : ${SUMMARY_NGINX_CAPTURES}"
-log "  camera          : ${SUMMARY_CAMERA}"
-log "  audio           : ${SUMMARY_AUDIO}"
-log "Accesos tras el reinicio:"
-log "  http://${IP:-<IP>} o http://localhost"
-log "  Mini-Web -> http://${IP:-<IP>}:8080 (consulta /api/miniweb/pin en AP o en pantalla)"
-log "Comandos útiles:"
-log "  journalctl -u bascula-miniweb.service -f"
-log "  journalctl -u bascula-ui.service -f"
-log "  journalctl -u ocr-service.service -f"
-log "  journalctl -u x735-fan.service -f    # monitorear ventilador"
-log "  libcamera-hello  # probar cámara"
-log "  say.sh 'Hola'    # probar voz"
-log "  x735off          # apagar el sistema de forma segura"
-log "Instalación finalizada"
-if [[ -f /.needs-reboot-libcamera ]]; then
-  log_warn "Se detectó /.needs-reboot-libcamera: ejecuta 'sudo reboot' para completar la actualización de cámara"
-fi
-log "Backend de báscula predeterminado: UART (ESP32 en /dev/serial0)"
-systemctl_safe status bascula-miniweb --no-pager -l
-systemctl_safe status bascula-ui --no-pager -l
-if command -v ss >/dev/null 2>&1; then
-  ss -ltnp | grep 8080 || true
-else
-  warn "Herramienta 'ss' no disponible; omitiendo comprobación de puertos"
-fi
-
-if [[ -f "${REBOOT_FLAG_FILE}" && "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-  if [[ -f "${POSTINSTALL_DONE_MARKER}" ]]; then
-    log "[inst][skip] postinstall ya completado (${POSTINSTALL_DONE_MARKER})"
-  elif ! systemctl is-enabled bascula-postinstall.service >/dev/null 2>&1; then
-    if [[ -f "${POSTINSTALL_SRC}" ]]; then
-      install -D -m 0755 "${POSTINSTALL_SRC}" "${POSTINSTALL_DST}"
-      chown "${TARGET_USER}:${TARGET_GROUP}" "${POSTINSTALL_DST}" || true
-    fi
-    if ! systemctl enable bascula-postinstall.service; then
-      warn "No se pudo habilitar bascula-postinstall.service"
-    else
-      log "[inst][done] bascula-postinstall.service listo para siguiente reinicio"
-    fi
-  fi
-fi
-
-echo "[inst] ============================================"
-if [[ -f "${REBOOT_FLAG_FILE}" ]]; then
-  if [[ ! -f "${REBOOT_QUEUE_MARK}" ]]; then
-    install -d -m 0755 "${REBOOT_STATE_DIR}"
-    touch "${REBOOT_QUEUE_MARK}"
-    log_warn "⚠ REINICIO REQUERIDO (marcado)"
-  else
-    log_warn "⚠ REINICIO REQUERIDO"
-  fi
-  if [[ -s "${REBOOT_REASONS_FILE}" ]]; then
-    log_warn "Razones:"
-    sed 's/^/[inst][warn]  - /' "${REBOOT_REASONS_FILE}" || true
-  fi
-  log_warn "Ejecuta: sudo reboot"
-else
-  log "No es necesario reiniciar"
-fi
-echo "[inst] ============================================"
-
-# --- Bascula: instalar/activar services idempotente (sin tocar AP) ---
-install_services() {
-  set -euo pipefail
-
-  # Copiar units del repo (solo los nuestros)
-  install -m 0644 systemd/bascula-miniweb.service /etc/systemd/system/bascula-miniweb.service
-  install -m 0644 systemd/bascula-backend.service  /etc/systemd/system/bascula-backend.service
-  if [ -f systemd/bascula-health-wait.service ]; then
-    install -m 0644 systemd/bascula-health-wait.service /etc/systemd/system/bascula-health-wait.service
-  fi
-
-  if [ -f systemd/bascula-ui.service ]; then
-    local tmp_service
-    tmp_service="$(mktemp)"
-    local target_uid
-    target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || 1000)"
-    sed -e "s|User=pi|User=${TARGET_USER}|g" \
-        -e "s|Group=pi|Group=${TARGET_GROUP}|g" \
-        -e "s|/opt/bascula/current|${BASCULA_CURRENT_LINK}|g" \
-        -e "s|Environment=HOME=/home/pi|Environment=HOME=${TARGET_HOME}|g" \
-        -e "s|Environment=USER=pi|Environment=USER=${TARGET_USER}|g" \
-        -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000|Environment=XDG_RUNTIME_DIR=/run/user/${target_uid}|g" \
-        -e "s|-o pi -g pi|-o ${TARGET_USER} -g ${TARGET_GROUP}|g" \
-        -e "s|chown pi:pi|chown ${TARGET_USER}:${TARGET_GROUP}|g" \
-        systemd/bascula-ui.service > "${tmp_service}"
-    install -m 0644 "${tmp_service}" /etc/systemd/system/bascula-ui.service
-    rm -f "${tmp_service}"
-  fi
-  if [ -f systemd/tmpfiles.d/bascula.conf ]; then
-    install -m 0644 systemd/tmpfiles.d/bascula.conf /etc/tmpfiles.d/bascula.conf
-  fi
-  if [ -f systemd/tmpfiles.d/bascula-x11.conf ]; then
-    install -m 0644 systemd/tmpfiles.d/bascula-x11.conf /etc/tmpfiles.d/bascula-x11.conf
-  fi
-
-  configure_miniweb_audio_env
-
-  if [[ "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-    systemctl daemon-reload
-    systemctl disable --now bascula-app.service 2>/dev/null || true
-    systemctl mask bascula-app.service 2>/dev/null || true
-    rm -f /etc/systemd/system/multi-user.target.wants/bascula-app.service 2>/dev/null || true
-    rm -f /etc/systemd/system/bascula-app.service 2>/dev/null || true
-
-    systemctl enable bascula-miniweb bascula-backend || true
-    systemctl enable bascula-health-wait.service || true
-    systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
-    systemctl is-active --quiet bascula-backend  || systemctl start bascula-backend
-
-  else
-    echo "[install] ALLOW_SYSTEMD!=1; units copiados pero no habilitados"
-  fi
-
-  echo "[install] services ok: miniweb:8080, backend:8081, ui:kiosk"
-
-  configure_bascula_ui_service
+  systemctl daemon-reload
+  systemctl enable bascula-miniweb.service bascula-backend.service bascula-health-wait.service bascula-ui.service
+  systemctl restart bascula-miniweb.service bascula-backend.service || true
+  systemctl restart bascula-health-wait.service || true
+  systemctl restart bascula-ui.service || true
 }
 
-# Llamada protegida (no afecta a AP/timers)
-SERVICES_INSTALLED=0
-if [ -f systemd/bascula-miniweb.service ] && [ -f systemd/bascula-backend.service ] && [ -f systemd/bascula-ui.service ]; then
-  install_services
-  SERVICES_INSTALLED=1
-else
-  echo "[install] aviso: faltan units en systemd/ (miniweb/backend/ui); no se instalaron"
-fi
+install_nginx_site() {
+  local site_path="${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
+  local enabled_link="${NGINX_SITES_ENABLED}/bascula.conf"
+  find "${NGINX_SITES_ENABLED}" -maxdepth 1 -type l -name 'bascula*' -exec rm -f {} +
+  cat <<'EOF' > "${site_path}.tmp"
+server {
+    listen 127.0.0.1:80;
+    listen [::1]:80;
+    server_name _;
 
-if [[ ${SERVICES_INSTALLED} -eq 1 && "${HAS_SYSTEMD}" -eq 1 ]]; then
-  systemctl daemon-reload || warn "systemctl daemon-reload falló"
-  if systemctl restart bascula-miniweb; then
-    sleep 5
-    if command -v curl >/dev/null 2>&1; then
-      miniweb_status=""
-      if miniweb_status=$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null); then
-        if printf '%s' "${miniweb_status}" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
-          log "Mini-web saludable (status 200 /api/miniweb/status)"
-        else
-          warn "Mini-web respondió sin ok=true tras reinicio"
-        fi
-      else
-        warn "No se pudo consultar /api/miniweb/status tras reinicio"
-      fi
-    else
-      warn "curl no disponible para verificar miniweb tras reinicio"
+    access_log /var/log/nginx/bascula.access.log;
+    error_log /var/log/nginx/bascula.error.log;
+
+    location /captures/ {
+        root /run/bascula;
+        autoindex off;
+        add_header Cache-Control "no-store" always;
+    }
+}
+EOF
+  if [[ -f "${site_path}" ]] && cmp -s "${site_path}.tmp" "${site_path}"; then
+    rm -f "${site_path}.tmp"
+    log "Configuración nginx sin cambios"
+  else
+    install -o root -g root -m 0644 "${site_path}.tmp" "${site_path}"
+    log "Configuración nginx actualizada"
+  fi
+  rm -f "${site_path}.tmp"
+  ln -sfn "${site_path}" "${enabled_link}"
+  nginx -t
+  systemctl restart nginx
+}
+
+run_health_checks() {
+  run_checked "systemd-analyze verify" systemd-analyze verify \
+    "${SYSTEMD_DEST}/bascula-miniweb.service" \
+    "${SYSTEMD_DEST}/bascula-backend.service" \
+    "${SYSTEMD_DEST}/bascula-health-wait.service" \
+    "${SYSTEMD_DEST}/bascula-ui.service"
+  run_checked "nginx -t" nginx -t
+  run_checked "curl miniweb" curl -fsS http://127.0.0.1:8080/api/miniweb/status
+  run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
+  run_checked "picamera2 import" python3 -c 'import picamera2'
+  run_checked "arecord bascula_mix_in" arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1
+  run_checked "speaker-test bascula_out" speaker-test -t sine -f 1000 -l 1 -D bascula_out
+}
+
+main() {
+  require_root
+  exec 9>/var/lock/bascula.install
+  if ! flock -n 9; then
+    log_warn "Otro instalador en ejecución; saliendo"
+    exit 0
+  fi
+
+  ensure_packages \
+    python3 python3-venv python3-pip python3-dev \
+    git rsync curl jq nginx \
+    alsa-utils libcamera-apps python3-picamera2 \
+    xserver-xorg xinit chromium-browser matchbox-window-manager \
+    fonts-dejavu-core
+
+  ensure_boot_overlays || true
+
+  mkdir -p "${RELEASES_DIR}"
+  COMMIT=$(current_commit)
+  select_release_dir "${COMMIT}"
+  REPO_SYNC_NEEDED=1
+  if [[ -d "${RELEASE_DIR}" && -f "${RELEASE_DIR}/.release-commit" ]]; then
+    if [[ $(cat "${RELEASE_DIR}/.release-commit") == "${COMMIT}" ]]; then
+      REPO_SYNC_NEEDED=0
     fi
-    run_audio_io_self_tests 0 1
+  fi
+  if [[ ${REPO_SYNC_NEEDED} -eq 1 ]]; then
+    sync_release_contents
   else
-    err "[ERROR] No se pudo reiniciar bascula-miniweb"
-    exit 1
-  fi
-fi
-
-if [[ ${OVERLAY_ADDED} -eq 1 && -n "${INSTALL_LOG}" ]]; then
-  if grep -q "Overlay añadido" "${INSTALL_LOG}" 2>/dev/null; then
-    echo "[inst][info] Marcando reinicio requerido: vc4-kms-v3d-pi5"
-    if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-      systemctl disable bascula-ui.service 2>/dev/null || true
-    fi
-    require_reboot "activar vc4-kms-v3d-pi5"
-  fi
-fi
-# --- Fin bloque ---
-# Pruebas manuales de referencia:
-# Ver entorno del servicio
-# systemctl show -p Environment bascula-miniweb
-# Probar reproducción con alias
-# aplay -D bascula_out -r 44100 -f S16_LE -c 2 -d 1 /dev/zero
-# Probar fallback directo
-# aplay -D hw:1,0 -r 44100 -f S16_LE -c 2 -d 1 /dev/zero
-# Tono de 1 kHz (verificación fina)
-# speaker-test -D bascula_out -t sine -f 1000 -r 44100 -c 2 -l 1
-
-echo "== PRUEBAS DE HUMO MINIWEB =="
-CAPTURE_API_URL="http://127.0.0.1:8080/api/camera/capture-to-file"
-CAPTURE_TEST_URL="http://127.0.0.1:8080/api/camera/test"
-CAPTURE_FILE="/run/bascula/captures/camera-capture.jpg"
-CAPTURE_PUBLIC_URL="http://127.0.0.1/captures/camera-capture.jpg"
-
-if [[ "${NEED_REBOOT}" = "1" ]]; then
-  log_warn "Reinicio pendiente por realineación de cámara; omitiendo pruebas HTTP de captura"
-else
-  if command -v curl >/dev/null 2>&1; then
-    try_or_warn "smoke /api/camera/test" \
-      "curl -s ${CAPTURE_TEST_URL} | jq . | sed -n '1,40p'"
-    try_or_warn "capture-to-file" \
-      "curl -s -X POST '${CAPTURE_API_URL}' | jq ."
-    try_or_warn "curl captura pública" \
-      "curl -sI ${CAPTURE_PUBLIC_URL}"
-  else
-    log_warn "curl no disponible; omitiendo pruebas HTTP"
+    ln -sfn "${RELEASE_DIR}" "${CURRENT_LINK}"
+    log "Release ya sincronizada"
   fi
 
-  if [[ -f "${CAPTURE_FILE}" ]]; then
-    ls -l "${CAPTURE_FILE}" || true
-  else
-    log_warn "${CAPTURE_FILE} no existe tras la captura"
-  fi
-fi
+  ensure_python_venv
+  ensure_audio_env_file
+  install_asound_conf
+  install_tmpfiles_config
+  systemd-tmpfiles --create "${TMPFILES_DEST}/bascula.conf"
+  ensure_capture_dirs
+  install_nginx_site
+  install_systemd_units
 
-log "done"
+  if [[ ${REBOOT_FLAG} -eq 1 ]]; then
+    log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Omitiendo pruebas de audio (arecord/aplay)."
+    run_checked "systemd-analyze verify" systemd-analyze verify \
+      "${SYSTEMD_DEST}/bascula-miniweb.service" \
+      "${SYSTEMD_DEST}/bascula-backend.service" \
+      "${SYSTEMD_DEST}/bascula-health-wait.service" \
+      "${SYSTEMD_DEST}/bascula-ui.service"
+    run_checked "nginx -t" nginx -t
+    run_checked "curl miniweb" curl -fsS http://127.0.0.1:8080/api/miniweb/status
+    run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
+    run_checked "picamera2 import" python3 -c 'import picamera2'
+    log_warn "Reinicie el sistema y vuelva a ejecutar las pruebas de audio manualmente."
+    exit 0
+  fi
+
+  run_health_checks
+  log "Instalación completada"
+}
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+main "$@"

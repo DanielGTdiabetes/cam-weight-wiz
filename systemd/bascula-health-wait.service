@@ -1,11 +1,12 @@
 [Unit]
-Description=Bascula health gate (miniweb)
-Wants=bascula-miniweb.service
+Description=Espera a que miniweb responda ok=true
 After=bascula-miniweb.service
+Wants=bascula-miniweb.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'for i in $(seq 1 60); do curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null && exit 0; sleep 1; done; exit 1'
+ExecStart=/bin/sh -c 'for i in $(seq 1 40); do curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true" && exit 0; sleep 1; done; exit 1'
+RemainAfterExit=true
 
 [Install]
 WantedBy=multi-user.target
