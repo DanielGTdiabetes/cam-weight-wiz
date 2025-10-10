@@ -26,7 +26,7 @@ El instalador crea una estructura tipo OTA y deja los servicios listos para prod
 - Provisiona `/opt/bascula/releases/<timestamp>` con el contenido del repositorio y apunta `/opt/bascula/current` al release activo. 【F:scripts/install-all.sh†L57-L130】
 - Instala dependencias del sistema (libcamera/picamera2, Chromium kiosk, nginx, ALSA, etc.) sólo si faltan. 【F:scripts/install-all.sh†L75-L96】【F:scripts/install-all.sh†L391-L396】
 - Fuerza los overlays requeridos en `/boot/firmware/config.txt` (`vc4-kms-v3d-pi5`, `disable-bt`, `hifiberry-dac`, `enable_uart=1`). Si alguno se añade, marca que es necesario reiniciar. 【F:scripts/install-all.sh†L120-L148】
-- Crea la virtualenv en `/opt/bascula/current/.venv` y instala `requirements*.txt` usando piwheels para aarch64. 【F:scripts/install-all.sh†L150-L190】
+- Crea la virtualenv en `/opt/bascula/current/.venv` compartiendo los paquetes del sistema y sólo instala nuestras dependencias vía pip (sin resolver dependencias). 【F:scripts/install-all.sh†L150-L205】
 - Genera `/etc/asound.conf` con alias robustos (`bascula_out` → HiFiBerry si está disponible, fallback a HDMI; `bascula_mix_in` con `dsnoop` para el micro USB). 【F:scripts/install-all.sh†L192-L244】
 - Asegura `/run/bascula/captures` con permisos `drwxrws---` y bit `g+s`, además del archivo tmpfiles correspondiente. 【F:scripts/install-all.sh†L246-L267】
 - Configura nginx para servir `/captures/` únicamente en loopback y reinicia el servicio tras validar `nginx -t`. 【F:scripts/install-all.sh†L336-L367】
@@ -66,3 +66,9 @@ El script comprueba `shellcheck`, `systemd-analyze verify`, `nginx -t`, `curl 12
 - **Capturas**: los archivos se escriben en `/run/bascula/captures` con permisos `02770` y bit `g+s`. Nginx los expone en `http://127.0.0.1/captures/`. 【F:scripts/install-all.sh†L246-L267】【F:scripts/install-all.sh†L336-L367】
 
 Para más diagnósticos, consulta los journals de cada servicio (`journalctl -u bascula-*.service`).
+
+### Paquetes Python desde APT en Raspberry Pi 5
+
+En Raspberry Pi OS Bookworm usamos los binarios oficiales de `picamera2`, `numpy` y `simplejpeg` que vienen empaquetados en APT (`python3-picamera2`, `python3-numpy`, `python3-simplejpeg`). Esto evita tener que compilar `python-prctl` y otros bindings en la Pi, y garantiza que los módulos críticos de cámara se construyan contra el ABI correcto de libcamera/mesa. 【F:scripts/install-all.sh†L150-L205】【F:requirements.txt†L1-L19】
+
+El instalador verifica explícitamente que estas librerías se carguen desde `/usr/lib/python3/dist-packages/`; si detecta que se resolvieron desde `pip`, aborta para prevenir instalaciones inconsistentes. 【F:scripts/install-all.sh†L150-L205】
