@@ -12,7 +12,11 @@ set -euo pipefail
 IFS=$'\n\t'
 trap 'echo "[inst][error] fallo en línea $LINENO (cmd: $BASH_COMMAND)"; exit 1' ERR
 
-exec 9>/var/lock/bascula.install && flock -n 9 || { echo "[inst] otro instalador en marcha"; exit 0; }
+exec 9>/var/lock/bascula.install
+if ! flock -n 9; then
+  echo "[inst] otro instalador en marcha"
+  exit 0
+fi
 
 log() { printf '[inst] %s\n' "$*"; }
 log_err() { printf '[inst][err] %s\n' "$*" >&2; }
@@ -40,7 +44,6 @@ try_or_warn() {
   return ${status}
 }
 
-FRONTEND_BUILD_RESULT="pending"
 SUMMARY_MINIWEB="pending"
 SUMMARY_UI_TARGET="pending"
 SUMMARY_FRONTEND="pending"
@@ -76,13 +79,11 @@ build_frontend_once() {
     if [[ -n "${commit}" && -n "${recorded_commit}" && "${commit}" == "${recorded_commit}" ]]; then
       log "[inst][skip] Frontend ya compilado (commit ${commit})"
       SUMMARY_FRONTEND="OK (skip, commit ${commit})"
-      FRONTEND_BUILD_RESULT="skip"
       return 0
     fi
     if [[ -z "${commit}" && -f "${FRONTEND_MARKER}" ]]; then
       log "[inst][skip] Frontend ya compilado (marcador existente)"
       SUMMARY_FRONTEND="OK (skip, marcador existente)"
-      FRONTEND_BUILD_RESULT="skip"
       return 0
     fi
     log_warn "dist/ presente pero commit cambió; recompilando frontend"
@@ -142,12 +143,10 @@ build_frontend_once() {
   touch "${FRONTEND_MARKER}"
   log "[inst][done] Frontend compilado (npm ci + build)"
   SUMMARY_FRONTEND="OK (built, commit ${commit:-unknown})"
-  FRONTEND_BUILD_RESULT="built"
   return 0
 }
 
 OVERLAY_ADDED=0
-BOOT_CONFIG_CHANGED=0
 INSTALL_LOG=""
 
 REBOOT_STATE_DIR="/var/lib/bascula"
@@ -276,7 +275,6 @@ ensure_enable_uart() {
   if grep -qE '^\s*enable_uart=' "${conf_file}"; then
     if sed -i 's/^\s*enable_uart=.*/enable_uart=1/' "${conf_file}"; then
       log "Actualizado enable_uart=1 en ${conf_file}"
-      BOOT_CONFIG_CHANGED=1
       require_reboot "enable_uart=1 en ${conf_file}"
     else
       warn "No se pudo actualizar enable_uart en ${conf_file}"
@@ -287,7 +285,6 @@ ensure_enable_uart() {
       printf 'enable_uart=1\n'
     } >>"${conf_file}" || warn "No se pudo escribir enable_uart en ${conf_file}"
     log "Añadido enable_uart=1 a ${conf_file}"
-    BOOT_CONFIG_CHANGED=1
     require_reboot "enable_uart=1 en ${conf_file}"
   fi
 }
@@ -321,7 +318,8 @@ ensure_bootcfg_line() {
 
 configure_pi_boot_hardware() {
   local bootcfg="${CONF}"
-  local ts="$(date +%Y%m%d-%H%M%S)"
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
   local dac_name="${HW_DAC_NAME:-hifiberry-dac}"
   local block_start="# --- Bascula-Cam: Hardware Configuration ---"
   local block_end="# --- Bascula-Cam (end) ---"
@@ -364,7 +362,6 @@ configure_pi_boot_hardware() {
     printf 'dtoverlay=imx708\n'
     printf '%s\n' "${block_end}"
   } >> "${bootcfg}"; then
-    BOOT_CONFIG_CHANGED=1
     require_reboot "configuracion de overlays I2C/I2S/SPI/imx708 (${dac_name})"
   else
     warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
@@ -388,13 +385,12 @@ configure_hifiberry_audio() {
   local tmp_conf tmp_defaults
 
   tmp_conf="$(mktemp)"
-  cat <<'EOF' >"${tmp_conf}"
+  cat <<'EOF' > "${tmp_conf}"
 # ============================================================
 # /etc/asound.conf – Configuración estable Báscula Digital Pro
 # DAC I2S HiFiBerry MAX98357A + Micrófono USB PnP
 # ============================================================
 
-# ---- 1) Dispositivo de salida (DAC) ----
 pcm.dmix_dac {
     type dmix
     ipc_key 1024
@@ -409,7 +405,6 @@ pcm.dmix_dac {
     }
 }
 
-# ---- 2) Dispositivo de entrada (Micrófono USB) ----
 pcm.dsnoop_mic {
     type dsnoop
     ipc_key 2048
@@ -422,7 +417,6 @@ pcm.dsnoop_mic {
     }
 }
 
-# ---- 3) Alias públicos usados por el backend ----
 pcm.bascula_out {
     type plug
     slave.pcm "dmix_dac"
@@ -433,19 +427,33 @@ pcm.bascula_mix_in {
     slave.pcm "dsnoop_mic"
 }
 
-# ---- 4) Defaults globales (opcional) ----
 pcm.!default bascula_out
 ctl.!default bascula_out
 EOF
 
-  if [[ -f "${asound_conf}" ]] && cmp -s "${tmp_conf}" "${asound_conf}"; then
-    log "✓ /etc/asound.conf sin cambios"
+  if [[ -f "${asound_conf}" ]]; then
+    if cmp -s "${tmp_conf}" "${asound_conf}"; then
+      log "✓ /etc/asound.conf sin cambios"
+    else
+      local ts
+      ts="$(date +%Y%m%d-%H%M%S)"
+      if cp -a "${asound_conf}" "${asound_conf}.bak-${ts}"; then
+        log "[inst] Backup creado: ${asound_conf}.bak-${ts}"
+      else
+        warn "No se pudo crear backup previo de ${asound_conf}"
+      fi
+      if ! install -m 0644 "${tmp_conf}" "${asound_conf}"; then
+        rm -f "${tmp_conf}" || true
+        fail "No se pudo escribir ${asound_conf}"
+      fi
+      log "✓ /etc/asound.conf actualizado"
+    fi
   else
-    if ! install -m 0644 /dev/stdin "${asound_conf}" < "${tmp_conf}"; then
+    if ! install -m 0644 "${tmp_conf}" "${asound_conf}"; then
       rm -f "${tmp_conf}" || true
       fail "No se pudo escribir ${asound_conf}"
     fi
-    log "✓ /etc/asound.conf actualizado"
+    log "✓ /etc/asound.conf creado"
   fi
   chmod 0644 "${asound_conf}" || warn "No se pudo ajustar permisos de ${asound_conf}"
   rm -f "${tmp_conf}" || true
@@ -672,7 +680,7 @@ ensure_libcamera_stack() {
     NEED_REBOOT=1
     require_reboot "Realinear libcamera (Pi5)"
   else
-    cameras_detected=$(grep -E '^[0-9]+[[:space:]]*:' "${list_file}" | wc -l | tr -d ' ')
+    cameras_detected=$(grep -c -E '^[0-9]+[[:space:]]*:' "${list_file}" 2>/dev/null || true)
     echo "[check] cámaras detectadas: ${cameras_detected}"
     if [[ ${cameras_detected} -lt 1 ]]; then
       log_warn "Sin cámaras tras la instalación; marcando reinicio necesario."
@@ -693,6 +701,24 @@ ensure_libcamera_stack() {
   elif [[ -f /.needs-reboot-libcamera ]]; then
     rm -f /.needs-reboot-libcamera 2>/dev/null || true
   fi
+
+  if [[ "${NET_OK:-0}" -eq 1 ]]; then
+    log "[inst] Realineando IPA/libcamera/pisp (reinstalación segura)..."
+    if ! apt-get install -y --reinstall \
+      libcamera-ipa libcamera0.5 python3-libcamera rpicam-apps libcamera-apps \
+      libpisp1 libpisp-common; then
+      log_warn "Reinstalación de libcamera/libpisp falló"
+    fi
+  else
+    log_warn "Sin red: omitiendo reinstalación forzada de libcamera/libpisp"
+  fi
+
+  if command -v rpicam-still >/dev/null 2>&1; then
+    timeout 5 rpicam-still -t 1000 -o /run/bascula/captures/selftest.jpg || true
+  fi
+
+  # Si el símbolo indefinido persiste, se puede fijar versión conocida:
+  # apt-mark hold libcamera-ipa=<versión> libpisp1=<versión>
 
   return 0
 }
@@ -803,7 +829,6 @@ PY
     hint="libcamera-hello ok pero sin cámaras"
   else
     status="FAIL"
-    hint="${hint}"
   fi
 
   if [[ "${NEED_REBOOT}" = "1" && "${status}" = "FAIL" ]]; then
@@ -861,7 +886,7 @@ check_playback() {
     return
   fi
 
-  local cmd_bascula_out=(aplay -D bascula_out -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
+  local cmd_bascula_out=(aplay -D "bascula_out" -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
   if "${cmd_bascula_out[@]}"; then
     printf '[inst][ok] salida OK via bascula_out\n'
     return
@@ -875,7 +900,7 @@ check_playback() {
   fi
 
   warn "aplay falló via bascula_out tras reintento; probando hw:1,0"
-  local cmd_hw_fallback=(aplay -D hw:1,0 -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
+  local cmd_hw_fallback=(aplay -D "hw:1,0" -r 44100 -f S16_LE -c 2 -d 1 /dev/zero)
   if "${cmd_hw_fallback[@]}"; then
     printf '[inst][ok] salida OK via hw:1,0 (fallback)\n'
     return
@@ -1656,7 +1681,6 @@ if grep -q "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null; then
       overlay_added_msg="[inst][info] Overlay añadido; se aplicará tras reinicio."
       echo "${overlay_added_msg}"
       OVERLAY_ADDED=1
-      BOOT_CONFIG_CHANGED=1
       if [[ -n "${INSTALL_LOG}" ]]; then
         printf '%s\n' "${overlay_added_msg}" >> "${INSTALL_LOG}" 2>/dev/null || true
       fi
@@ -1985,8 +2009,12 @@ fi
 
 # Si hay systemd, recargar polkit/NM
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  systemctl list-unit-files | grep -q '^polkit\.service' && systemctl reload polkit || true
-  systemctl list-unit-files | grep -q '^NetworkManager\.service' && systemctl reload NetworkManager || true
+  if systemctl list-unit-files | grep -q '^polkit\.service'; then
+    systemctl reload polkit || true
+  fi
+  if systemctl list-unit-files | grep -q '^NetworkManager\.service'; then
+    systemctl reload NetworkManager || true
+  fi
 else
   warn "systemd no disponible: omitiendo recarga de polkit y NetworkManager"
 fi
@@ -2100,14 +2128,20 @@ log "✓ Configuración creada en ${CFG_PATH}"
 # OTA: Setup release directory structure
 log "[11/20] Configurando estructura OTA..."
 install -d -m 0755 "${BASCULA_RELEASES_DIR}"
-if [[ ! -e "${BASCULA_CURRENT_LINK}" ]]; then
-  DEST="${BASCULA_RELEASES_DIR}/v1"
-  log "Copiando proyecto a ${DEST}..."
-  install -d -m 0755 "${DEST}"
-  (cd "${PROJECT_ROOT}" && tar --exclude .git --exclude .venv --exclude __pycache__ --exclude '*.pyc' --exclude node_modules -cf - .) | tar -xf - -C "${DEST}"
-  ln -s "${DEST}" "${BASCULA_CURRENT_LINK}"
-  log "✓ Release v1 creado"
+current_stamp="$(date +%Y%m%d-%H%M%S)"
+DEST="${BASCULA_RELEASES_DIR}/${current_stamp}"
+if [[ -e "${DEST}" ]]; then
+  suffix=1
+  while [[ -e "${DEST}-${suffix}" ]]; do
+    suffix=$((suffix + 1))
+  done
+  DEST="${DEST}-${suffix}"
 fi
+log "Copiando proyecto a ${DEST}..."
+install -d -m 0755 "${DEST}"
+(cd "${PROJECT_ROOT}" && tar --exclude .git --exclude .venv --exclude __pycache__ --exclude '*.pyc' --exclude node_modules -cf - .) | tar -xf - -C "${DEST}"
+ln -sfn "${DEST}" "${BASCULA_CURRENT_LINK}"
+log "✓ Release actualizado -> ${DEST}"
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}"
 log "✓ Estructura OTA configurada"
 
@@ -2123,7 +2157,7 @@ fi
 
 # Setup Python virtual environment
 log "[12/20] Preparando entorno Python (.venv)..."
-if [[ ! -f "${VENV_MARKER}" ]]; then
+if [[ ! -f "${VENV_MARKER}" || ! -d "${BASCULA_CURRENT_LINK}/.venv" ]]; then
   pushd "${BASCULA_CURRENT_LINK}" >/dev/null || fail "No se pudo acceder a ${BASCULA_CURRENT_LINK}"
   if [[ ! -d ".venv" ]]; then
     python3 -m venv .venv
@@ -2406,10 +2440,15 @@ fi
 
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -d -m 0755 /etc/nginx/bascula
-install -d -o pi -g www-data -m 02770 /run/bascula
+install -d -o pi -g www-data -m 0755 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula /run/bascula/captures || true
+chmod g+s /run/bascula/captures || true
 usermod -aG www-data pi || true
+
+if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
+  systemctl stop bascula-ui.service || true
+  systemctl stop nginx || true
+fi
 
 nginx_conf_src="${PROJECT_ROOT}/nginx/bascula.conf"
 nginx_conf_dst="/etc/nginx/sites-available/bascula"
@@ -2422,38 +2461,53 @@ fi
 rm -f "${nginx_conf_link}"
 rm -f "${nginx_conf_dst}"
 
-if ! tee "${nginx_conf_dst}" < "${nginx_conf_src}" >/dev/null; then
+if ! install -m 0644 -o root -g root "${nginx_conf_src}" "${nginx_conf_dst}"; then
   fail "No se pudo escribir ${nginx_conf_dst}"
 fi
-chmod 0644 "${nginx_conf_dst}" || warn "No se pudo ajustar permisos de ${nginx_conf_dst}"
 
-if ! ln -s "${nginx_conf_dst}" "${nginx_conf_link}"; then
+if ! ln -sfn "${nginx_conf_dst}" "${nginx_conf_link}"; then
   fail "No se pudo crear enlace simbólico de configuración de Nginx"
 fi
 
 rm -f /etc/nginx/sites-enabled/default
 rm -f /etc/nginx/sites-enabled/bascula-captures /etc/nginx/sites-available/bascula-captures
 
+captures_snippet="/etc/nginx/snippets/bascula_captures_allowlan.conf"
 if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
+  snippet_tmp="$(mktemp)"
+  cat <<'EOF' > "${snippet_tmp}"
+# Autogenerado por install-all.sh: reglas LAN para /captures/
+# Ajusta esta lista según tus rangos privados.
+allow 10.0.0.0/8;
+allow 172.16.0.0/12;
+allow 192.168.0.0/16;
+allow fe80::/10;
+deny all;
+EOF
+  install -D -m 0644 "${snippet_tmp}" "${captures_snippet}"
+  rm -f "${snippet_tmp}"
   if python3 - "$nginx_conf_dst" <<'PY'
-  then
 import pathlib
-import re
 import sys
 
 path = pathlib.Path(sys.argv[1])
 text = path.read_text()
-pattern = re.compile(r'(?P<indent>[ \t]*)allow 127\.0\.0\.1;[ \t]*\n[ \t]*allow ::1;[ \t]*\n[ \t]*deny all;')
-new_text, count = pattern.subn(lambda m: f"{m.group('indent')}allow all;", text, count=1)
-if count == 0:
+include_line = "    include /etc/nginx/snippets/bascula_captures_allowlan.conf;"
+if include_line in text:
+    sys.exit(0)
+needle = "    deny all;"
+if needle not in text:
     sys.exit(1)
-path.write_text(new_text)
+text = text.replace(needle, f"{include_line}\n{needle}", 1)
+path.write_text(text)
 PY
   then
-    log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1): allow all"
+    log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1)"
   else
-    warn "No se pudo exponer /captures/ para LAN; revisa ${nginx_conf_dst}"
+    warn "No se pudo habilitar include para /captures/; revisa ${nginx_conf_dst}"
   fi
+else
+  rm -f "${captures_snippet}"
 fi
 
 captures_count=$(grep -c 'location /captures/' "${nginx_conf_link}" 2>/dev/null || true)
@@ -2717,14 +2771,15 @@ fi
 if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
   systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
   systemd-tmpfiles --create /etc/tmpfiles.d/bascula-x11.conf || true
+  systemd-tmpfiles --create || true
 else
   warn "tmpfiles no ejecutado (systemd o ALLOW_SYSTEMD deshabilitado)"
 fi
 # Bootstrap defensivo: asegurar setgid y grupo correcto si tmpfiles aún no corrió
-install -d -o pi -g www-data -m 02770 /run/bascula
+install -d -o pi -g www-data -m 0755 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula /run/bascula/captures || true
-chgrp www-data /run/bascula /run/bascula/captures || true
+chmod g+s /run/bascula/captures || true
+chgrp www-data /run/bascula/captures || true
 log "✓ tmpfiles configurado"
 stat -c '[inst] captures perms: %A %U:%G %a %n' /run/bascula/captures || true
 
@@ -2744,9 +2799,9 @@ if ! /opt/bascula/current/.venv/bin/python -m uvicorn --version >/dev/null 2>&1;
 fi
 
 # Runtime directories for captures served by Nginx
-install -d -o pi -g www-data -m 02770 /run/bascula
+install -d -o pi -g www-data -m 0755 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula /run/bascula/captures || true
+chmod g+s /run/bascula/captures || true
 usermod -aG www-data pi || true
 
 # Final permissions
@@ -2776,8 +2831,12 @@ if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
       warn "systemctl daemon-reload falló"
     fi
     local_services_ok=1
-    if ! sudo systemctl enable --now bascula-miniweb.service; then
-      warn "No se pudo habilitar/iniciar bascula-miniweb.service"
+    if ! sudo systemctl enable bascula-miniweb.service; then
+      warn "No se pudo habilitar bascula-miniweb.service"
+      local_services_ok=0
+    fi
+    if ! sudo systemctl enable bascula-backend.service; then
+      warn "No se pudo habilitar bascula-backend.service"
       local_services_ok=0
     fi
     if ! sudo systemctl enable bascula-health-wait.service; then
@@ -2786,7 +2845,20 @@ if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
     else
       sudo systemctl start bascula-health-wait.service || true
     fi
-    sleep 2
+    if ! sudo systemctl restart bascula-miniweb.service; then
+      warn "No se pudo reiniciar bascula-miniweb.service"
+      local_services_ok=0
+    fi
+    if ! sudo systemctl restart bascula-backend.service; then
+      warn "No se pudo reiniciar bascula-backend.service"
+      local_services_ok=0
+    fi
+    if command -v curl >/dev/null 2>&1; then
+      if ! curl -sf --retry 5 --retry-delay 1 http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
+        warn "La verificación /api/miniweb/status falló tras reiniciar miniweb/backend"
+        local_services_ok=0
+      fi
+    fi
     if ! sudo systemctl enable bascula-ui.service; then
       warn "No se pudo habilitar bascula-ui.service"
       local_services_ok=0
@@ -3077,7 +3149,8 @@ install_services() {
   fi
 
   if [ -f systemd/bascula-ui.service ]; then
-    local tmp_service="$(mktemp)"
+    local tmp_service
+    tmp_service="$(mktemp)"
     local target_uid
     target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || 1000)"
     sed -e "s|User=pi|User=${TARGET_USER}|g" \
