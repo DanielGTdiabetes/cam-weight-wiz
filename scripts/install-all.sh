@@ -177,8 +177,43 @@ ensure_python_venv() {
     "httpcore>=1.0.0,<2.0.0"
   pip install -r "${CURRENT_LINK}/requirements.txt" --no-deps
   # Dependencias OCR (RapidOCR + runtime ARM64 sin compilación)
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 libtiff5 libilmbase25 libavformat58 ffmpeg
+  sudo apt-get update
+
+  export DEBIAN_FRONTEND=noninteractive
+
+  # Instala una lista de paquetes; si alguno no existe, no aborta el script.
+  apt_try() {
+    sudo apt-get install -y "$@" || return 1
+  }
+
+  # Prueba alternativas; devuelve 0 si alguna entra.
+  apt_one_of() {
+    for pkg in "$@"; do
+      if apt_try "$pkg"; then
+        echo "[install] usando $pkg"
+        return 0
+      fi
+    done
+    echo "[install][warn] ninguna alternativa disponible: $*"
+    return 0
+  }
+
+  # Paquetes base presentes en Bookworm y Bullseye
+  sudo apt-get install -y \
+    git python3-venv python3-pip \
+    python3-libcamera python3-picamera2 \
+    libcap-dev libatlas-base-dev libopenjp2-7 \
+    ffmpeg nginx curl jq libzbar0
+
+  # Transiciones de versión entre Bullseye ↔ Bookworm:
+  # TIFF: Bullseye=libtiff5, Bookworm=libtiff6
+  apt_one_of libtiff6 libtiff5
+
+  # FFmpeg (libavformat): Bullseye=58, Bookworm=59, testing puede ser 60
+  apt_one_of libavformat60 libavformat59 libavformat58
+
+  # ilmbase dejó de existir como runtime en Bookworm; intenta los headers si están
+  apt_try libilmbase-dev || true
   pip install --no-cache-dir \
     "rapidocr-onnxruntime==1.4.4" \
     onnxruntime \
