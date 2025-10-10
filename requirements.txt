@@ -1,10 +1,9 @@
 # Dependencias críticas para los servicios Python de Báscula
+# En Raspberry Pi (Bookworm) estos paquetes vienen de APT, no pip.
 aiofiles
 fastapi
 httpx
-numpy
 opencv-python
-picamera2
 piper-tts
 pillow
 pydantic

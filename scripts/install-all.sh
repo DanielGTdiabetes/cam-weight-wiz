@@ -159,18 +159,25 @@ sync_release_contents() {
 }
 
 ensure_python_venv() {
-  local venv_dir="${RELEASE_DIR}/.venv"
-  if [[ ! -d "${venv_dir}" ]]; then
-    log "Creando entorno virtual en ${venv_dir}"
-    python3 -m venv "${venv_dir}"
-  fi
+  local venv_dir="${CURRENT_LINK}/.venv"
+  log "Creando/actualizando entorno virtual en ${venv_dir} con paquetes del sistema"
+  python3 -m venv --system-site-packages "${venv_dir}"
+  sed -i 's/^include-system-site-packages = .*/include-system-site-packages = true/' "${venv_dir}/pyvenv.cfg" || true
   source "${venv_dir}/bin/activate"
   pip install --upgrade pip wheel
-  local pip_index="${PIP_EXTRA_INDEX_URL:-https://www.piwheels.org/simple}"
-  pip install --extra-index-url "${pip_index}" -r "${RELEASE_DIR}/requirements.txt"
-  if [[ -f "${RELEASE_DIR}/requirements-voice.txt" ]]; then
-    pip install --extra-index-url "${pip_index}" -r "${RELEASE_DIR}/requirements-voice.txt"
+  pip install --no-deps -r "${CURRENT_LINK}/requirements.txt"
+  if [[ -f "${CURRENT_LINK}/requirements-voice.txt" ]]; then
+    pip install --no-deps -r "${CURRENT_LINK}/requirements-voice.txt"
   fi
+  python - <<'PY'
+import importlib
+for m in ("numpy", "simplejpeg", "picamera2"):
+    mod = importlib.import_module(m)
+    path = getattr(mod, "__file__", "")
+    if "/usr/lib/python3/dist-packages/" not in path:
+        raise SystemExit(f"{m} no viene de APT: {path}")
+print("picamera2/numpy/simplejpeg OK desde APT")
+PY
   deactivate || true
 }
 
@@ -392,7 +399,7 @@ main() {
   ensure_packages \
     python3 python3-venv python3-pip python3-dev \
     git rsync curl jq nginx \
-    alsa-utils libcamera-apps python3-picamera2 \
+    alsa-utils libcamera-apps python3-picamera2 python3-numpy python3-simplejpeg libcap-dev \
     xserver-xorg xinit chromium-browser matchbox-window-manager \
     fonts-dejavu-core
 
