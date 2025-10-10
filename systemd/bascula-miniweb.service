@@ -1,7 +1,7 @@
 [Unit]
 Description=Bascula Mini-Web Backend
-After=NetworkManager.service NetworkManager-wait-online.service bascula-ap-ensure.service
-Wants=NetworkManager-wait-online.service
+After=network-online.target sound.target
+Wants=network-online.target sound.target
 ConditionPathExists=/opt/bascula/current/.venv/bin/uvicorn
 
 [Service]
@@ -15,9 +15,9 @@ Environment=BASCULA_CFG_DIR=/home/pi/.bascula
 Environment=BASCULA_CAM_RELEASE_ON_EXIT=true
 Environment=BASCULA_CAPTURES_DIR=/run/bascula/captures
 ExecStartPre=-/usr/bin/nm-online -s -q -t 25
-ExecStart=/opt/bascula/current/.venv/bin/uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
+ExecStart=/opt/bascula/current/.venv/bin/python -m uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
 Restart=always
-RestartSec=2s
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
