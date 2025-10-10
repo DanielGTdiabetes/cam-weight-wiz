@@ -91,7 +91,10 @@ def get_voice_enabled() -> bool:
     if normalized is not None:
         return normalized
 
-    return get_voice_enabled_default()
+    default = get_voice_enabled_default()
+    state[VOICE_STATE_KEY] = default
+    _write_state(state)
+    return default
 
 
 def set_voice_enabled(enabled: bool) -> None:

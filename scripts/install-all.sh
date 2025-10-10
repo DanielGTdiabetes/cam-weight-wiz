@@ -12,6 +12,8 @@ set -euo pipefail
 IFS=$'\n\t'
 trap 'echo "[inst][err] línea $LINENO"; exit 1' ERR
 
+exec 9>/var/lock/bascula.install && flock -n 9 || { echo "[inst] otro instalador en marcha"; exit 0; }
+
 log() { printf '[inst] %s\n' "$*"; }
 log_err() { printf '[inst][err] %s\n' "$*" >&2; }
 log_warn() { printf '[inst][warn] %s\n' "$*"; }
@@ -38,6 +40,69 @@ try_or_warn() {
   return ${status}
 }
 
+build_frontend_once() {
+  local project_dir="$1"
+  if [[ -f "${FRONTEND_MARKER}" ]]; then
+    if [[ -d "${project_dir}/dist" ]]; then
+      log "[inst][skip] Frontend ya compilado (${FRONTEND_MARKER})"
+      return 0
+    fi
+    log_warn "dist/ ausente pese a marcador ${FRONTEND_MARKER}; recompilando frontend"
+  fi
+
+  if [[ ! -d "${project_dir}" ]]; then
+    err "Directorio de proyecto inexistente para build frontend: ${project_dir}"
+    return 1
+  fi
+
+  pushd "${project_dir}" >/dev/null || {
+    err "No se pudo acceder a ${project_dir} para compilar frontend"
+    return 1
+  }
+
+  if [[ ! -f "package.json" ]]; then
+    warn "package.json no encontrado; se omite build de frontend"
+    popd >/dev/null || true
+    return 0
+  fi
+
+  if ! command -v npm >/dev/null 2>&1; then
+    err "[ERROR] npm no disponible; instala Node/NPM antes de construir"
+    popd >/dev/null || true
+    return 1
+  fi
+
+  log "Iniciando compilación única de frontend..."
+  if ! npm ci; then
+    popd >/dev/null || true
+    err "[ERROR] npm ci falló"
+    return 1
+  fi
+
+  if command -v node >/dev/null 2>&1 && [[ -f "scripts/generate-service-worker.mjs" ]]; then
+    if ! node scripts/generate-service-worker.mjs; then
+      warn "No se pudo generar service worker"
+    fi
+  fi
+
+  if ! npm run build; then
+    popd >/dev/null || true
+    err "[ERROR] npm run build falló"
+    return 1
+  fi
+
+  if [[ ! -d "dist" ]]; then
+    popd >/dev/null || true
+    err "[ERROR] dist/ no generado"
+    return 1
+  fi
+
+  popd >/dev/null || true
+  touch "${FRONTEND_MARKER}"
+  log "[inst][done] Frontend compilado (npm ci + build)"
+  return 0
+}
+
 OVERLAY_ADDED=0
 BOOT_CONFIG_CHANGED=0
 INSTALL_LOG=""
@@ -45,6 +110,14 @@ INSTALL_LOG=""
 REBOOT_STATE_DIR="/var/lib/bascula"
 REBOOT_FLAG_FILE="${REBOOT_STATE_DIR}/reboot-required"
 REBOOT_REASONS_FILE="${REBOOT_STATE_DIR}/reboot-reasons.txt"
+
+STATE_DIR="${REBOOT_STATE_DIR}"
+VENV_MARKER="${STATE_DIR}/venv_ready"
+FRONTEND_MARKER="${STATE_DIR}/frontend_built"
+SERVICES_MARKER="${STATE_DIR}/services_provisioned"
+POSTINSTALL_DONE_MARKER="${STATE_DIR}/postinstall.done"
+
+install -d -m 0755 -o root -g root "${STATE_DIR}"
 
 install -d -m 0755 -o root -g root "${REBOOT_STATE_DIR}"
 : > "${REBOOT_REASONS_FILE}" || true
@@ -1737,45 +1810,61 @@ fi
 
 # Setup Python virtual environment
 log "[12/20] Preparando entorno Python (.venv)..."
-cd "${BASCULA_CURRENT_LINK}"
-if [[ ! -d ".venv" ]]; then
-  python3 -m venv .venv
+if [[ ! -f "${VENV_MARKER}" ]]; then
+  pushd "${BASCULA_CURRENT_LINK}" >/dev/null || fail "No se pudo acceder a ${BASCULA_CURRENT_LINK}"
+  if [[ ! -d ".venv" ]]; then
+    python3 -m venv .venv
+  fi
+  VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
+  VENV_PY="${VENV_DIR}/bin/python"
+  VENV_PIP="${VENV_DIR}/bin/pip"
+  chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
+
+  # Allow venv to see system packages (picamera2)
+  VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
+  if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
+    echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
+  fi
+
+  export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BINARY=1
+  export PIP_INDEX_URL="https://www.piwheels.org/simple"
+  export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
+
+  REQUIREMENTS_FILE="${BASCULA_CURRENT_LINK}/requirements.txt"
+
+  if [[ "${NET_OK}" -eq 1 ]]; then
+    if ! "${VENV_PY}" -m pip install --upgrade pip setuptools; then
+      fail "No se pudo actualizar pip/setuptools en la venv"
+    fi
+    if [[ -f "${REQUIREMENTS_FILE}" ]]; then
+      if ! "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
+        fail "No se pudieron instalar las dependencias Python desde requirements.txt"
+      fi
+    else
+      fail "No se encontró ${REQUIREMENTS_FILE}; instala las dependencias manualmente"
+    fi
+    if [[ -f "requirements-voice.txt" ]]; then
+      if ! "${VENV_PIP}" install -r requirements-voice.txt; then
+        warn "requirements-voice.txt no se pudo instalar completamente"
+      fi
+    fi
+  else
+    warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
+  fi
+
+  popd >/dev/null || true
+  touch "${VENV_MARKER}"
+  log "[inst][done] Entorno Python configurado (${VENV_MARKER})"
+else
+  log "[inst][skip] Entorno Python ya preparado (${VENV_MARKER})"
 fi
+
 VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
 VENV_PY="${VENV_DIR}/bin/python"
 VENV_PIP="${VENV_DIR}/bin/pip"
-chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
 
-# Allow venv to see system packages (picamera2)
-VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
-if [ -n "${VENV_SITE}" ] && [ -d "${VENV_SITE}" ]; then
-  echo "/usr/lib/python3/dist-packages" > "${VENV_SITE}/system_dist.pth"
-fi
-
-export PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_ROOT_USER_ACTION=ignore PIP_PREFER_BINARY=1
-export PIP_INDEX_URL="https://www.piwheels.org/simple"
-export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
-
-REQUIREMENTS_FILE="${BASCULA_CURRENT_LINK}/requirements.txt"
-
-if [[ "${NET_OK}" -eq 1 ]]; then
-  if ! "${VENV_PY}" -m pip install --upgrade pip setuptools; then
-    fail "No se pudo actualizar pip/setuptools en la venv"
-  fi
-  if [[ -f "${REQUIREMENTS_FILE}" ]]; then
-    if ! "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
-      fail "No se pudieron instalar las dependencias Python desde requirements.txt"
-    fi
-  else
-    fail "No se encontró ${REQUIREMENTS_FILE}; instala las dependencias manualmente"
-  fi
-  if [[ -f "requirements-voice.txt" ]]; then
-    if ! "${VENV_PIP}" install -r requirements-voice.txt; then
-      warn "requirements-voice.txt no se pudo instalar completamente"
-    fi
-  fi
-else
-  warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
+if [[ ! -x "${VENV_PY}" ]]; then
+  fail "no existe ${VENV_PY}"
 fi
 
 if ! "${VENV_PY}" - <<'PY'
@@ -1791,7 +1880,7 @@ then
   exit 1
 fi
 
-log "✓ Entorno Python configurado"
+log "✓ Entorno Python verificado"
 
 # Install Piper TTS
 log "[13/20] Instalando Piper TTS..."
@@ -1974,6 +2063,8 @@ else
   warn "package.json no encontrado; se omite build de frontend"
 fi
 
+build_frontend_once "${BASCULA_CURRENT_LINK}"
+
 # Install and configure Nginx
 log "[16/20] Instalando y configurando Nginx..."
 if [[ "${NET_OK}" -eq 1 ]]; then
@@ -1994,20 +2085,6 @@ chmod g+s /run/bascula/captures || true
 # asegurar que el usuario pi pertenece al grupo www-data
 usermod -aG www-data pi || true
 
-CAPTURES_ACL_FILE="/etc/nginx/bascula/captures-acl.conf"
-if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
-  cat > "${CAPTURES_ACL_FILE}" <<'EOF'
-# WARNING: exposed to LAN
-allow all;
-EOF
-  log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1)"
-else
-  cat > "${CAPTURES_ACL_FILE}" <<'EOF'
-allow 127.0.0.1;
-allow ::1;
-deny all;
-EOF
-fi
 cat > /etc/nginx/sites-available/bascula <<'EOF'
 server {
     listen 80 default_server;
@@ -2067,17 +2144,42 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer capturas de la cámara
+    # Exponer capturas de la cámara (solo loopback por defecto)
     location /captures/ {
         alias /run/bascula/captures/;
-        include /etc/nginx/bascula/captures-acl.conf;
         autoindex off;
+        allow 127.0.0.1;
+        allow ::1;
+        deny all;
         add_header Cache-Control "no-store";
     }
 }
 EOF
 ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
 rm -f /etc/nginx/sites-enabled/default
+if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
+  EXPOSE_SITE="/etc/nginx/sites-available/bascula-captures"
+  cat > "${EXPOSE_SITE}" <<'EOF'
+server {
+    listen 8085;
+    server_name _;
+
+    location / {
+        alias /run/bascula/captures/;
+        autoindex off;
+        add_header Cache-Control "no-store";
+        auth_basic "Báscula Captures";
+        auth_basic_user_file /etc/nginx/bascula/captures.htpasswd;
+    }
+}
+EOF
+  if [[ ! -f /etc/nginx/bascula/captures.htpasswd ]]; then
+    install -D -m 0640 /dev/null /etc/nginx/bascula/captures.htpasswd
+  fi
+  chgrp www-data /etc/nginx/bascula/captures.htpasswd || true
+  ln -sf "${EXPOSE_SITE}" /etc/nginx/sites-enabled/bascula-captures
+  log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1). Configura credenciales en /etc/nginx/bascula/captures.htpasswd"
+fi
 if try_or_warn "nginx -t" "nginx -t"; then
   systemctl_safe reload nginx
 fi
@@ -2209,8 +2311,7 @@ else
   cat > /etc/systemd/system/bascula-ui.service <<EOF
 [Unit]
 Description=Bascula Digital Pro - UI (Chromium kiosk)
-After=systemd-user-sessions.service network-online.target sound.target bascula-miniweb.service
-Wants=network-online.target sound.target bascula-miniweb.service
+After=systemd-user-sessions.service network-online.target bascula-miniweb.service sound.target
 Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
@@ -2253,6 +2354,12 @@ fi
 
 configure_bascula_ui_service
 
+if command -v systemd-analyze >/dev/null 2>&1; then
+  try_or_warn "systemd verify bascula-ui" "systemd-analyze verify /etc/systemd/system/bascula-ui.service"
+else
+  warn "systemd-analyze no disponible para verificar bascula-ui.service"
+fi
+
 # Chromium managed policies
 log "Configurando políticas de Chromium..."
 install -d -m 0755 /etc/chromium/policies/managed
@@ -2274,8 +2381,14 @@ if [[ -f "${POSTINSTALL_UNIT_SRC}" ]]; then
   install -m 0644 "${POSTINSTALL_UNIT_SRC}" /etc/systemd/system/bascula-postinstall.service
   if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
     systemctl_safe daemon-reload
-    if ! systemctl enable bascula-postinstall.service; then
-      warn "No se pudo habilitar bascula-postinstall.service"
+    if [[ -f "${POSTINSTALL_DONE_MARKER}" ]]; then
+      log "[inst][skip] bascula-postinstall.service ya aplicado (${POSTINSTALL_DONE_MARKER})"
+    else
+      if ! systemctl enable bascula-postinstall.service; then
+        warn "No se pudo habilitar bascula-postinstall.service"
+      else
+        log "[inst][done] bascula-postinstall.service habilitado"
+      fi
     fi
   fi
 else
@@ -2316,45 +2429,9 @@ if [[ ! -x "/opt/bascula/current/.venv/bin/python" ]]; then
   exit 1
 fi
 
-pushd /opt/bascula/current >/dev/null || {
-  echo "[ERR] no se pudo acceder a /opt/bascula/current" >&2
-  exit 1
-}
-
-if ! .venv/bin/python -m uvicorn --version >/dev/null 2>&1; then
+if ! /opt/bascula/current/.venv/bin/python -m uvicorn --version >/dev/null 2>&1; then
   warn "uvicorn no instalado en .venv; ejecuta pip install -r requirements.txt"
 fi
-
-# Build frontend assets (única compilación)
-log "Compilando frontend..."
-if [[ -f "package.json" ]]; then
-  if command -v npm >/dev/null 2>&1; then
-    if ! npm ci; then
-      err "[ERROR] npm ci falló"
-      exit 1
-    fi
-    if command -v node >/dev/null 2>&1; then
-      if ! node scripts/generate-service-worker.mjs; then
-        warn "No se pudo generar service worker"
-      fi
-    else
-      warn "Node.js no disponible para generar service worker"
-    fi
-    if ! npm run build; then
-      err "[ERROR] npm run build falló"
-      exit 1
-    fi
-  else
-    err "[ERROR] npm no disponible; instala Node/NPM antes de construir"
-    exit 1
-  fi
-  [ -d "${BASCULA_CURRENT_LINK}/dist" ] || { err "[ERROR] dist/ no generado"; exit 1; }
-  log "✓ Frontend compilado (npm ci + build)"
-else
-  warn "package.json no encontrado; se omite build de frontend"
-fi
-
-popd >/dev/null || true
 
 # Runtime directories for captures served by Nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
@@ -2382,18 +2459,30 @@ fi
 
 # Asegurar servicios principales activos
 if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-  if ! sudo systemctl daemon-reload; then
-    warn "systemctl daemon-reload falló"
-  fi
-  if ! sudo systemctl enable --now bascula-miniweb.service; then
-    warn "No se pudo habilitar/iniciar bascula-miniweb.service"
-  fi
-  sleep 2
-  if ! sudo systemctl enable bascula-ui.service; then
-    warn "No se pudo habilitar bascula-ui.service"
-  fi
-  if ! sudo systemctl restart bascula-ui.service; then
-    warn "No se pudo reiniciar bascula-ui.service"
+  if [[ -f "${SERVICES_MARKER}" ]]; then
+    log "[inst][skip] Servicios principales ya provisionados (${SERVICES_MARKER})"
+  else
+    if ! sudo systemctl daemon-reload; then
+      warn "systemctl daemon-reload falló"
+    fi
+    local_services_ok=1
+    if ! sudo systemctl enable --now bascula-miniweb.service; then
+      warn "No se pudo habilitar/iniciar bascula-miniweb.service"
+      local_services_ok=0
+    fi
+    sleep 2
+    if ! sudo systemctl enable bascula-ui.service; then
+      warn "No se pudo habilitar bascula-ui.service"
+      local_services_ok=0
+    fi
+    if ! sudo systemctl restart bascula-ui.service; then
+      warn "No se pudo reiniciar bascula-ui.service"
+      local_services_ok=0
+    fi
+    if [[ ${local_services_ok} -eq 1 ]]; then
+      touch "${SERVICES_MARKER}"
+      log "[inst][done] Servicios principales habilitados (${SERVICES_MARKER})"
+    fi
   fi
 else
   warn "systemd no disponible o ALLOW_SYSTEMD!=1; omitiendo enable/restart finales"
@@ -2445,9 +2534,13 @@ else
 fi
 
 if [[ -f "${REBOOT_FLAG_FILE}" && "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
-  if ! systemctl is-enabled bascula-postinstall.service >/dev/null 2>&1; then
+  if [[ -f "${POSTINSTALL_DONE_MARKER}" ]]; then
+    log "[inst][skip] postinstall ya completado (${POSTINSTALL_DONE_MARKER})"
+  elif ! systemctl is-enabled bascula-postinstall.service >/dev/null 2>&1; then
     if ! systemctl enable bascula-postinstall.service; then
       warn "No se pudo habilitar bascula-postinstall.service"
+    else
+      log "[inst][done] bascula-postinstall.service listo para siguiente reinicio"
     fi
   fi
 fi
