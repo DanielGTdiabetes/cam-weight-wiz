@@ -96,28 +96,18 @@ _STOP_WORDS = {"y", "con", "de", "la", "el"}
 
 
 def get_backend_base_url() -> str:
-    """Resolve the backend base URL honoring environment overrides."""
+    """Obtiene la URL base del backend, respetando ENV y fallback seguro."""
 
     url = os.getenv("BACKEND_BASE_URL")
     if url:
         return url.rstrip("/")
 
-    legacy_url = os.getenv("BASCULA_API_URL")
-    if legacy_url:
-        return legacy_url.rstrip("/")
-
     host = os.getenv("BASCULA_BACKEND_HOST", "127.0.0.1")
     port_value = os.getenv("BASCULA_BACKEND_PORT", "8081")
-
     try:
         port = int(port_value)
     except (TypeError, ValueError):
-        LOG_WAKE.warning(
-            "[wake] Invalid BASCULA_BACKEND_PORT=%r; falling back to 8081",
-            port_value,
-        )
         port = 8081
-
     return f"http://{host}:{port}"
 
 

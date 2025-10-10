@@ -7,6 +7,14 @@ Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 - UI kiosk en Chromium que se muestra al arrancar (`bascula-ui.service`).
 - Scripts de instalación idempotentes y unidades systemd listos para Raspberry Pi OS Bookworm Lite (64-bit).
 
+## Puertos y variables de entorno por defecto
+
+- **Miniweb**: expone la API local en `http://127.0.0.1:8080`.
+- **Backend principal**: escucha en `http://127.0.0.1:8081`.
+- **Variables relevantes**:
+  - `BACKEND_BASE_URL` para forzar la URL completa usada por componentes clientes.
+  - `BASCULA_BACKEND_HOST` y `BASCULA_BACKEND_PORT` (por defecto `127.0.0.1` y `8081`) para componer la URL cuando no se fija la anterior.
+
 ## Instalación limpia en Raspberry Pi OS Bookworm Lite (Pi 5)
 
 1. Copia el repositorio a la Raspberry Pi (por ejemplo en `/home/pi/cam-weight-wiz`).
