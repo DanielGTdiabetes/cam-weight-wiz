@@ -164,19 +164,24 @@ ensure_python_venv() {
   python3 -m venv --system-site-packages "${venv_dir}"
   sed -i 's/^include-system-site-packages = .*/include-system-site-packages = true/' "${venv_dir}/pyvenv.cfg" || true
   source "${venv_dir}/bin/activate"
+  # limpieza defensiva de wheels que rompen ABI si alguien los dejó
+  pip uninstall -y numpy simplejpeg picamera2 || true
+  rm -rf "${venv_dir}/lib/python3.11/site-packages"/{numpy*,simplejpeg*,picamera2*} || true
   pip install --upgrade pip wheel
-  pip install --no-deps -r "${CURRENT_LINK}/requirements.txt"
+  pip install -r "${CURRENT_LINK}/requirements.txt" --no-deps
   if [[ -f "${CURRENT_LINK}/requirements-voice.txt" ]]; then
-    pip install --no-deps -r "${CURRENT_LINK}/requirements-voice.txt"
+    pip install -r "${CURRENT_LINK}/requirements-voice.txt" --no-deps
   fi
   python - <<'PY'
-import importlib
+import importlib, sys
+ok = True
 for m in ("numpy", "simplejpeg", "picamera2"):
-    mod = importlib.import_module(m)
-    path = getattr(mod, "__file__", "")
-    if "/usr/lib/python3/dist-packages/" not in path:
-        raise SystemExit(f"{m} no viene de APT: {path}")
-print("picamera2/numpy/simplejpeg OK desde APT")
+    p = importlib.import_module(m).__file__
+    print(m, "=>", p)
+    if "/usr/lib/python3/dist-packages/" not in p:
+        ok = False
+        print("ERROR:", m, "no viene de APT")
+sys.exit(0 if ok else 1)
 PY
   deactivate || true
 }
@@ -399,9 +404,11 @@ main() {
   ensure_packages \
     python3 python3-venv python3-pip python3-dev \
     git rsync curl jq nginx \
-    alsa-utils libcamera-apps python3-picamera2 python3-numpy python3-simplejpeg libcap-dev \
+    alsa-utils libcamera-apps \
     xserver-xorg xinit chromium-browser matchbox-window-manager \
     fonts-dejavu-core
+
+  DEBIAN_FRONTEND=noninteractive apt-get install -y python3-numpy python3-simplejpeg python3-picamera2 libcap-dev
 
   ensure_boot_overlays || true
 
