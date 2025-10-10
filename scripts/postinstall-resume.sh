@@ -41,10 +41,8 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl daemon-reload || true
   for unit in nginx.service bascula-miniweb.service bascula-ui.service; do
     if systemctl list-unit-files | grep -q "^${unit}"; then
-      if ! systemctl is-enabled "${unit}" >/dev/null 2>&1; then
-        systemctl enable "${unit}" || log_warn "No se pudo habilitar ${unit}"
-      fi
-      systemctl try-restart "${unit}" || true
+      systemctl enable "${unit}" >/dev/null 2>&1 || log_warn "No se pudo habilitar ${unit}"
+      systemctl restart "${unit}" || log_warn "No se pudo reiniciar ${unit}"
     fi
   done
 else
@@ -63,4 +61,10 @@ systemctl_status_cmd() {
 log "Estados tras postinstalación: nginx=$(systemctl_status_cmd nginx.service), miniweb=$(systemctl_status_cmd bascula-miniweb.service), ui=$(systemctl_status_cmd bascula-ui.service)"
 
 touch "${MARKER}"
+
+if command -v systemctl >/dev/null 2>&1; then
+  log "Deshabilitando bascula-postinstall.service para evitar ejecuciones futuras"
+  systemctl disable --now bascula-postinstall.service >/dev/null 2>&1 || log_warn "No se pudo deshabilitar bascula-postinstall.service"
+fi
+
 log "[postinstall][done] Reanudación completada (${MARKER})"

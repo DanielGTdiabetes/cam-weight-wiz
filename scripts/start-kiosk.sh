@@ -3,6 +3,9 @@
 
 set -euo pipefail
 
+BASCULA_KIOSK_WAIT_S="${BASCULA_KIOSK_WAIT_S:-30}"
+BASCULA_KIOSK_PROBE_MS="${BASCULA_KIOSK_PROBE_MS:-500}"
+
 LOG_FILE="/var/log/bascula/ui.log"
 LOG_DIR="$(dirname "${LOG_FILE}")"
 
@@ -59,11 +62,13 @@ sleep 1
 
 BACKEND_RESULT=""
 set +e
-BACKEND_RESULT=$(python3 "${SCRIPT_DIR}/choose_kiosk_target.py")
+BACKEND_RESULT=$(BASCULA_KIOSK_WAIT_S="${BASCULA_KIOSK_WAIT_S}" \
+  BASCULA_KIOSK_PROBE_MS="${BASCULA_KIOSK_PROBE_MS}" \
+  python3 "${SCRIPT_DIR}/choose_kiosk_target.py")
 PY_STATUS=$?
 set -e
 if [[ ${PY_STATUS} -ne 0 || -z "${BACKEND_RESULT}" ]]; then
-  BACKEND_RESULT="fallback|http://localhost/config"
+  BACKEND_RESULT="fallback|http://localhost/"
 fi
 
 BACKEND_STATE="${BACKEND_RESULT%%|*}"

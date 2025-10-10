@@ -1,6 +1,8 @@
 [Unit]
 Description=Bascula post-install (resume after reboot)
 ConditionPathExists=/var/lib/bascula/reboot-required
+ConditionPathExists=!/var/lib/bascula/postinstall.done
+ConditionFirstBoot=no
 After=network-online.target systemd-tmpfiles-setup.service
 Wants=network-online.target
 
