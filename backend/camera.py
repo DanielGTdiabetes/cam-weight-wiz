@@ -146,5 +146,7 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
         except OSError:
             file_size = 0
     payload = _capture_payload(size=file_size, full=full)
+    if isinstance(result, dict) and result.get("via"):
+        payload["via"] = result["via"]
     LOG.info("capture_to_file: saved %s size=%s", filename, payload["size"])
     return payload
