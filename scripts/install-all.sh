@@ -428,23 +428,39 @@ configure_nginx_site() {
   install -d -m0755 "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}" /var/www/bascula
 
   log "[step] Limpiando vhosts antiguos"
-  rm -f /etc/nginx/conf.d/00-bascula.conf /etc/nginx/conf.d/00-bascula.conf.*
-  if [[ -d /etc/nginx/conf.d ]]; then
-    find /etc/nginx/conf.d -maxdepth 1 -type f -print0 \
-      | while IFS= read -r -d '' file; do
-        if grep -Eq '\blisten\s+80' "${file}"; then
-          log_warn "Eliminando definición duplicada en ${file}"
-          rm -f "${file}"
-        fi
-      done
+  local need_reload=0
+  if [[ -e /etc/nginx/conf.d/00-bascula.conf ]]; then
+    rm -f /etc/nginx/conf.d/00-bascula.conf
+    need_reload=1
   fi
-  find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type f -o -type l \) -name '*.bak' -print0 \
-    | while IFS= read -r -d '' file; do
+  if compgen -G '/etc/nginx/conf.d/00-bascula.conf.*' >/dev/null 2>&1; then
+    rm -f /etc/nginx/conf.d/00-bascula.conf.*
+    need_reload=1
+  fi
+  if [[ -d /etc/nginx/conf.d ]]; then
+    while IFS= read -r -d '' file; do
       if grep -Eq '\blisten\s+80' "${file}"; then
+        log_warn "Eliminando definición duplicada en ${file}"
         rm -f "${file}"
+        need_reload=1
       fi
-    done
-  rm -f "${NGINX_SITES_ENABLED}/default" || true
+    done < <(find /etc/nginx/conf.d -maxdepth 1 -type f -print0)
+  fi
+  while IFS= read -r -d '' file; do
+    if grep -Eq '\blisten\s+80' "${file}"; then
+      rm -f "${file}"
+      need_reload=1
+    fi
+  done < <(find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type f -o -type l \) -name '*.bak' -print0)
+
+  if [[ -e "${NGINX_SITES_ENABLED}/default" ]]; then
+    rm -f "${NGINX_SITES_ENABLED}/default"
+    need_reload=1
+  fi
+  if [[ -e "${NGINX_SITES_AVAILABLE}/default" ]]; then
+    rm -f "${NGINX_SITES_AVAILABLE}/default"
+    need_reload=1
+  fi
 
   local enabled
   while IFS= read -r -d '' enabled; do
@@ -453,6 +469,7 @@ configure_nginx_site() {
       && grep -Eq '\blisten\s+80' "${target}" 2>/dev/null; then
       log_warn "Eliminando vhost duplicado en ${target}"
       rm -f "${target}"
+      need_reload=1
     fi
   done < <(find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type l -o -type f \) -print0)
 
@@ -478,7 +495,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_http_version 1.1;
-      proxy_buffering off;
+        proxy_buffering off;
     }
 }
 EOF
@@ -487,10 +504,20 @@ EOF
   else
     install -o root -g root -m0644 "${tmp}" "${site_path}"
     log "Configuración de Nginx actualizada"
+    need_reload=1
   fi
   rm -f "${tmp}"
 
-  ln -sfn "${site_path}" "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
+  local enabled_link="${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
+  if [[ ! -L "${enabled_link}" ]] || [[ $(readlink -f "${enabled_link}" 2>/dev/null) != "${site_path}" ]]; then
+    ln -sfn "${site_path}" "${enabled_link}"
+    need_reload=1
+  fi
+
+  if [[ ${need_reload} -eq 0 ]]; then
+    log "Configuración Nginx ya era canónica; no se recarga"
+    return
+  fi
 
   if ! nginx -t; then
     abort "nginx -t falló tras configurar el vhost"
@@ -648,6 +675,7 @@ EOF
 
   if [[ ${need_reload} -eq 1 ]]; then
     systemctl daemon-reload
+    systemctl try-restart bascula-ui.service || true
   fi
   systemctl enable --now bascula-ui.service
 }
