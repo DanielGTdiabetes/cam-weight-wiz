@@ -1,5 +1,5 @@
 # Dependencias críticas para los servicios Python de Báscula
-# En Raspberry Pi (Bookworm) estos paquetes vienen de APT, no pip.
+# En Raspberry Pi (Bookworm) estos vienen de APT, no pip.
 aiofiles
 fastapi
 httpx
