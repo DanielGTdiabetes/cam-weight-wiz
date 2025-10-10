@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Dict
 
@@ -56,7 +57,7 @@ def camera_info():
         service = get_camera_service()
         properties = service.get_camera_info()
     except CameraUnavailableError as exc:
-        LOG.exception("No hay cámara disponible: %s", exc)
+        LOG.warning("No hay cámara disponible: %s", exc, exc_info=False)
         return _camera_error_response(503, "camera_unavailable", str(exc))
 
     response = {
@@ -77,7 +78,7 @@ def _capture_bytes(full: bool, timeout_ms: int = 2000) -> bytes:
         LOG.exception("La cámara está ocupada: %s", exc)
         raise HTTPException(status_code=409, detail={"error": "camera_busy", "message": str(exc)}) from exc
     except CameraUnavailableError as exc:
-        LOG.exception("Cámara no disponible: %s", exc)
+        LOG.warning("Cámara no disponible: %s", exc, exc_info=False)
         raise HTTPException(status_code=503, detail={"error": "camera_unavailable", "message": str(exc)}) from exc
     except CameraTimeoutError as exc:
         LOG.exception("La captura superó el tiempo de espera: %s", exc)
@@ -120,7 +121,7 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
         LOG.exception("La cámara está ocupada: %s", exc)
         return _camera_error_response(409, "camera_busy", str(exc))
     except CameraUnavailableError as exc:
-        LOG.exception("Cámara no disponible: %s", exc)
+        LOG.warning("Cámara no disponible: %s", exc, exc_info=False)
         return _camera_error_response(503, "camera_unavailable", str(exc))
     except CameraTimeoutError as exc:
         LOG.exception("La captura superó el tiempo de espera: %s", exc)
@@ -129,7 +130,13 @@ def camera_capture_to_file(full: bool = Query(False, description="Captura en res
         LOG.exception("Error en la captura: %s", exc)
         return _camera_error_response(500, "camera_failure", str(exc))
     try:
-        filename.chmod(0o644)
+        shutil.chown(filename, group="www-data")
+    except LookupError:
+        LOG.debug("Grupo www-data no disponible para %s", filename, exc_info=True)
+    except OSError:
+        LOG.warning("No se pudo asignar grupo www-data a %s", filename, exc_info=True)
+    try:
+        filename.chmod(0o660)
     except OSError:
         LOG.warning("No se pudieron ajustar permisos de %s", filename, exc_info=True)
     file_size = int(result.get("size", 0)) if isinstance(result, dict) else 0
