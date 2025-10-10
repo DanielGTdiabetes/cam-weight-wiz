@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Mic, MicOff, ChefHat, ArrowLeft, ArrowRight, X, ListChecks } from "lucide-react";
+import { Mic, MicOff, ChefHat, ArrowLeft, ArrowRight, X, ListChecks, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
@@ -10,6 +10,10 @@ import { api, type GeneratedRecipe, type RecipeStep } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
 import { useNavSafeExit } from "@/hooks/useNavSafeExit";
 import { useNavigate } from "react-router-dom";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { useRecipeAvailability } from "@/hooks/useRecipeAvailability";
+import { useAudioPref } from "@/state/useAudio";
 
 interface SpeechRecognitionEvent extends Event {
   results: SpeechRecognitionResultList;
@@ -66,7 +70,7 @@ const mapIngredients = (recipe: GeneratedRecipe | null): IngredientDisplay[] => 
     name: ingredient.name,
     quantity: ingredient.quantity,
     unit: ingredient.unit,
-    needsScale: Boolean(ingredient.needs_scale),
+    needsScale: Boolean(ingredient.needs_scale ?? ingredient.needsScale),
   }));
 };
 
@@ -88,12 +92,25 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const [recipeCompleted, setRecipeCompleted] = useState(false);
+  const lastSpokenStepRef = useRef<string | null>(null);
+  const lastAssistantSpeechRef = useRef<string | null>(null);
+  const previousStepRef = useRef<number>(-1);
 
   const { toast } = useToast();
+  const { voiceEnabled } = useAudioPref();
+  const {
+    loading: availabilityLoading,
+    enabled: recipesEnabled,
+    reason: availabilityReason,
+    model: availabilityModel,
+  } = useRecipeAvailability();
 
   const ingredients = useMemo(() => mapIngredients(recipe), [recipe]);
   const currentStep: RecipeStep | undefined = recipe?.steps[currentStepIndex];
   const currentResponse = stepResponses[currentStepIndex] ?? "";
+  const canUseRecipes = recipesEnabled && !availabilityLoading;
+  const inputsDisabled = !recipesEnabled && !availabilityLoading;
+  const recipeModel = recipe?.model ?? availabilityModel ?? null;
 
   const stopRecognition = useCallback(() => {
     if (recognitionRef.current) {
@@ -219,6 +236,9 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     setAssistantMessage(null);
     setStepResponses({});
     setUserPrompt("");
+    lastSpokenStepRef.current = null;
+    lastAssistantSpeechRef.current = null;
+    previousStepRef.current = -1;
     cleanupMedia();
   }, [cleanupMedia]);
 
@@ -233,8 +253,30 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
       return;
     }
 
+    if (availabilityLoading) {
+      toast({
+        title: "Comprobando asistente de recetas",
+        description: "Espera un momento mientras se verifica la conexión con ChatGPT.",
+      });
+      return;
+    }
+
+    if (!recipesEnabled) {
+      toast({
+        title: "Asistente no disponible",
+        description:
+          availabilityReason ?? "Configura tu clave de OpenAI en Ajustes > Integraciones para habilitarlo.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     setIsLoading(true);
     try {
+      cleanupMedia();
+      lastSpokenStepRef.current = null;
+      lastAssistantSpeechRef.current = null;
+      previousStepRef.current = -1;
       const generated = await api.getRecipe(prompt);
       setRecipe(generated);
       setRecipeStarted(true);
@@ -271,7 +313,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     try {
       const response = currentResponse.trim();
       const result = await api.nextRecipeStep(recipe.id, currentStepIndex, response || undefined);
-      setAssistantMessage(result.assistantMessage ?? null);
+      setAssistantMessage(result.assistantMessage ?? result.step?.assistantMessage ?? null);
 
       if (result.isLast) {
         setRecipeCompleted(true);
@@ -320,6 +362,76 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
 
   const currentProgress = recipe ? Math.min(((currentStepIndex + 1) / recipe.steps.length) * 100, 100) : 0;
 
+  useEffect(() => {
+    if (!recipeStarted || !currentStep) {
+      return;
+    }
+    if (previousStepRef.current === currentStep.index) {
+      return;
+    }
+    previousStepRef.current = currentStep.index;
+    lastAssistantSpeechRef.current = null;
+    setAssistantMessage(currentStep.assistantMessage ?? currentStep.tip ?? null);
+  }, [currentStep, recipeStarted]);
+
+  useEffect(() => {
+    if (!voiceEnabled || !recipeStarted || !recipe || !currentStep) {
+      return;
+    }
+    const stepKey = `${recipe.id}-${currentStep.index}`;
+    if (lastSpokenStepRef.current === stepKey) {
+      return;
+    }
+    lastSpokenStepRef.current = stepKey;
+
+    const pieces: string[] = [currentStep.instruction];
+    if (currentStep.needsScale && typeof currentStep.expectedWeight === "number") {
+      const weightText = formatWeight(currentStep.expectedWeight, decimals);
+      if (weightText !== "–") {
+        pieces.push(`Peso objetivo ${weightText} gramos`);
+      }
+    }
+    if (currentStep.tip) {
+      pieces.push(`Consejo: ${currentStep.tip}`);
+    }
+
+    const speech = pieces.filter(Boolean).join(". ");
+    if (!speech) {
+      return;
+    }
+
+    void api
+      .speak(speech)
+      .catch((error) => console.error("No se pudo reproducir la instrucción de receta", error));
+  }, [voiceEnabled, recipeStarted, recipe, currentStep, decimals]);
+
+  useEffect(() => {
+    if (!voiceEnabled || !recipeStarted) {
+      return;
+    }
+    if (typeof assistantMessage !== "string") {
+      return;
+    }
+    const normalized = assistantMessage.trim();
+    if (!normalized) {
+      return;
+    }
+
+    const baseMessage = currentStep?.assistantMessage ?? currentStep?.tip ?? null;
+    if (baseMessage && normalized === baseMessage.trim()) {
+      return;
+    }
+
+    if (lastAssistantSpeechRef.current === normalized) {
+      return;
+    }
+    lastAssistantSpeechRef.current = normalized;
+
+    void api
+      .speak(normalized)
+      .catch((error) => console.error("No se pudo reproducir la respuesta del asistente", error));
+  }, [assistantMessage, voiceEnabled, recipeStarted, currentStep?.assistantMessage, currentStep?.tip]);
+
   const navControls = navEnabled ? (
     <div className="flex items-center gap-2 p-4">
       <Button variant="outline" onClick={handleExit} className="gap-2">
@@ -338,6 +450,27 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
   let content: JSX.Element | null;
 
   if (!recipeStarted) {
+    const startButtonContent = (() => {
+      if (isLoading) {
+        return "Generando...";
+      }
+      if (availabilityLoading) {
+        return (
+          <>
+            <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Verificando...
+          </>
+        );
+      }
+      if (!recipesEnabled) {
+        return "No disponible";
+      }
+      return (
+        <>
+          <ChefHat className="mr-2 h-6 w-6" /> Comenzar
+        </>
+      );
+    })();
+
     content = (
       <div className="flex flex-1 items-center justify-center p-8">
         <Card className="w-full max-w-2xl p-8">
@@ -351,14 +484,37 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
             <p className="text-xl text-muted-foreground">
               Describe qué quieres cocinar y te guiaremos paso a paso.
             </p>
+            {recipeModel && (
+              <div className="mt-4 flex justify-center">
+                <Badge variant="outline" className="px-3 py-1 text-sm font-medium">
+                  Asistente IA: {recipeModel}
+                </Badge>
+              </div>
+            )}
           </div>
 
           <div className="space-y-4">
+            {!recipesEnabled && !availabilityLoading && (
+              <Alert variant="destructive">
+                <AlertTitle>Asistente de recetas no disponible</AlertTitle>
+                <AlertDescription>
+                  {availabilityReason ??
+                    "Configura tu clave de OpenAI en Ajustes &gt; Integraciones para activar este modo."}
+                </AlertDescription>
+              </Alert>
+            )}
+            {availabilityLoading && (
+              <Alert>
+                <AlertTitle>Comprobando disponibilidad</AlertTitle>
+                <AlertDescription>Estamos verificando la conexión con ChatGPT...</AlertDescription>
+              </Alert>
+            )}
             <Textarea
               placeholder={'Ejemplo: "Quiero preparar pasta con salsa de tomate"'}
               value={userPrompt}
               onChange={(event) => setUserPrompt(event.target.value)}
               className="min-h-32 text-lg"
+              disabled={inputsDisabled}
             />
 
             <div className="grid grid-cols-2 gap-4">
@@ -367,6 +523,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
                 variant={isListening ? "destructive" : "secondary"}
                 size="xl"
                 className="h-20 text-xl"
+                disabled={!canUseRecipes}
               >
                 {isListening ? (
                   <>
@@ -381,12 +538,12 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
 
               <Button
                 onClick={handleStart}
-                disabled={isLoading}
+                disabled={isLoading || !canUseRecipes}
                 variant="glow"
                 size="xl"
                 className="h-20 text-xl"
               >
-                {isLoading ? "Generando..." : (<><ChefHat className="mr-2 h-6 w-6" /> Comenzar</>)}
+                {startButtonContent}
               </Button>
             </div>
           </div>
@@ -404,6 +561,11 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
               <div>
                 <h2 className="text-2xl font-bold">{recipe.title}</h2>
                 <p className="text-sm text-muted-foreground">Raciones sugeridas: {recipe.servings}</p>
+                {recipeModel && (
+                  <Badge variant="outline" className="mt-2 text-xs font-medium">
+                    IA: {recipeModel}
+                  </Badge>
+                )}
               </div>
               <Button variant="outline" onClick={handleCancel}>
                 <X className="mr-2 h-4 w-4" /> Cancelar

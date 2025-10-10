@@ -144,7 +144,13 @@ def _get_nightscout_credentials(config: Dict[str, Any]) -> tuple[str, str]:
     return url, token
 
 
-async def invoke_chatgpt(messages: List[Dict[str, Any]]) -> Optional[str]:
+async def invoke_chatgpt(
+    messages: List[Dict[str, Any]],
+    *,
+    temperature: float = 0.2,
+    response_format: Optional[Dict[str, Any]] = None,
+    max_tokens: Optional[int] = None,
+) -> Optional[str]:
     """Send a chat completion request and return the assistant message."""
 
     api_key = get_chatgpt_api_key()
@@ -156,12 +162,19 @@ async def invoke_chatgpt(messages: List[Dict[str, Any]]) -> Optional[str]:
         "Content-Type": "application/json",
     }
 
-    payload = {
+    payload: Dict[str, Any] = {
         "model": get_chatgpt_model(),
         "messages": messages,
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
+        "temperature": temperature,
     }
+
+    if response_format is not None:
+        payload["response_format"] = response_format
+    else:
+        payload["response_format"] = {"type": "json_object"}
+
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
 
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -325,6 +338,70 @@ async def chatgpt_barcode_lookup(payload: Dict[str, Any]) -> Optional[Dict[str, 
                 ),
             },
         ]
+    )
+
+    return parse_chatgpt_json(response)
+
+
+async def chatgpt_generate_recipe(prompt: str, servings: int) -> Optional[Dict[str, Any]]:
+    """Ask ChatGPT to craft a step-by-step recipe suited for the smart scale."""
+
+    if not get_chatgpt_api_key():
+        return None
+
+    servings = max(servings, 1)
+
+    schema_description = json.dumps(
+        {
+            "title": "string",
+            "servings": "number",
+            "ingredients": [
+                {
+                    "name": "string",
+                    "quantity": "number",
+                    "unit": "string",
+                    "needs_scale": "boolean",
+                }
+            ],
+            "steps": [
+                {
+                    "instruction": "string",
+                    "needs_scale": "boolean",
+                    "expected_weight": "number or null",
+                    "timer": "number of seconds or null",
+                    "tip": "string optional",
+                    "assistant_message": "string optional",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    system_prompt = (
+        "Eres un chef profesional que guía a usuarios de una báscula inteligente. "
+        "Debes generar recetas prácticas, breves (4-8 pasos) y devolver exclusivamente JSON válido. "
+        "Sigue exactamente el siguiente esquema: "
+        f"{schema_description}. "
+        "Utiliza gramos o mililitros cuando el ingrediente deba pesarse y marca needs_scale en esos casos. "
+        "Incluye expected_weight en gramos por paso cuando needs_scale sea verdadero. "
+        "Los campos timer deben expresarse en segundos (por ejemplo 300 = 5 minutos). "
+        "assistant_message debe ser un mensaje motivador y breve para leer en voz alta." 
+    )
+
+    user_prompt = (
+        "Genera una receta paso a paso usando el formato indicado. "
+        f"El plato solicitado es: {prompt.strip()}. "
+        f"Adapta cantidades y pesos para {servings} raciones reales. "
+        "Comienza con los ingredientes pesables y describe acciones claras. "
+        "Incluye tiempos aproximados de cocción cuando sea útil y consejos prácticos en 'tip'."
+    )
+
+    response = await invoke_chatgpt(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=900,
     )
 
     return parse_chatgpt_json(response)
@@ -546,6 +623,178 @@ RECIPE_DATABASE: List[Dict[str, Any]] = [
         ],
     },
 ]
+
+
+def _coerce_number(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"-?\d+(?:[\.,]\d+)?", value)
+        if match:
+            try:
+                return float(match.group(0).replace(",", "."))
+            except ValueError:
+                return None
+    return None
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on", "si", "sí"}:
+            return True
+        if normalized in {"false", "0", "no", "off", "n"}:
+            return False
+    return None
+
+
+def _coerce_timer(value: Any) -> Optional[int]:
+    if isinstance(value, (int, float)):
+        seconds = int(value)
+        return seconds if seconds > 0 else None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        total_seconds = 0
+        matches = re.findall(
+            r"(-?\d+(?:[\.,]\d+)?)\s*(segundos?|secs?|s|minutos?|mins?|m|horas?|hrs?|h)",
+            text,
+        )
+        if matches:
+            for amount_text, unit in matches:
+                try:
+                    amount = float(amount_text.replace(",", "."))
+                except ValueError:
+                    continue
+                if "hora" in unit or unit.startswith("h"):
+                    total_seconds += int(amount * 3600)
+                elif "min" in unit or unit.startswith("m"):
+                    total_seconds += int(amount * 60)
+                else:
+                    total_seconds += int(amount)
+            return total_seconds or None
+        numeric = _coerce_number(text)
+        if numeric is not None:
+            if "hora" in text or "hr" in text or text.endswith("h"):
+                return int(numeric * 3600)
+            if "min" in text:
+                return int(numeric * 60)
+            return int(numeric)
+    return None
+
+
+def _normalize_ai_recipe(ai_recipe: Dict[str, Any], prompt: str, servings: int) -> Dict[str, Any]:
+    title_raw = ai_recipe.get("title")
+    title = str(title_raw).strip() if isinstance(title_raw, str) and title_raw.strip() else f"Receta para {prompt}".strip()
+
+    servings_value = _coerce_number(ai_recipe.get("servings"))
+    normalized_servings = servings
+    if servings_value is not None and servings_value > 0:
+        normalized_servings = max(int(round(servings_value)), 1)
+
+    ingredients: List[Dict[str, Any]] = []
+    raw_ingredients = ai_recipe.get("ingredients")
+    if isinstance(raw_ingredients, list):
+        for entry in raw_ingredients:
+            if not isinstance(entry, dict):
+                continue
+            name_raw = entry.get("name")
+            if not isinstance(name_raw, str):
+                continue
+            name = name_raw.strip()
+            if not name:
+                continue
+            quantity_value = _coerce_number(entry.get("quantity"))
+            unit_raw = entry.get("unit")
+            unit = unit_raw.strip() if isinstance(unit_raw, str) and unit_raw.strip() else "g"
+            needs_scale_raw = entry.get("needs_scale")
+            if needs_scale_raw is None:
+                needs_scale_raw = entry.get("needsScale")
+            needs_scale_value = _coerce_bool(needs_scale_raw)
+            if needs_scale_value is None:
+                needs_scale_value = unit.lower() in {"g", "gramos", "kg", "ml", "mililitros"}
+            ingredients.append(
+                {
+                    "name": name,
+                    "quantity": quantity_value if (quantity_value is not None and quantity_value > 0) else None,
+                    "unit": unit,
+                    "needs_scale": bool(needs_scale_value),
+                }
+            )
+
+    raw_steps = ai_recipe.get("steps")
+    steps: List[Dict[str, Any]] = []
+    total_timer = 0
+    if isinstance(raw_steps, list):
+        for idx, entry in enumerate(raw_steps, start=1):
+            if not isinstance(entry, dict):
+                continue
+            instruction_raw = entry.get("instruction") or entry.get("step") or entry.get("action")
+            if not isinstance(instruction_raw, str):
+                continue
+            instruction = instruction_raw.strip()
+            if not instruction:
+                continue
+
+            needs_scale_raw = entry.get("needs_scale")
+            if needs_scale_raw is None:
+                needs_scale_raw = entry.get("needsScale")
+            needs_scale_value = _coerce_bool(needs_scale_raw)
+            if needs_scale_value is None:
+                lowered = instruction.lower()
+                needs_scale_value = any(keyword in lowered for keyword in ["pesa", "gram", "balanza", "báscula"])
+
+            expected_weight_value = _coerce_number(entry.get("expected_weight") or entry.get("expectedWeight"))
+            if not needs_scale_value:
+                expected_weight = None
+            else:
+                expected_weight = (
+                    expected_weight_value if (expected_weight_value is not None and expected_weight_value > 0) else None
+                )
+
+            timer_value = _coerce_timer(entry.get("timer") or entry.get("duration_seconds") or entry.get("duration"))
+            if timer_value:
+                total_timer += timer_value
+
+            tip_raw = entry.get("tip") or entry.get("note") or entry.get("advice")
+            tip = tip_raw.strip() if isinstance(tip_raw, str) and tip_raw.strip() else None
+
+            assistant_raw = entry.get("assistant_message") or entry.get("assistantMessage")
+            assistant_message = (
+                assistant_raw.strip() if isinstance(assistant_raw, str) and assistant_raw.strip() else tip
+            )
+
+            steps.append(
+                {
+                    "index": idx,
+                    "instruction": instruction,
+                    "needsScale": bool(needs_scale_value),
+                    "expectedWeight": expected_weight,
+                    "tip": tip,
+                    "timer": timer_value,
+                    "assistantMessage": assistant_message,
+                }
+            )
+
+    max_steps = 12
+    if len(steps) > max_steps:
+        steps = steps[:max_steps]
+        for idx, step in enumerate(steps, start=1):
+            step["index"] = idx
+
+    estimated_time = math.ceil(total_timer / 60) if total_timer else None
+
+    return {
+        "title": title,
+        "servings": normalized_servings,
+        "ingredients": ingredients,
+        "steps": steps,
+        "estimated_time": estimated_time,
+    }
+
 
 active_recipes: Dict[str, Dict[str, Any]] = {}
 
@@ -1317,71 +1566,72 @@ async def speak_text(data: SpeakRequest):
 
 # ============= RECIPES (AI) =============
 
+@app.get("/api/recipes/status")
+async def recipes_status() -> Dict[str, Any]:
+    api_key = get_chatgpt_api_key()
+    if not api_key:
+        return {
+            "enabled": False,
+            "reason": "Configura una clave de OpenAI para habilitar el asistente de recetas.",
+        }
+    return {"enabled": True, "model": get_chatgpt_model()}
+
+
 @app.post("/api/recipes/generate")
 async def generate_recipe(data: RecipeRequest):
-    """Generate a deterministic recipe based on preset knowledge."""
+    """Generate a recipe through ChatGPT tailored to the requested prompt."""
+
     prompt = data.prompt.strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Debes indicar qué receta deseas preparar")
 
-    servings = data.servings or 2
-    prompt_lower = prompt.lower()
+    if not get_chatgpt_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="El asistente de recetas requiere una clave de OpenAI configurada en Ajustes.",
+        )
 
-    def pick_recipe() -> Dict[str, Any]:
-        for recipe in RECIPE_DATABASE:
-            if any(keyword in prompt_lower for keyword in recipe["keywords"]):
-                return deepcopy(recipe)
-        fallback = deepcopy(RECIPE_DATABASE[0])
-        fallback["title"] = f"Receta básica para {prompt}" if prompt else fallback["title"]
-        return fallback
+    try:
+        requested_servings = int(data.servings) if data.servings else 2
+    except (TypeError, ValueError):
+        requested_servings = 2
+    servings = max(requested_servings, 1)
 
-    recipe = pick_recipe()
+    ai_recipe = await chatgpt_generate_recipe(prompt, servings)
+    if not isinstance(ai_recipe, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudo generar la receta con el asistente de IA. Intenta nuevamente en unos segundos.",
+        )
+
+    normalized = _normalize_ai_recipe(ai_recipe, prompt, servings)
+    if not normalized["steps"]:
+        raise HTTPException(
+            status_code=502,
+            detail="La receta proporcionada por el asistente de IA no contiene pasos válidos.",
+        )
+
     recipe_id = str(uuid4())
-
-    default_servings = recipe.get("default_servings") or 2
-    scale_factor = servings / default_servings if default_servings else 1
-
-    scaled_ingredients = []
-    for ingredient in recipe.get("ingredients", []):
-        quantity = ingredient.get("quantity")
-        scaled_quantity = round(quantity * scale_factor, 2) if quantity is not None else None
-        scaled_ingredients.append({
-            **ingredient,
-            "quantity": scaled_quantity,
-        })
-
-    normalized_steps = []
-    total_timer = 0
-    for idx, raw_step in enumerate(recipe.get("steps", []), start=1):
-        expected_weight = raw_step.get("expected_weight")
-        scaled_weight = round(expected_weight * scale_factor, 2) if expected_weight else None
-        step_timer = raw_step.get("timer", 0)
-        total_timer += step_timer or 0
-
-        normalized_steps.append({
-            "index": idx,
-            "instruction": raw_step["instruction"],
-            "needsScale": raw_step.get("needs_scale", False),
-            "expectedWeight": scaled_weight,
-            "tip": raw_step.get("tip"),
-            "timer": step_timer,
-        })
+    model_id = get_chatgpt_model()
 
     active_recipes[recipe_id] = {
         "id": recipe_id,
-        "title": recipe.get("title", "Receta"),
-        "servings": servings,
-        "steps": normalized_steps,
-        "raw_steps": recipe.get("steps", []),
+        "title": normalized["title"],
+        "servings": normalized["servings"],
+        "steps": normalized["steps"],
+        "raw_steps": ai_recipe.get("steps", []),
+        "prompt": prompt,
+        "model": model_id,
     }
 
     return {
         "id": recipe_id,
-        "title": recipe.get("title", "Receta"),
-        "servings": servings,
-        "ingredients": scaled_ingredients,
-        "steps": normalized_steps,
-        "estimatedTime": math.ceil(total_timer / 60) if total_timer else None,
+        "title": normalized["title"],
+        "servings": normalized["servings"],
+        "ingredients": normalized["ingredients"],
+        "steps": normalized["steps"],
+        "estimatedTime": normalized["estimated_time"],
+        "model": model_id,
     }
 
 
@@ -1417,8 +1667,8 @@ async def next_recipe_step(data: RecipeNext):
     expected_weight = step.get("expectedWeight")
     measured_weight = _extract_weight(data.userResponse)
 
-    assistant_message = step.get("tip")
-    if step.get("needsScale") and expected_weight:
+    assistant_message = step.get("assistantMessage") or step.get("tip")
+    if step.get("needsScale") and expected_weight is not None:
         if measured_weight is None:
             assistant_message = assistant_message or "Recuerda confirmar el peso en gramos para ajustar la receta."
         else:
@@ -1441,8 +1691,12 @@ async def next_recipe_step(data: RecipeNext):
     if is_last:
         active_recipes.pop(data.recipeId, None)
 
+    response_step = dict(step)
+    if assistant_message is not None:
+        response_step["assistantMessage"] = assistant_message
+
     return {
-        "step": step,
+        "step": response_step,
         "isLast": is_last,
         "assistantMessage": assistant_message,
     }
