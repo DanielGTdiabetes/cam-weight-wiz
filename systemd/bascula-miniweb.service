@@ -10,6 +10,9 @@ Group=www-data
 WorkingDirectory=/opt/bascula/current
 EnvironmentFile=-/etc/default/bascula-audio
 Environment=BACKEND_BASE_URL=http://127.0.0.1:8081
+Environment=BASCULA_MINIWEB_HOST=127.0.0.1
+Environment=BASCULA_MINIWEB_PORT=8080
+Environment=MINIWEB_BASE_URL=http://127.0.0.1:8080
 ExecStart=/opt/bascula/current/.venv/bin/uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=1

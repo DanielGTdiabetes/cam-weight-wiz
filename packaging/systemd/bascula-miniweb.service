@@ -18,6 +18,9 @@ Environment=BASCULA_SAMPLE_RATE=16000
 Environment=BASCULA_CFG_DIR=/home/pi/.bascula
 Environment=BASCULA_CAPTURES_DIR=/run/bascula/captures
 Environment=BACKEND_BASE_URL=http://127.0.0.1:8081
+Environment=BASCULA_MINIWEB_HOST=127.0.0.1
+Environment=BASCULA_MINIWEB_PORT=8080
+Environment=MINIWEB_BASE_URL=http://127.0.0.1:8080
 ExecStartPre=-/usr/bin/nm-online -s -q -t 25
 ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 02770 /run/bascula
 ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 02770 /run/bascula/captures

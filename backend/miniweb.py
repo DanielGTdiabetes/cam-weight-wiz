@@ -37,6 +37,7 @@ from pydantic import BaseModel
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.app.services.settings_service import get_settings_service
+from backend.utils_urls import get_backend_base_url, get_miniweb_base_url
 
 HX711_IMPORT_ERROR: Optional[Exception] = None
 try:
@@ -279,16 +280,8 @@ def _normalize_http_url(raw: str) -> str:
 
 
 _DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8081"
-_RAW_BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", _DEFAULT_BACKEND_BASE_URL)
-try:
-    BACKEND_BASE_URL = _normalize_http_url(_RAW_BACKEND_BASE_URL) or _DEFAULT_BACKEND_BASE_URL
-except ValueError:
-    LOG_MINIWEB.warning(
-        "Valor inválido para BACKEND_BASE_URL=%r; usando %s",
-        _RAW_BACKEND_BASE_URL,
-        _DEFAULT_BACKEND_BASE_URL,
-    )
-    BACKEND_BASE_URL = _DEFAULT_BACKEND_BASE_URL
+BACKEND_BASE_URL = get_backend_base_url() or _DEFAULT_BACKEND_BASE_URL
+MINIWEB_BASE_URL = get_miniweb_base_url()
 
 
 def _reload_backend_service() -> Tuple[bool, Optional[str]]:
@@ -1161,8 +1154,8 @@ def _run_logged_command(
 
 def _run_smoke_tests() -> None:
     tests: list[tuple[str, Sequence[str]]] = [
-        ("health", ["curl", "-fsS", "http://127.0.0.1:8080/health"]),
-        ("openapi", ["curl", "-fsS", "http://127.0.0.1:8080/openapi.json"]),
+        ("health", ["curl", "-fsS", f"{MINIWEB_BASE_URL}/health"]),
+        ("openapi", ["curl", "-fsS", f"{MINIWEB_BASE_URL}/openapi.json"]),
     ]
     for label, cmd in tests:
         try:
