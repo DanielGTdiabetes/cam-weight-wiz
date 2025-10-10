@@ -37,7 +37,12 @@ else:
     ConfigDict = _ConfigDict
 from pyzbar.pyzbar import Decoded, decode
 
-import pytesseract
+from backend.ocr_service import (
+    OCRDisabledError,
+    OCRModelsMissingError,
+    OCRRuntimeError,
+    get_ocr_service,
+)
 
 from backend.utils_urls import get_backend_base_url, get_miniweb_base_url
 
@@ -224,7 +229,15 @@ _NAME_PATTERN = re.compile(r"(?m)^[A-ZÁÉÍÓÚÜÑ0-9][A-ZÁÉÍÓÚÜÑ0-9\s\
 
 
 def _ocr_extract(image: Image.Image) -> NutritionData:
-    text = pytesseract.image_to_string(image, lang="spa")
+    service = get_ocr_service()
+    try:
+        text = service.extract_text(image) or ""
+    except OCRDisabledError as exc:
+        raise HTTPException(status_code=503, detail="ocr_disabled") from exc
+    except OCRModelsMissingError as exc:
+        raise HTTPException(status_code=503, detail="ocr_missing_models") from exc
+    except OCRRuntimeError as exc:
+        raise HTTPException(status_code=500, detail=f"ocr_failed: {exc}") from exc
 
     def find_number(pattern: re.Pattern[str]) -> Optional[float]:
         match = pattern.search(text)

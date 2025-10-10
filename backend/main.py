@@ -47,6 +47,7 @@ import grp
 from backend.audio_utils import play_audio_file, play_pcm_audio
 from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
+from backend.ocr_service import get_ocr_service
 from backend.routers import food as food_router
 from app.services.settings_service import get_settings_service
 
@@ -2484,6 +2485,16 @@ async def install_update():
                 pass
 
 # ============= HEALTH CHECK =============
+
+
+@app.get("/ocr/health")
+async def ocr_health_check():
+    """Return OCR readiness without breaking the backend when models are missing."""
+    service = get_ocr_service()
+    status_value = service.health_status()
+    if status_value == "ready":
+        return {"ocr": "ready"}
+    return JSONResponse(status_code=503, content={"ocr": status_value})
 
 
 @app.get("/health")
