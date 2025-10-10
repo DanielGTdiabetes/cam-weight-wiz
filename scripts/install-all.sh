@@ -213,7 +213,7 @@ ensure_python_venv() {
   apt_one_of libavformat60 libavformat59 libavformat58
 
   # ilmbase dejó de existir como runtime en Bookworm; intenta los headers si están
-  apt_try libilmbase-dev || true
+  apt_try libimath-dev || apt_try libilmbase-dev || true
   pip install --no-cache-dir \
     "rapidocr-onnxruntime==1.4.4" \
     onnxruntime \
@@ -456,6 +456,25 @@ EOF
   systemctl restart nginx
 }
 
+check_ui_static() {
+  log "check: UI estático en /"
+  if [[ ! -s "/var/www/bascula/index.html" ]]; then
+    log_err "UI: falta /var/www/bascula/index.html"
+    exit 1
+  fi
+  local http_code
+  http_code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/ || true)"
+  case "${http_code}" in
+    200|301|302)
+      log "check OK: UI responde (${http_code})"
+      ;;
+    *)
+      log_err "UI: respuesta HTTP inesperada (${http_code})"
+      exit 1
+      ;;
+  esac
+}
+
 run_health_checks() {
   run_checked "systemd-analyze verify" systemd-analyze verify \
     "${SYSTEMD_DEST}/bascula-miniweb.service" \
@@ -474,6 +493,7 @@ run_health_checks() {
     return 1
   fi
   log "check OK: backend responde"
+  check_ui_static
   run_checked "picamera2 import" python3 -c 'import picamera2'
   run_checked "arecord bascula_mix_in" arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1
   run_checked "speaker-test bascula_out" speaker-test -t sine -f 1000 -l 1 -D bascula_out
@@ -490,11 +510,11 @@ main() {
   ensure_packages \
     python3 python3-venv python3-pip python3-dev \
     python3-numpy python3-simplejpeg python3-picamera2 \
-    libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 libtiff5 libilmbase25 libavformat58 ffmpeg \
-    git rsync curl jq nginx \
+    libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 \
+    ffmpeg git rsync curl jq nginx \
     alsa-utils libcamera-apps \
     xserver-xorg xinit chromium-browser matchbox-window-manager \
-    fonts-dejavu-core
+    fonts-dejavu-core nodejs npm
 
   ensure_boot_overlays || true
 
@@ -525,6 +545,80 @@ main() {
   install_nginx_site
   install_systemd_units
 
+  ensure_packages nodejs npm
+  if command -v corepack >/dev/null 2>&1; then
+    if ! corepack enable >/dev/null 2>&1; then
+      log_warn "UI: no se pudo habilitar corepack"
+    fi
+  fi
+
+  log "UI: preparando build"
+  if [[ -d "${RELEASE_DIR}/ui" ]]; then
+    pushd "${RELEASE_DIR}/ui" >/dev/null
+
+    local PKG_MANAGER="npm"
+    if [[ -f pnpm-lock.yaml ]]; then
+      PKG_MANAGER="pnpm"
+      if ! command -v pnpm >/dev/null 2>&1; then
+        if command -v corepack >/dev/null 2>&1; then
+          log "UI: instalando pnpm vía corepack"
+          if ! corepack prepare pnpm@latest --activate; then
+            log_err "UI: no se pudo activar pnpm"
+            exit 1
+          fi
+        else
+          log_err "UI: pnpm requerido pero corepack no está disponible"
+          exit 1
+        fi
+      fi
+    fi
+
+    if [[ "${PKG_MANAGER}" = "pnpm" ]]; then
+      log "UI: pnpm install"
+      if ! pnpm install --frozen-lockfile; then
+        log_err "UI: pnpm install falló"
+        exit 1
+      fi
+      log "UI: pnpm build"
+      if ! pnpm build; then
+        log_err "UI: pnpm build falló"
+        exit 1
+      fi
+    else
+      log "UI: npm ci"
+      if ! npm ci --no-audit --no-fund --legacy-peer-deps; then
+        log_err "UI: npm ci falló"
+        exit 1
+      fi
+      log "UI: npm run build"
+      if ! npm run build; then
+        log_err "UI: npm run build falló"
+        exit 1
+      fi
+    fi
+
+    local UI_DIST=""
+    for d in dist build; do
+      if [[ -d "${d}" ]]; then
+        UI_DIST="${d}"
+        break
+      fi
+    done
+    if [[ -z "${UI_DIST}" ]]; then
+      log_err "UI: no se encontró carpeta de build (dist/build)"
+      exit 1
+    fi
+
+    popd >/dev/null
+
+    local WEB_ROOT="/var/www/bascula"
+    mkdir -p "${WEB_ROOT}"
+    rsync -a --delete "${RELEASE_DIR}/ui/${UI_DIST}/" "${WEB_ROOT}/"
+    log "UI: publicado en ${WEB_ROOT}"
+  else
+    log_warn "UI: carpeta ui/ no existe en el release; se omite build"
+  fi
+
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
     log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Omitiendo pruebas de audio (arecord/aplay)."
     run_checked "systemd-analyze verify" systemd-analyze verify \
@@ -544,6 +638,7 @@ main() {
       exit 1
     fi
     log "check OK: backend responde"
+    check_ui_static
     run_checked "picamera2 import" python3 -c 'import picamera2'
     log_warn "Reinicie el sistema y vuelva a ejecutar las pruebas de audio manualmente."
     exit 0
