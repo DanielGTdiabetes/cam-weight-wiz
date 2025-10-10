@@ -90,7 +90,10 @@ else
   log "Backend no respondió a tiempo, abriendo ${TARGET_URL}"
 fi
 
-CHROME_BIN="$(command -v chromium 2>/dev/null || command -v chromium-browser 2>/dev/null || command -v ${CHROME_PKG:-chromium} 2>/dev/null || echo chromium)"
+CHROME_BIN="${BASCULA_CHROME_BIN:-${CHROME:-}}"
+if [[ -z "${CHROME_BIN}" ]]; then
+  CHROME_BIN="$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || command -v "${CHROME_PKG:-chromium}" 2>/dev/null || echo chromium)"
+fi
 
 log "CHROME=${CHROME_BIN} URL=${TARGET_URL}"
 

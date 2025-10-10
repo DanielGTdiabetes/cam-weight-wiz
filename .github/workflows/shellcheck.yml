@@ -16,10 +16,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install shellcheck
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck
+          sudo apt-get install -y shellcheck nginx
       - name: Run shellcheck
         run: |
           set -o pipefail
@@ -30,3 +30,23 @@ jobs:
             exit 1
           fi
           exit $status
+      - name: Validate nginx configuration
+        run: |
+          set -euo pipefail
+          tmpdir=$(mktemp -d)
+          cat <<EOF >"${tmpdir}/nginx.conf"
+events {}
+http {
+    include "${GITHUB_WORKSPACE}/nginx/bascula.conf";
+}
+EOF
+          cat <<'EOF' >"${tmpdir}/proxy_params"
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+EOF
+          nginx -t -c "${tmpdir}/nginx.conf" -p "${tmpdir}"
+      - name: Verify audio environment defaults
+        run: |
+          grep -q 'Environment=BASCULA_AUDIO_DEVICE=bascula_out' systemd/bascula-miniweb.service

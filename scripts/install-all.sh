@@ -386,47 +386,32 @@ configure_hifiberry_audio() {
 
   tmp_conf="$(mktemp)"
   cat <<'EOF' > "${tmp_conf}"
-# ============================================================
-# /etc/asound.conf – Configuración estable Báscula Digital Pro
-# DAC I2S HiFiBerry MAX98357A + Micrófono USB PnP
-# ============================================================
-
 pcm.dmix_dac {
-    type dmix
-    ipc_key 1024
-    ipc_perm 0666
-    slave {
-        pcm "hw:1,0"
-        rate 44100
-        channels 2
-        format S16_LE
-        period_time 0
-        buffer_time 0
-    }
+type dmix
+ipc_key 1024
+ipc_perm 0666
+slave {
+pcm "hw:1,0"
+rate 44100
+channels 2
+format S16_LE
+period_time 0
+buffer_time 0
 }
-
+}
 pcm.dsnoop_mic {
-    type dsnoop
-    ipc_key 2048
-    ipc_perm 0666
-    slave {
-        pcm "hw:0,0"
-        channels 1
-        rate 16000
-        format S16_LE
-    }
+type dsnoop
+ipc_key 2048
+ipc_perm 0666
+slave {
+pcm "hw:0,0"
+channels 1
+rate 16000
+format S16_LE
 }
-
-pcm.bascula_out {
-    type plug
-    slave.pcm "dmix_dac"
 }
-
-pcm.bascula_mix_in {
-    type plug
-    slave.pcm "dsnoop_mic"
-}
-
+pcm.bascula_out { type plug; slave.pcm "dmix_dac"; }
+pcm.bascula_mix_in { type plug; slave.pcm "dsnoop_mic"; }
 pcm.!default bascula_out
 ctl.!default bascula_out
 EOF
@@ -616,109 +601,35 @@ EOF
 }
 
 ensure_libcamera_stack() {
-  local is_pi5=0
-  local list_file="/tmp/libcamera_list.txt"
-  local cameras_detected=0
+  local packages=(
+    libcamera-apps
+    rpicam-apps
+    python3-libcamera
+    python3-picamera2
+    v4l-utils
+  )
 
-  if uname -r | grep -q 'rpi-2712'; then
-    is_pi5=1
-  elif [[ -d /sys/bus/platform/drivers/rp1-cfe ]]; then
-    is_pi5=1
-  elif command -v lsmod >/dev/null 2>&1 && lsmod | grep -q '^rp1_cfe'; then
-    is_pi5=1
-  fi
-
-  if [[ ${is_pi5} -ne 1 ]]; then
-    log "Pi 5 no detectada; omitiendo realineación libcamera específica."
-    return 0
-  fi
-
-  echo "[inst] Verificando pila libcamera…"
+  log "Instalando pila libcamera/picamera2…"
 
   if [[ "${NET_OK:-0}" -eq 1 ]]; then
-    if ! apt-get update -y; then
-      log_warn "apt-get update falló (libcamera); continuando con datos en caché"
+    if ! apt-get update; then
+      log_warn "apt-get update falló antes de instalar libcamera"
     fi
   else
-    log_warn "Sin red: no se puede actualizar índice APT antes de comprobar libcamera"
+    log_warn "Sin red: instalando pila libcamera desde caché"
   fi
 
-  if ! command -v libcamera-hello >/dev/null 2>&1 || ! command -v rpicam-hello >/dev/null 2>&1; then
-    if [[ "${NET_OK:-0}" -eq 1 ]]; then
-      if ! apt-get install -y libcamera-apps rpicam-apps; then
-        log_warn "No se pudieron instalar libcamera-apps/rpicam-apps"
-      fi
-    else
-      log_warn "Sin red: no se pueden instalar libcamera-apps/rpicam-apps"
-    fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"; then
+    warn "Instalación de paquetes libcamera parcial; revisa conectividad"
   fi
 
-  rm -f "${list_file}"
-  if ! timeout 6 libcamera-hello --list-cameras >"${list_file}" 2>&1; then
-    echo "[inst][warn] libcamera-hello falló; forzando realineación de kernel/firmware/libcamera…"
-    if [[ "${NET_OK:-0}" -eq 1 ]]; then
-      if ! apt-get purge -y "libcamera*" rpicam-apps; then
-        log_warn "Purge de libcamera falló (se continuará)"
-      fi
-      echo "[inst][info] Realineando kernel/libcamera (Pi5)…"
-      if ! apt-get install -y --reinstall raspberrypi-kernel raspberrypi-kernel-headers \
-        libraspberrypi0 libraspberrypi-bin libraspberrypi-dev libraspberrypi-doc; then
-        log_warn "Reinstalación de kernel/firmware falló"
-      fi
-      if ! apt-get install -y libcamera-apps rpicam-apps; then
-        log_warn "Reinstalación de libcamera-apps/rpicam-apps falló"
-      fi
-      NEED_REBOOT=1
-      require_reboot "Realinear libcamera (Pi5)"
-    else
-      log_warn "Sin red: no se puede realinear libcamera en Pi5"
-    fi
-  fi
-
-  if ! timeout 6 libcamera-hello --list-cameras >"${list_file}" 2>&1; then
-    log_warn "libcamera aún no lista cámaras (posible reboot pendiente)."
-    NEED_REBOOT=1
-    require_reboot "Realinear libcamera (Pi5)"
-  else
-    cameras_detected=$(grep -c -E '^[0-9]+[[:space:]]*:' "${list_file}" 2>/dev/null || true)
-    echo "[check] cámaras detectadas: ${cameras_detected}"
-    if [[ ${cameras_detected} -lt 1 ]]; then
-      log_warn "Sin cámaras tras la instalación; marcando reinicio necesario."
-      NEED_REBOOT=1
-      require_reboot "Realinear libcamera (Pi5)"
-    else
-      if [[ -s "${list_file}" ]]; then
-        echo "[inst] libcamera --list-cámaras:"
-        sed -n '1,60p' "${list_file}"
-      fi
-    fi
-  fi
-
-  if [[ "${NEED_REBOOT}" = "1" ]]; then
-    touch /.needs-reboot-libcamera 2>/dev/null || true
-    echo "[inst][warn] Reboot requerido para completar la activación de la cámara."
-    echo "[inst][info] Reboot requerido tras realinear libcamera (Pi5)."
-  elif [[ -f /.needs-reboot-libcamera ]]; then
-    rm -f /.needs-reboot-libcamera 2>/dev/null || true
-  fi
-
-  if [[ "${NET_OK:-0}" -eq 1 ]]; then
-    log "[inst] Realineando IPA/libcamera/pisp (reinstalación segura)..."
-    if ! apt-get install -y --reinstall \
-      libcamera-ipa libcamera0.5 python3-libcamera rpicam-apps libcamera-apps \
-      libpisp1 libpisp-common; then
-      log_warn "Reinstalación de libcamera/libpisp falló"
-    fi
-  else
-    log_warn "Sin red: omitiendo reinstalación forzada de libcamera/libpisp"
-  fi
+  install -d -m 0755 -o pi -g www-data /run/bascula
+  install -d -m 02770 -o pi -g www-data /run/bascula/captures
+  chmod g+s /run/bascula/captures || true
 
   if command -v rpicam-still >/dev/null 2>&1; then
     timeout 5 rpicam-still -t 1000 -o /run/bascula/captures/selftest.jpg || true
   fi
-
-  # Si el símbolo indefinido persiste, se puede fijar versión conocida:
-  # apt-mark hold libcamera-ipa=<versión> libpisp1=<versión>
 
   return 0
 }
@@ -1041,8 +952,14 @@ configure_bascula_ui_service() {
   local previous_umask
   local kiosk_wait="${BASCULA_KIOSK_WAIT_S_VALUE:-30}"
   local kiosk_probe="${BASCULA_KIOSK_PROBE_MS_VALUE:-500}"
+  local chrome_env_line=""
 
   target_uid="$(id -u "${TARGET_USER}" 2>/dev/null || id -u pi 2>/dev/null || printf '%s' '1000')"
+
+  if [[ -n "${BASCULA_CHROME_BIN_VALUE:-}" ]]; then
+    printf -v chrome_env_line 'Environment=BASCULA_CHROME_BIN=%s\nEnvironment=CHROME=%s' \
+      "${BASCULA_CHROME_BIN_VALUE}" "${BASCULA_CHROME_BIN_VALUE}"
+  fi
 
   install -d -m 0755 "${override_dir}"
 
@@ -1064,6 +981,7 @@ Environment=HOME=${TARGET_HOME}
 Environment=USER=${TARGET_USER}
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/${target_uid}
+${chrome_env_line}
 Environment=BASCULA_KIOSK_WAIT_S=${kiosk_wait}
 Environment=BASCULA_KIOSK_PROBE_MS=${kiosk_probe}
 PermissionsStartOnly=yes
@@ -1318,7 +1236,7 @@ fi
 # Update system
 log "[2/20] Actualizando el sistema..."
 if [[ "${NET_OK}" -eq 1 ]]; then
-    if ! apt-get update -y; then
+    if ! apt-get update; then
         warn "apt-get update falló; continúa con el resto de la instalación"
     elif ! apt-get upgrade -y; then
         warn "apt-get upgrade falló; continúa con el resto de la instalación"
@@ -1364,9 +1282,18 @@ if [[ "${NET_OK}" -eq 1 ]]; then
     ensure_pkg dnsmasq-base
     log "✓ dnsmasq-base instalado (dnsmasq global removido)"
 
-    ensure_pkg xorg
-    ensure_pkg unclutter
-    ensure_pkg python3-serial
+    kiosk_packages=(
+      xserver-xorg
+      xserver-xorg-legacy
+      xinit
+      openbox
+      x11-xserver-utils
+      unclutter
+      python3-serial
+    )
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${kiosk_packages[@]}"; then
+      warn "No se pudieron instalar todas las dependencias base del kiosk"
+    fi
 else
     warn "Sin red: omitiendo la instalación de dependencias base"
     warn "Instala manualmente python3-serial para el backend UART"
@@ -1382,7 +1309,9 @@ fi
 
 if [[ -n "${CHROME_PKG}" ]]; then
   if [[ "${NET_OK}" -eq 1 ]]; then
-    ensure_pkg "${CHROME_PKG}"
+    if ! DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${CHROME_PKG}"; then
+      warn "No se pudo instalar ${CHROME_PKG}"
+    fi
   fi
   log "✓ Paquete Chromium seleccionado: ${CHROME_PKG}"
 else
@@ -1416,11 +1345,13 @@ if ! command -v openbox >/dev/null 2>&1; then
   fail "Falta openbox tras la instalación"
 fi
 
-CHROME_BIN="$(command -v chromium || command -v chromium-browser || true)"
-if [[ -z "${CHROME_BIN}" ]]; then
+CHROME="$(command -v chromium-browser || command -v chromium || true)"
+if [[ -z "${CHROME}" ]]; then
   fail "Falta Chromium tras la instalación"
 fi
-log "✓ Binario Chromium detectado: ${CHROME_BIN}"
+log "✓ Binario Chromium detectado: ${CHROME}"
+CHROME_BIN="${CHROME}"
+BASCULA_CHROME_BIN_VALUE="${CHROME}"
 
 POLICY_DIR="/etc/chromium/policies/managed"
 POLICY_PATH="${POLICY_DIR}/bascula_policy.json"
@@ -1731,7 +1662,9 @@ if [[ -f /usr/lib/xorg/Xorg ]]; then
 else
   warn "/usr/lib/xorg/Xorg no existe; omitiendo ajustes de permisos"
 fi
-echo "xserver-xorg-legacy xserver-xorg-legacy/allowed_users select Anybody" | debconf-set-selections
+if ! echo "xserver-xorg-legacy xserver-xorg-legacy/allowed_users select Anybody" | debconf-set-selections; then
+  warn "No se pudo aplicar debconf-set-selections para xserver-xorg-legacy"
+fi
 DEBIAN_FRONTEND=noninteractive dpkg-reconfigure xserver-xorg-legacy || true
 log "✓ Xwrapper configurado"
 
@@ -2783,10 +2716,6 @@ chgrp www-data /run/bascula/captures || true
 log "✓ tmpfiles configurado"
 stat -c '[inst] captures perms: %A %U:%G %a %n' /run/bascula/captures || true
 
-# Lite UI dependencies (Xorg + Chromium kiosk)
-log "Instalando dependencias mínimas de Xorg y Chromium..."
-try_or_warn "apt Xorg & kiosk" "sudo apt-get update -y && sudo apt-get install -y xserver-xorg xinit openbox chromium unclutter fonts-dejavu-core libxi6 libxrender1 libxrandr2 libgtk-3-0"
-
 # Ensure Python virtual environment and backend dependencies
 log "Verificando entorno Python en /opt/bascula/current..."
 if [[ ! -x "/opt/bascula/current/.venv/bin/python" ]]; then
@@ -2800,7 +2729,7 @@ fi
 
 # Runtime directories for captures served by Nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -o pi -g www-data -m 02770 /run/bascula/captures
+install -d -m 02770 -o pi -g www-data /run/bascula/captures
 chmod g+s /run/bascula/captures || true
 usermod -aG www-data pi || true
 
@@ -3275,3 +3204,5 @@ else
     log_warn "${CAPTURE_FILE} no existe tras la captura"
   fi
 fi
+
+log "done"
