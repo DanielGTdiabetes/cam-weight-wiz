@@ -82,3 +82,12 @@ Para más diagnósticos, consulta los journals de cada servicio (`journalctl -u 
 En Raspberry Pi OS Bookworm usamos los binarios oficiales de `picamera2`, `numpy` y `simplejpeg` que vienen empaquetados en APT (`python3-picamera2`, `python3-numpy`, `python3-simplejpeg`). Esto evita tener que compilar `python-prctl` y otros bindings en la Pi, y garantiza que los módulos críticos de cámara se construyan contra el ABI correcto de libcamera/mesa. 【F:scripts/install-all.sh†L150-L205】【F:requirements.txt†L1-L19】
 
 El instalador verifica explícitamente que estas librerías se carguen desde `/usr/lib/python3/dist-packages/`; si detecta que se resolvieron desde `pip`, aborta para prevenir instalaciones inconsistentes. 【F:scripts/install-all.sh†L150-L205】
+
+### OCR RapidOCR en Raspberry Pi 5
+
+- El backend activa RapidOCR por defecto (`BASCULA_OCR_ENABLED=true`) y busca los modelos en `/opt/rapidocr/models` (configurable con `BASCULA_OCR_MODELS_DIR`). 【F:systemd/bascula-backend.service†L11-L14】【F:backend/ocr_models.py†L1-L12】
+- `scripts/install-all.sh` instala las dependencias de sistema necesarias (`libgomp1`, `libzbar0`), fija las wheels ARM64 de `rapidocr-onnxruntime`, `onnxruntime`, `pyclipper` y `shapely`, y valida los imports tras crear la virtualenv. 【F:scripts/install-all.sh†L82-L103】【F:scripts/install-all.sh†L165-L206】
+- El instalador deja preparada la carpeta `/opt/rapidocr/models` con un README recordando dónde colocar los `.onnx` de detección y reconocimiento. 【F:scripts/install-all.sh†L207-L216】
+- El endpoint `GET /ocr/health` indica si RapidOCR está listo (`{"ocr": "ready"}`) o si faltan modelos (`503` con `{"ocr": "missing_models"}`), evitando que el backend caiga cuando todavía no se han copiado los `.onnx`. 【F:backend/main.py†L2489-L2498】
+
+Coloca los modelos oficiales de RapidOCR (por ejemplo `det.onnx`, `rec.onnx` y opcionalmente `cls.onnx`) en `/opt/rapidocr/models`; el servicio se cargará automáticamente la primera vez que se utilice OCR.

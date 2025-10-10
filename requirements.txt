@@ -10,12 +10,14 @@ opencv-python
 piper-tts
 pillow
 pydantic
-pytesseract
 python-multipart
 pyserial
 pyzbar
 rapidfuzz>=3.0,<4.0
-rapidocr-onnxruntime
+rapidocr-onnxruntime==1.4.4
+onnxruntime>=1.16,<1.19
+pyclipper>=1.3.0
+shapely!=2.0.4,>=2.0.1
 requests
 sounddevice
 starlette>=0.38

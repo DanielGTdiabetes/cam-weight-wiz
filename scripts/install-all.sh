@@ -176,6 +176,13 @@ ensure_python_venv() {
     "httpx==0.28.1" \
     "httpcore>=1.0.0,<2.0.0"
   pip install -r "${CURRENT_LINK}/requirements.txt" --no-deps
+  # Dependencias OCR (RapidOCR + runtime ARM64 sin compilación)
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgomp1 libzbar0
+  pip install --no-cache-dir \
+    "rapidocr-onnxruntime==1.4.4" \
+    "onnxruntime>=1.16,<1.19" \
+    "pyclipper>=1.3.0" \
+    "shapely!=2.0.4,>=2.0.1"
   if [[ -f "${CURRENT_LINK}/requirements-voice.txt" ]]; then
     pip install -r "${CURRENT_LINK}/requirements-voice.txt" --no-deps
   fi
@@ -194,9 +201,24 @@ for name in apt_modules:
 
 for name in ("uvicorn", "fastapi", "starlette", "click", "httpx", "httpcore"):
     importlib.import_module(name)
+
+for name in ("rapidocr_onnxruntime", "onnxruntime", "pyclipper", "shapely"):
+    importlib.import_module(name)
 print("venv deps OK")
+print("OCR deps OK")
 PY
   deactivate || true
+}
+
+prepare_ocr_models_dir() {
+  install -d -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" -m 0755 /opt/rapidocr/models
+  cat >/opt/rapidocr/models/README.txt <<'EOF'
+Coloca aquí los modelos RapidOCR (.onnx) de detección y reconocimiento.
+Variables:
+  BASCULA_OCR_ENABLED=true
+  BASCULA_OCR_MODELS_DIR=/opt/rapidocr/models
+EOF
+  chown "${DEFAULT_USER}:${DEFAULT_USER}" /opt/rapidocr/models/README.txt
 }
 
 ensure_audio_env_file() {
@@ -421,7 +443,7 @@ main() {
   ensure_packages \
     python3 python3-venv python3-pip python3-dev \
     python3-numpy python3-simplejpeg python3-picamera2 \
-    libzbar0 libcap-dev \
+    libgomp1 libzbar0 libcap-dev \
     git rsync curl jq nginx \
     alsa-utils libcamera-apps \
     xserver-xorg xinit chromium-browser matchbox-window-manager \
@@ -446,6 +468,7 @@ main() {
   fi
 
   ensure_python_venv
+  prepare_ocr_models_dir
   ensure_audio_env_file
   install_asound_conf
   install_tmpfiles_config
