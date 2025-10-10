@@ -1,6 +1,7 @@
 [Unit]
 Description=Bascula Digital Pro - UI (Chromium kiosk)
-After=systemd-user-sessions.service network-online.target bascula-miniweb.service sound.target
+Wants=network-online.target bascula-miniweb.service bascula-health-wait.service
+After=systemd-user-sessions.service network-online.target bascula-miniweb.service bascula-health-wait.service sound.target
 Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
@@ -14,6 +15,8 @@ Environment=HOME=/home/pi
 Environment=USER=pi
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=KIOSK_MINIWEB_READY_URL=http://127.0.0.1:8080/api/miniweb/status
+Environment=KIOSK_WAIT_SECS=60
 StandardOutput=journal
 StandardError=journal
 PermissionsStartOnly=yes
@@ -21,6 +24,12 @@ StandardInput=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
+ExecStartPre=/bin/sh -c '\
+  echo "[kiosk] waiting miniweb ${KIOSK_WAIT_SECS}s..."; \
+  for i in $(seq 1 ${KIOSK_WAIT_SECS}); do \
+    curl -fsS "$KIOSK_MINIWEB_READY_URL" >/dev/null && exit 0; \
+    sleep 1; \
+  done; echo "[kiosk] miniweb timeout"; exit 1'
 ExecStartPre=/bin/sh -c 'install -d -m0700 -o pi -g pi /run/user/1000 && install -d -m0755 -o pi -g pi /var/log/bascula && install -o pi -g pi -m0644 /dev/null /var/log/bascula/ui.log && rm -f /tmp/.X0-lock'
 ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
 Restart=always
