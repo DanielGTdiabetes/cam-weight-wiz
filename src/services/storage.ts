@@ -362,7 +362,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   chatGptKey: '',
   // Dispositivo: usar loopback 127.0.0.1 por defecto
-  apiUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8080',
+  apiUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8081',
   wsUrl: import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8080',
   nightscoutUrl: '',
   nightscoutToken: '',

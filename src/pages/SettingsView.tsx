@@ -171,7 +171,7 @@ export const SettingsView = () => {
 
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
   const [decimals, setDecimals] = useState("1");
-  const [apiUrl, setApiUrl] = useState("http://127.0.0.1:8080");
+  const [apiUrl, setApiUrl] = useState("http://127.0.0.1:8081");
   const [wsUrl, setWsUrl] = useState("ws://127.0.0.1:8080");
   const [chatGptKey, setChatGptKey] = useState("");
   const [nightscoutUrl, setNightscoutUrl] = useState("");
