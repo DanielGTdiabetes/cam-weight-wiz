@@ -40,7 +40,6 @@ except Exception:  # pragma: no cover - optional at runtime
 
 from rapidfuzz import fuzz
 
-from backend.utils_urls import get_backend_base_url
 
 LOG_WAKE = logging.getLogger("bascula.wake")
 
@@ -631,7 +630,10 @@ class WakeListener:
     def _try_remote_transcription(self, wav_audio: bytes) -> Optional[str]:
         if requests is None:
             return None
-        base_url = get_backend_base_url()
+        base_url = os.getenv("BASCULA_API_URL", "http://127.0.0.1:8081")
+        if not base_url:
+            base_url = "http://127.0.0.1:8081"
+        base_url = base_url.rstrip("/")
         if self._transcribe_url is None:
             self._transcribe_url = f"{base_url}/api/voice/transcribe"
         try:

@@ -49,7 +49,7 @@ from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
 from backend.routers import food as food_router
-from app.services.settings_service import get_settings_service
+from backend.app.services.settings_service import get_settings_service
 
 
 CHATGPT_MODELS = [
@@ -2513,7 +2513,8 @@ async def root():
 
 
 def _coerce_port(value: str | None, fallback: int) -> int:
-    """Convert an environment port value into an integer, with fallback."""
+    """Parse a port number from a string, returning fallback on errors."""
+
     if not value:
         return fallback
     try:
@@ -2531,37 +2532,28 @@ def _coerce_port(value: str | None, fallback: int) -> int:
     return port
 
 
-def _parse_server_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    """Parse CLI arguments to configure the embedded uvicorn server."""
-    env_host = os.getenv("BASCULA_BACKEND_HOST", "0.0.0.0")
-    env_port = _coerce_port(os.getenv("BASCULA_BACKEND_PORT"), 8081)
+def main(argv: Optional[List[str]] = None) -> None:
+    """Entry point executed by ``python -m backend.main``."""
+
+    default_host = os.getenv("BASCULA_BACKEND_HOST", "0.0.0.0")
+    default_port = _coerce_port(os.getenv("BASCULA_BACKEND_PORT"), 8081)
 
     parser = argparse.ArgumentParser(description="Bascula backend server")
-    parser.add_argument("--host", default=env_host, help="Interface to bind the API server")
+    parser.add_argument("--host", default=default_host, help="Interface to bind the API server")
     parser.add_argument(
         "--port",
         type=int,
-        default=env_port,
+        default=default_port,
         help="TCP port for the API server",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
 
-
-def _get_server_bind(argv: Optional[List[str]] = None) -> tuple[str, int]:
-    """Resolve the host/port uvicorn should bind to."""
-    args = _parse_server_args(argv)
-    return args.host, int(args.port)
-
-
-def main(argv: Optional[List[str]] = None) -> None:
-    """Entry point executed by ``python -m backend.main``."""
     import uvicorn
 
-    bind_host, bind_port = _get_server_bind(argv)
     uvicorn.run(
-        "backend.asgi:app",
-        host=bind_host,
-        port=bind_port,
+        "backend.main:app",
+        host=args.host,
+        port=int(args.port),
         reload=False,
         log_level="info",
         factory=False,

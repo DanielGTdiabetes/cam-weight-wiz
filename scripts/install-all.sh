@@ -177,14 +177,18 @@ ensure_python_venv() {
     "httpcore>=1.0.0,<2.0.0"
   pip install -r "${CURRENT_LINK}/requirements.txt" --no-deps
   # Dependencias OCR (RapidOCR + runtime ARM64 sin compilación)
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgomp1 libzbar0
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 libtiff5 libilmbase25 libavformat58 ffmpeg
   pip install --no-cache-dir \
     "rapidocr-onnxruntime==1.4.4" \
-    "onnxruntime>=1.16,<1.19" \
-    "pyclipper>=1.3.0" \
-    "shapely!=2.0.4,>=2.0.1"
+    onnxruntime \
+    pyclipper \
+    "shapely!=2.0.4,>=1.7.1"
   if [[ -f "${CURRENT_LINK}/requirements-voice.txt" ]]; then
     pip install -r "${CURRENT_LINK}/requirements-voice.txt" --no-deps
+  fi
+  if ! python -c "import pyzbar" >/dev/null 2>&1; then
+    echo '[WARN] pyzbar no disponible'
   fi
   python - <<'PY'
 import importlib
@@ -424,9 +428,17 @@ run_health_checks() {
     "${SYSTEMD_DEST}/bascula-health-wait.service" \
     "${SYSTEMD_DEST}/bascula-ui.service"
   run_checked "nginx -t" nginx -t
-  run_checked "curl miniweb" curl -fsS http://127.0.0.1:8080/api/miniweb/status
+  if ! curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
+    echo "[ERROR] miniweb no responde"
+    return 1
+  fi
+  log "check OK: miniweb responde"
   run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
-  run_checked "backend health" /bin/sh -c 'curl -fsS http://127.0.0.1:8081/health || true'
+  if ! curl -fsS http://127.0.0.1:8081/health >/dev/null; then
+    echo "[ERROR] backend no responde"
+    return 1
+  fi
+  log "check OK: backend responde"
   run_checked "picamera2 import" python3 -c 'import picamera2'
   run_checked "arecord bascula_mix_in" arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1
   run_checked "speaker-test bascula_out" speaker-test -t sine -f 1000 -l 1 -D bascula_out
@@ -443,7 +455,7 @@ main() {
   ensure_packages \
     python3 python3-venv python3-pip python3-dev \
     python3-numpy python3-simplejpeg python3-picamera2 \
-    libgomp1 libzbar0 libcap-dev \
+    libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 libtiff5 libilmbase25 libavformat58 ffmpeg \
     git rsync curl jq nginx \
     alsa-utils libcamera-apps \
     xserver-xorg xinit chromium-browser matchbox-window-manager \
@@ -486,9 +498,17 @@ main() {
       "${SYSTEMD_DEST}/bascula-health-wait.service" \
       "${SYSTEMD_DEST}/bascula-ui.service"
     run_checked "nginx -t" nginx -t
-    run_checked "curl miniweb" curl -fsS http://127.0.0.1:8080/api/miniweb/status
+    if ! curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
+      echo "[ERROR] miniweb no responde"
+      exit 1
+    fi
+    log "check OK: miniweb responde"
     run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
-    run_checked "backend health" /bin/sh -c 'curl -fsS http://127.0.0.1:8081/health || true'
+    if ! curl -fsS http://127.0.0.1:8081/health >/dev/null; then
+      echo "[ERROR] backend no responde"
+      exit 1
+    fi
+    log "check OK: backend responde"
     run_checked "picamera2 import" python3 -c 'import picamera2'
     log_warn "Reinicie el sistema y vuelva a ejecutar las pruebas de audio manualmente."
     exit 0
