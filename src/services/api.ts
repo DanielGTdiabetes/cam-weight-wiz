@@ -34,6 +34,7 @@ export interface RecipeIngredient {
   quantity: number | null;
   unit: string;
   needs_scale?: boolean;
+  needsScale?: boolean;
 }
 
 export interface RecipeStep {
@@ -42,7 +43,8 @@ export interface RecipeStep {
   needsScale: boolean;
   expectedWeight?: number;
   tip?: string;
-  timer?: number;
+  timer?: number | null;
+  assistantMessage?: string | null;
 }
 
 export interface GeneratedRecipe {
@@ -52,12 +54,19 @@ export interface GeneratedRecipe {
   ingredients: RecipeIngredient[];
   steps: RecipeStep[];
   estimatedTime?: number | null;
+  model?: string | null;
 }
 
 export interface NextRecipeStepResponse {
   step?: RecipeStep;
   isLast: boolean;
   assistantMessage?: string;
+}
+
+export interface RecipeStatus {
+  enabled: boolean;
+  reason?: string | null;
+  model?: string | null;
 }
 export interface GlucoseData {
   glucose: number;
@@ -355,6 +364,10 @@ class ApiService {
       currentStep,
       userResponse,
     });
+  }
+
+  async getRecipeStatus(): Promise<RecipeStatus> {
+    return apiWrapper.get<RecipeStatus>('/api/recipes/status');
   }
 
   // Settings endpoints

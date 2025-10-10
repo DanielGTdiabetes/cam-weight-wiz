@@ -1,12 +1,22 @@
 import { Scale, Camera, Timer, Book, Settings as SettingsIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { useRecipeAvailability } from "@/hooks/useRecipeAvailability";
+import { useToast } from "@/hooks/use-toast";
 
 interface MainMenuProps {
   onNavigate: (view: string) => void;
 }
 
 export const MainMenu = ({ onNavigate }: MainMenuProps) => {
+  const { toast } = useToast();
+  const {
+    loading: recipesLoading,
+    enabled: recipesEnabled,
+    reason: recipesReason,
+    model: recipeModel,
+  } = useRecipeAvailability();
+
   const menuItems = [
     {
       id: "scale",
@@ -70,25 +80,68 @@ export const MainMenu = ({ onNavigate }: MainMenuProps) => {
             const handleClick = (e: React.MouseEvent) => {
               e.preventDefault();
               e.stopPropagation();
+              const isRecipeItem = id === "recipes";
+              if (isRecipeItem) {
+                if (recipesLoading) {
+                  toast({
+                    title: "Comprobando asistente de recetas",
+                    description: "Espera un momento mientras se verifica la conexión con ChatGPT.",
+                  });
+                  return;
+                }
+                if (!recipesEnabled) {
+                  toast({
+                    title: "Recetas no disponibles",
+                    description: recipesReason ?? "Configura tu clave de OpenAI en Ajustes para activarlas.",
+                    variant: "destructive",
+                  });
+                  return;
+                }
+              }
+
               console.log("MainMenu: Navigating to:", id);
               onNavigate(id);
             };
 
+            const isRecipeItem = id === "recipes";
+            const recipeDisabled = !recipesLoading && !recipesEnabled;
+            const itemDisabled = isRecipeItem && recipeDisabled;
+            const interactiveClasses = !itemDisabled
+              ? `${hoverBorder} ${glowClass} cursor-pointer hover:scale-[1.02] active:scale-[0.98]`
+              : "cursor-not-allowed opacity-60";
+            const itemDescription = isRecipeItem
+              ? recipesLoading
+                ? "Comprobando disponibilidad..."
+                : recipeDisabled
+                ? recipesReason ?? "Configura ChatGPT para habilitarlo"
+                : description
+              : description;
+
             return (
               <Card
                 key={id}
-                className={`group cursor-pointer overflow-hidden border-2 ${borderColor} ${hoverBorder} ${glowClass} transition-smooth hover:scale-[1.02] active:scale-[0.98]`}
+                className={`group overflow-hidden border-2 ${borderColor} ${interactiveClasses} transition-smooth`}
                 onClick={handleClick}
+                aria-disabled={itemDisabled}
               >
                 <div className="gradient-holographic absolute inset-0 opacity-0 transition-smooth group-hover:opacity-20 pointer-events-none" />
                 <div className="relative py-5 px-4 text-center pointer-events-none">
                   <div className="mb-2 flex justify-center">
-                    <div className={`rounded-2xl ${iconBg} ${iconHoverBg} p-4 transition-smooth group-hover:text-primary-foreground`}>
+                    <div
+                      className={`rounded-2xl ${iconBg} ${!itemDisabled ? iconHoverBg : ""} p-4 transition-smooth group-hover:text-primary-foreground`}
+                    >
                       <Icon className="h-12 w-12" />
                     </div>
                   </div>
                   <h2 className="mb-1 text-2xl font-bold leading-tight">{title}</h2>
-                  <p className="text-base text-muted-foreground leading-tight">{description}</p>
+                  <p className="text-base text-muted-foreground leading-tight">{itemDescription}</p>
+                  {isRecipeItem && recipesEnabled && recipeModel && (
+                    <div className="mt-2 flex justify-center">
+                      <Badge variant="outline" className="text-xs font-medium">
+                        IA: {recipeModel}
+                      </Badge>
+                    </div>
+                  )}
                 </div>
               </Card>
             );
