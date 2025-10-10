@@ -42,6 +42,19 @@ OVERLAY_ADDED=0
 BOOT_CONFIG_CHANGED=0
 INSTALL_LOG=""
 
+REBOOT_STATE_DIR="/var/lib/bascula"
+REBOOT_FLAG_FILE="${REBOOT_STATE_DIR}/reboot-required"
+REBOOT_REASONS_FILE="${REBOOT_STATE_DIR}/reboot-reasons.txt"
+
+install -d -m 0755 -o root -g root "${REBOOT_STATE_DIR}"
+: > "${REBOOT_REASONS_FILE}" || true
+
+require_reboot() {
+  local reason="$1"
+  touch "${REBOOT_FLAG_FILE}"
+  printf '%s\n' "${reason}" >> "${REBOOT_REASONS_FILE}"
+}
+
 disable_cloud_init() {
   local bootcfg_dir="/boot/firmware"
   local mark_file="${bootcfg_dir}/cloud-init.disabled"
@@ -144,6 +157,7 @@ ensure_enable_uart() {
     if sed -i 's/^\s*enable_uart=.*/enable_uart=1/' "${conf_file}"; then
       log "Actualizado enable_uart=1 en ${conf_file}"
       BOOT_CONFIG_CHANGED=1
+      require_reboot "enable_uart=1 en ${conf_file}"
     else
       warn "No se pudo actualizar enable_uart en ${conf_file}"
     fi
@@ -154,6 +168,7 @@ ensure_enable_uart() {
     } >>"${conf_file}" || warn "No se pudo escribir enable_uart en ${conf_file}"
     log "Añadido enable_uart=1 a ${conf_file}"
     BOOT_CONFIG_CHANGED=1
+    require_reboot "enable_uart=1 en ${conf_file}"
   fi
 }
 
@@ -230,6 +245,7 @@ configure_pi_boot_hardware() {
     printf '%s\n' "${block_end}"
   } >> "${bootcfg}"; then
     BOOT_CONFIG_CHANGED=1
+    require_reboot "configuracion de overlays I2C/I2S/SPI/imx708 (${dac_name})"
   else
     warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
   fi
@@ -427,6 +443,7 @@ ensure_libcamera_ready() {
     log "[inst][info] Aplicado full-upgrade con libcamera"
     if [[ -f /var/run/reboot-required ]]; then
       touch /.needs-reboot-libcamera
+      require_reboot "actualizar libcamera (dist-upgrade)"
       log_warn "Se detectó /var/run/reboot-required tras actualizar libcamera; se recomienda sudo reboot"
     fi
   fi
@@ -1289,7 +1306,11 @@ fi
 # Disable Bluetooth UART
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
   if systemctl list-unit-files | grep -q '^hciuart.service'; then
-    systemctl disable --now hciuart 2>/dev/null || warn "No se pudo deshabilitar hciuart"
+    if systemctl disable --now hciuart 2>/dev/null; then
+      require_reboot "desactivar bluetooth (hciuart)"
+    else
+      warn "No se pudo deshabilitar hciuart"
+    fi
   else
     log "hciuart.service no existe; nada que deshabilitar"
   fi
@@ -1976,7 +1997,8 @@ install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -d -m0755 /run/bascula || true
 # Configurar permisos para nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -o pi -g www-data -m 0770 /run/bascula/captures
+install -d -o pi -g www-data -m 02770 /run/bascula/captures
+chmod g+s /run/bascula/captures || true
 # asegurar que el usuario pi pertenece al grupo www-data
 usermod -aG www-data pi || true
 cat > /etc/nginx/sites-available/bascula <<'EOF'
@@ -2313,7 +2335,8 @@ fi
 
 # Runtime directories for captures served by Nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -o pi -g www-data -m 0770 /run/bascula/captures
+install -d -o pi -g www-data -m 02770 /run/bascula/captures
+chmod g+s /run/bascula/captures || true
 usermod -aG www-data pi || true
 cd "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 
@@ -2375,11 +2398,6 @@ else
 fi
 log "  Servicios habilitados: nginx bascula-miniweb bascula-backend bascula-ui ocr-service"
 log "  Capturas servidas desde: /run/bascula/captures (grupo www-data)"
-if [[ ${BOOT_CONFIG_CHANGED} -eq 1 ]]; then
-  log_warn "  ⚠ Cambios en /boot/firmware/config.txt -> ejecuta 'sudo reboot'"
-else
-  log "  sudo reboot (recomendado tras instalación)"
-fi
 log "Accesos tras el reinicio:"
 log "  http://${IP:-<IP>} o http://localhost"
 log "  Mini-Web -> http://${IP:-<IP>}:8080 (consulta /api/miniweb/pin en AP o en pantalla)"
@@ -2403,6 +2421,33 @@ if command -v ss >/dev/null 2>&1; then
 else
   warn "Herramienta 'ss' no disponible; omitiendo comprobación de puertos"
 fi
+
+if [[ -f "${REBOOT_FLAG_FILE}" && "${HAS_SYSTEMD}" -eq 1 ]]; then
+  if [[ -f "${PROJECT_ROOT}/systemd/bascula-postinstall.service" ]]; then
+    install -m 0755 -o root -g root "${PROJECT_ROOT}/systemd/bascula-postinstall.service" /etc/systemd/system/bascula-postinstall.service
+    if ! systemctl daemon-reload; then
+      warn "systemctl daemon-reload falló al registrar bascula-postinstall.service"
+    fi
+    if ! systemctl enable bascula-postinstall.service; then
+      warn "No se pudo habilitar bascula-postinstall.service"
+    fi
+  else
+    warn "systemd/bascula-postinstall.service no encontrado en el repositorio"
+  fi
+fi
+
+echo "[inst] ============================================"
+if [[ -f "${REBOOT_FLAG_FILE}" ]]; then
+  log_warn "⚠ REINICIO REQUERIDO"
+  if [[ -s "${REBOOT_REASONS_FILE}" ]]; then
+    log_warn "Razones:"
+    sed 's/^/[inst][warn]  - /' "${REBOOT_REASONS_FILE}" || true
+  fi
+  log_warn "Ejecuta: sudo reboot"
+else
+  log "No es necesario reiniciar"
+fi
+echo "[inst] ============================================"
 
 # --- Bascula: instalar/activar services idempotente (sin tocar AP) ---
 install_services() {
@@ -2493,11 +2538,11 @@ fi
 
 if [[ ${OVERLAY_ADDED} -eq 1 && -n "${INSTALL_LOG}" ]]; then
   if grep -q "Overlay añadido" "${INSTALL_LOG}" 2>/dev/null; then
-    echo "[inst][info] Reiniciando para aplicar vc4-kms-v3d-pi5..."
+    echo "[inst][info] Marcando reinicio requerido: vc4-kms-v3d-pi5"
     if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
       systemctl disable bascula-ui.service 2>/dev/null || true
     fi
-    reboot
+    require_reboot "activar vc4-kms-v3d-pi5"
   fi
 fi
 # --- Fin bloque ---

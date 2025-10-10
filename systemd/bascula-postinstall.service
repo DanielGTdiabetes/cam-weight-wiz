@@ -1,0 +1,12 @@
+[Unit]
+Description=Bascula post-install (resume after reboot)
+ConditionPathExists=/var/lib/bascula/reboot-required
+After=network-online.target systemd-tmpfiles-setup.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/bascula/current/scripts/postinstall-resume.sh
+
+[Install]
+WantedBy=multi-user.target
