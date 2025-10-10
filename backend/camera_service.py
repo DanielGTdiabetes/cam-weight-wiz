@@ -35,6 +35,45 @@ except ImportError:  # pragma: no cover - runtime fallback when camera lib missi
     Picamera2 = None  # type: ignore[misc]
 
 
+log = logging.getLogger(__name__)
+
+
+def list_cameras() -> list[Dict[str, Any]]:
+    """Return detected cameras using Picamera2 global information."""
+
+    if Picamera2 is None:  # pragma: no cover - handled on target device
+        return []
+    try:
+        cameras = Picamera2.global_camera_info() or []
+        if not isinstance(cameras, list):  # defensive: unexpected return types
+            return []
+        return cameras
+    except Exception as exc:  # pragma: no cover - hardware specific failure
+        log.warning("global_camera_info() error: %s", exc)
+        return []
+
+
+def wait_for_camera(timeout: float = 5.0, step: float = 0.5) -> list[Dict[str, Any]]:
+    """Poll for camera availability up to ``timeout`` seconds."""
+
+    deadline = time.time() + max(timeout, 0.0)
+    attempts = 0
+    while time.time() < deadline:
+        attempts += 1
+        cameras = list_cameras()
+        if cameras:
+            if attempts > 1:
+                log.debug("Cámara detectada tras %d reintentos", attempts - 1)
+            return cameras
+        if attempts == 1:
+            log.debug("No se detectó cámara, esperando disponibilidad...")
+        else:
+            log.debug("Reintento %d: aún sin cámaras detectadas", attempts)
+        time.sleep(max(step, 0.05))
+    log.warning("No se detectó ninguna cámara tras %.1fs", timeout)
+    return []
+
+
 def _build_transform(rotation: int = 0) -> libcamera.Transform:
     """Return a safe transform without chained multiplications."""
 
@@ -89,6 +128,7 @@ class Picamera2Service:
         self._transform: Optional[LibcameraTransform] = None
         self._warmup_delay = 0.2  # 200 ms para estabilizar tras iniciar la cámara
         self._closed = False
+        self._last_capture_via: str = "picamera2"
         LOG_CAMERA.debug("Picamera2Service inicializado")
 
     # ---------- Singleton helpers ----------
@@ -119,6 +159,10 @@ class Picamera2Service:
                 temp_camera: Optional[Picamera2] = None
                 try:
                     self._release_camera()
+                    cameras = wait_for_camera()
+                    if not cameras:
+                        raise CameraUnavailableError("No camera detected")
+                    LOG_CAMERA.debug("Cámaras detectadas: %s", len(cameras))
                     temp_camera = Picamera2()
                     self._properties = dict(getattr(temp_camera, "camera_properties", {}) or {})
                     rotation = self._resolve_rotation(self._properties.get("Rotation"))
@@ -141,6 +185,8 @@ class Picamera2Service:
                         exc_info=False,
                     )
                     self._release_camera()
+                    if isinstance(exc, CameraUnavailableError):
+                        break
                 except Exception as exc:  # pragma: no cover - hardware specific failure
                     last_error = exc
                     LOG_CAMERA.exception("Error inesperado al inicializar Picamera2: %s", exc)
@@ -230,6 +276,35 @@ class Picamera2Service:
         return buffer.getvalue()
 
     @staticmethod
+    def _capture_v4l2_frame() -> Optional[bytes]:
+        """Fallback capture using OpenCV if available and /dev/video0 exists."""
+
+        device = Path("/dev/video0")
+        if not device.exists():
+            return None
+        try:  # pragma: no cover - optional dependency on target device
+            import cv2  # type: ignore[import]
+        except Exception:
+            LOG_CAMERA.debug("OpenCV no disponible para captura de respaldo", exc_info=True)
+            return None
+        capture = cv2.VideoCapture(0)
+        try:
+            if not capture.isOpened():
+                LOG_CAMERA.debug("No se pudo abrir /dev/video0 mediante OpenCV")
+                return None
+            ok, frame = capture.read()
+        finally:
+            capture.release()
+        if not ok or frame is None:
+            LOG_CAMERA.debug("OpenCV no devolvió un frame válido")
+            return None
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not ok:
+            LOG_CAMERA.debug("OpenCV no pudo codificar JPEG del frame")
+            return None
+        return encoded.tobytes()
+
+    @staticmethod
     def _is_busy_error(exc: BaseException) -> bool:
         if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.EBUSY:
             return True
@@ -284,23 +359,41 @@ class Picamera2Service:
         deadline = time.monotonic() + max(timeout_ms, 1) / 1000.0
         attempts = 0
         last_error: Optional[BaseException] = None
+        fallback_attempted = False
         while attempts < 3:
             attempts += 1
             with self._camera_lock:
                 try:
                     camera = self._prepare(full)
                     data = self._perform_capture(camera)
+                    self._last_capture_via = "picamera2"
                     LOG_CAMERA.info(
                         "Captura completada (%s) - %d bytes", self._config_key(full), len(data)
                     )
                     return data
                 except CameraUnavailableError as exc:
                     last_error = exc
-                    LOG_CAMERA.warning(
-                        "Cámara no disponible en captura (intento %d/3): %s",
-                        attempts,
-                        exc,
-                    )
+                    if not fallback_attempted:
+                        fallback_attempted = True
+                        LOG_CAMERA.warning(
+                            "Picamera2 no disponible, intentando respaldo OpenCV/V4L2: %s",
+                            exc,
+                        )
+                        data = self._capture_v4l2_frame()
+                        if data:
+                            self._last_capture_via = "opencv-v4l2"
+                            LOG_CAMERA.info(
+                                "Captura completada mediante respaldo OpenCV/V4L2 - %d bytes",
+                                len(data),
+                            )
+                            return data
+                        LOG_CAMERA.debug("Respaldo OpenCV/V4L2 no produjo imagen")
+                    else:
+                        LOG_CAMERA.debug(
+                            "Cámara no disponible en captura (intento %d/3): %s",
+                            attempts,
+                            exc,
+                        )
                     time.sleep(0.3)
                     continue
                 except Exception as exc:
@@ -332,7 +425,9 @@ class Picamera2Service:
     def capture_jpeg(self, path: str, full: bool = False, timeout_ms: int = 2000) -> Dict[str, Any]:
         target = Path(path)
         data = self.capture_bytes(full=full, timeout_ms=timeout_ms)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        if not data:
+            raise CameraOperationError("No se recibió ningún frame de la cámara")
+        self._ensure_capture_directory(target)
         target.write_bytes(data)
         try:
             shutil.chown(target, group="www-data")
@@ -344,7 +439,30 @@ class Picamera2Service:
             os.chmod(target, 0o660)  # rw-rw----
         except Exception:
             LOG_CAMERA.debug("No se pudo ajustar chmod 660 a %s", target, exc_info=True)
-        return {"ok": True, "path": str(target), "full": full, "size": len(data)}
+        return {
+            "ok": True,
+            "path": str(target),
+            "full": full,
+            "size": len(data),
+            "via": self._last_capture_via,
+        }
+
+    def _ensure_capture_directory(self, target: Path) -> None:
+        directory = target.parent
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            LOG_CAMERA.debug("No se pudo crear directorio de capturas %s", directory, exc_info=True)
+        try:
+            shutil.chown(directory, group="www-data")
+        except LookupError:
+            LOG_CAMERA.debug("Grupo www-data inexistente al ajustar %s", directory, exc_info=True)
+        except Exception:
+            LOG_CAMERA.debug("No se pudo ajustar grupo www-data a %s", directory, exc_info=True)
+        try:
+            os.chmod(directory, 0o2770)
+        except Exception:
+            LOG_CAMERA.debug("No se pudo ajustar permisos 02770 en %s", directory, exc_info=True)
 
     def close(self) -> None:
         with self._camera_lock:
