@@ -168,20 +168,33 @@ ensure_python_venv() {
   pip uninstall -y numpy simplejpeg picamera2 || true
   rm -rf "${venv_dir}/lib/python3.11/site-packages"/{numpy*,simplejpeg*,picamera2*} || true
   pip install --upgrade pip wheel
+  pip install \
+    "uvicorn[standard]" \
+    "fastapi>=0.115" \
+    "starlette>=0.38" \
+    "click>=8.1" \
+    "httpx==0.28.1" \
+    "httpcore>=1.0.0,<2.0.0"
   pip install -r "${CURRENT_LINK}/requirements.txt" --no-deps
   if [[ -f "${CURRENT_LINK}/requirements-voice.txt" ]]; then
     pip install -r "${CURRENT_LINK}/requirements-voice.txt" --no-deps
   fi
   python - <<'PY'
-import importlib, sys
-ok = True
-for m in ("numpy", "simplejpeg", "picamera2"):
-    p = importlib.import_module(m).__file__
-    print(m, "=>", p)
-    if "/usr/lib/python3/dist-packages/" not in p:
-        ok = False
-        print("ERROR:", m, "no viene de APT")
-sys.exit(0 if ok else 1)
+import importlib
+import sys
+
+apt_modules = ("numpy", "simplejpeg", "picamera2")
+for name in apt_modules:
+    module = importlib.import_module(name)
+    path = getattr(module, "__file__", "")
+    print(name, "=>", path)
+    if "/usr/lib/python3/dist-packages/" not in str(path):
+        print("ERROR:", name, "no viene de APT")
+        sys.exit(1)
+
+for name in ("uvicorn", "fastapi", "starlette", "click", "httpx", "httpcore"):
+    importlib.import_module(name)
+print("venv deps OK")
 PY
   deactivate || true
 }
@@ -300,9 +313,13 @@ EOF
 }
 
 ensure_capture_dirs() {
-  install -d -m 0755 -o "${DEFAULT_USER}" -g "${WWW_GROUP}" /run/bascula
+  install -d -m 0775 -o "${DEFAULT_USER}" -g "${WWW_GROUP}" /run/bascula
   install -d -m 02770 -o "${DEFAULT_USER}" -g "${WWW_GROUP}" /run/bascula/captures
   chmod g+s /run/bascula/captures
+}
+
+ensure_log_dir() {
+  install -d -m 0755 -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" /var/log/bascula
 }
 
 install_tmpfiles_config() {
@@ -403,12 +420,12 @@ main() {
 
   ensure_packages \
     python3 python3-venv python3-pip python3-dev \
+    python3-numpy python3-simplejpeg python3-picamera2 \
+    libzbar0 libcap-dev \
     git rsync curl jq nginx \
     alsa-utils libcamera-apps \
     xserver-xorg xinit chromium-browser matchbox-window-manager \
     fonts-dejavu-core
-
-  DEBIAN_FRONTEND=noninteractive apt-get install -y python3-numpy python3-simplejpeg python3-picamera2 libcap-dev
 
   ensure_boot_overlays || true
 
@@ -433,6 +450,7 @@ main() {
   install_asound_conf
   install_tmpfiles_config
   systemd-tmpfiles --create "${TMPFILES_DEST}/bascula.conf"
+  ensure_log_dir
   ensure_capture_dirs
   install_nginx_site
   install_systemd_units

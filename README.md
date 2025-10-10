@@ -34,11 +34,11 @@ Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 El instalador crea una estructura tipo OTA y deja los servicios listos para producción:
 
 - Provisiona `/opt/bascula/releases/<timestamp>` con el contenido del repositorio y apunta `/opt/bascula/current` al release activo. 【F:scripts/install-all.sh†L57-L130】
-- Instala dependencias del sistema (libcamera/picamera2, Chromium kiosk, nginx, ALSA, etc.) sólo si faltan. 【F:scripts/install-all.sh†L75-L96】【F:scripts/install-all.sh†L391-L396】
+- Instala dependencias del sistema (libcamera/picamera2, Chromium kiosk, nginx, ALSA, libzbar0, herramientas básicas) sólo si faltan. 【F:scripts/install-all.sh†L75-L103】【F:scripts/install-all.sh†L397-L406】
 - Fuerza los overlays requeridos en `/boot/firmware/config.txt` (`vc4-kms-v3d-pi5`, `disable-bt`, `hifiberry-dac`, `enable_uart=1`). Si alguno se añade, marca que es necesario reiniciar. 【F:scripts/install-all.sh†L120-L148】
 - Crea la virtualenv en `/opt/bascula/current/.venv` compartiendo los paquetes del sistema y sólo instala nuestras dependencias vía pip (sin resolver dependencias). 【F:scripts/install-all.sh†L150-L205】
 - Genera `/etc/asound.conf` con alias robustos (`bascula_out` → HiFiBerry si está disponible, fallback a HDMI; `bascula_mix_in` con `dsnoop` para el micro USB). 【F:scripts/install-all.sh†L192-L244】
-- Asegura `/run/bascula/captures` con permisos `drwxrws---` y bit `g+s`, además del archivo tmpfiles correspondiente. 【F:scripts/install-all.sh†L246-L267】
+- Asegura `/run/bascula/captures` con permisos `drwxrws---`, crea `/var/log/bascula` y despliega el archivo tmpfiles correspondiente (`/run/bascula` con `0775`). 【F:scripts/install-all.sh†L246-L272】【F:systemd/tmpfiles.d/bascula.conf†L1-L2】
 - Configura nginx para servir `/captures/` únicamente en loopback y reinicia el servicio tras validar `nginx -t`. 【F:scripts/install-all.sh†L336-L367】
 - Instala y habilita `bascula-miniweb.service`, `bascula-backend.service`, `bascula-health-wait.service` y `bascula-ui.service`. 【F:scripts/install-all.sh†L318-L334】【F:systemd/bascula-miniweb.service†L1-L21】【F:systemd/bascula-backend.service†L1-L18】【F:systemd/bascula-health-wait.service†L1-L13】【F:systemd/bascula-ui.service†L1-L27】
 - Ejecuta verificaciones de salud (`systemd-analyze verify`, `curl 127.0.0.1:8080`, `python -c 'import picamera2'`, `arecord`, `speaker-test`). Si el script detecta que hay que reiniciar por cambios en `config.txt`, pospone las pruebas de audio y finaliza exitosamente recordando que falta el reboot. 【F:scripts/install-all.sh†L369-L381】【F:scripts/install-all.sh†L425-L437】

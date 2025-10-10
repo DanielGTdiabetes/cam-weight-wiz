@@ -2542,14 +2542,20 @@ def _get_server_bind(argv: Optional[List[str]] = None) -> tuple[str, int]:
     return args.host, int(args.port)
 
 
-if __name__ == "__main__":
+def main(argv: Optional[List[str]] = None) -> None:
+    """Entry point executed by ``python -m backend.main``."""
     import uvicorn
 
-    bind_host, bind_port = _get_server_bind()
+    bind_host, bind_port = _get_server_bind(argv)
     uvicorn.run(
-        app,
+        "backend.asgi:app",
         host=bind_host,
         port=bind_port,
+        reload=False,
         log_level="info",
         factory=False,
     )
+
+
+if __name__ == "__main__":
+    main()

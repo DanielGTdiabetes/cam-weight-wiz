@@ -5,8 +5,7 @@ Wants=bascula-miniweb.service
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'for i in $(seq 1 40); do curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true" && exit 0; sleep 1; done; exit 1'
-RemainAfterExit=true
+ExecStart=/bin/sh -c 'i=0; until [ "$i" -ge 120 ]; do out="$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || true)"; echo "$out" | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true" && exit 0; sleep 1; i=$((i+1)); done; exit 1'
 
 [Install]
 WantedBy=multi-user.target

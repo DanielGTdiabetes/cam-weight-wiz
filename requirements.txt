@@ -1,8 +1,11 @@
 # Dependencias críticas para los servicios Python de Báscula
 # En Raspberry Pi (Bookworm) estos vienen de APT, no pip.
+# No añadir numpy/simplejpeg/picamera2 aquí: se proporcionan vía paquetes del sistema.
 aiofiles
-fastapi
-httpx
+click>=8.1
+fastapi>=0.115
+httpcore>=1.0.0,<2.0.0
+httpx==0.28.1
 opencv-python
 piper-tts
 pillow
@@ -15,6 +18,7 @@ rapidfuzz>=3.0,<4.0
 rapidocr-onnxruntime
 requests
 sounddevice
+starlette>=0.38
 uvicorn[standard]
 vosk
 websockets
