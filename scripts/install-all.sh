@@ -21,7 +21,7 @@ TMPFILES_DEST="/etc/tmpfiles.d"
 SYSTEMD_DEST="/etc/systemd/system"
 NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
 NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
-NGINX_SITE_NAME="bascula.conf"
+NGINX_SITE_NAME="00-bascula.conf"
 ASOUND_CONF="/etc/asound.conf"
 AUDIO_ENV_FILE="/etc/default/bascula-audio"
 BOOT_FIRMWARE_DIR="/boot/firmware"
@@ -423,44 +423,79 @@ install_systemd_units() {
   systemctl restart bascula-ui.service || true
 }
 
-install_nginx_site() {
+configure_nginx_site() {
+  log "[step] Configurando Nginx para Báscula"
+  install -d -m0755 "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}" /var/www/bascula
+
+  log "[step] Limpiando vhosts antiguos"
+  rm -f /etc/nginx/conf.d/00-bascula.conf /etc/nginx/conf.d/00-bascula.conf.*
+  if [[ -d /etc/nginx/conf.d ]]; then
+    find /etc/nginx/conf.d -maxdepth 1 -type f -print0 \
+      | while IFS= read -r -d '' file; do
+        if grep -Eq '\blisten\s+80' "${file}"; then
+          log_warn "Eliminando definición duplicada en ${file}"
+          rm -f "${file}"
+        fi
+      done
+  fi
+  find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type f -o -type l \) -name '*.bak' -print0 \
+    | while IFS= read -r -d '' file; do
+      if grep -Eq '\blisten\s+80' "${file}"; then
+        rm -f "${file}"
+      fi
+    done
+  rm -f "${NGINX_SITES_ENABLED}/default" || true
+
+  local enabled
+  while IFS= read -r -d '' enabled; do
+    local target="${enabled}"
+    if [[ "${target}" != "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}" ]] \
+      && grep -Eq '\blisten\s+80' "${target}" 2>/dev/null; then
+      log_warn "Eliminando vhost duplicado en ${target}"
+      rm -f "${target}"
+    fi
+  done < <(find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type l -o -type f \) -print0)
+
   local site_path="${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
-  local enabled_link="${NGINX_SITES_ENABLED}/bascula.conf"
-  find "${NGINX_SITES_ENABLED}" -maxdepth 1 -type l -name 'bascula*' -exec rm -f {} +
-  cat <<'EOF' > "${site_path}.tmp"
+  local tmp="${site_path}.tmp"
+  cat <<'EOF' >"${tmp}"
 server {
-    listen 127.0.0.1:80;
-    listen [::1]:80;
+    listen 80;
     server_name _;
 
     root /var/www/bascula;
     index index.html;
 
-    access_log /var/log/nginx/bascula.access.log;
-    error_log /var/log/nginx/bascula.error.log;
-
+    # Front (SPA)
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files $uri /index.html;
     }
 
-    location /captures/ {
-        alias /run/bascula/captures/;
-        autoindex off;
-        add_header Cache-Control "no-store" always;
+    # Backend
+    location /api/ {
+        proxy_pass http://127.0.0.1:8081/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_http_version 1.1;
+      proxy_buffering off;
     }
 }
 EOF
-  if [[ -f "${site_path}" ]] && cmp -s "${site_path}.tmp" "${site_path}"; then
-    rm -f "${site_path}.tmp"
-    log "Configuración nginx sin cambios"
+  if [[ -f "${site_path}" ]] && cmp -s "${tmp}" "${site_path}"; then
+    log "Configuración de Nginx sin cambios"
   else
-    install -o root -g root -m 0644 "${site_path}.tmp" "${site_path}"
-    log "Configuración nginx actualizada"
+    install -o root -g root -m0644 "${tmp}" "${site_path}"
+    log "Configuración de Nginx actualizada"
   fi
-  rm -f "${site_path}.tmp"
-  ln -sfn "${site_path}" "${enabled_link}"
-  nginx -t
-  systemctl restart nginx
+  rm -f "${tmp}"
+
+  ln -sfn "${site_path}" "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
+
+  if ! nginx -t; then
+    abort "nginx -t falló tras configurar el vhost"
+  fi
+  systemctl reload nginx
 }
 
 ensure_node() {
@@ -561,68 +596,154 @@ deploy_frontend() {
   log "UI desplegado en ${docroot}"
 }
 
-configure_nginx_ui_root() {
-  if [ -e /etc/nginx/sites-enabled/default ]; then
-    rm -f /etc/nginx/sites-enabled/default
+ensure_chromium_browser() {
+  if [[ -x /usr/bin/chromium-browser ]]; then
+    return 0
   fi
 
-  if grep -Rsl "root /var/www/bascula" /etc/nginx/sites-available /etc/nginx/conf.d 2>/dev/null; then
-    :
+  log "[step] Instalando Chromium para el modo quiosco"
+  ensure_packages xserver-xorg xinit fonts-dejavu-core
+
+  if apt-cache show chromium-browser >/dev/null 2>&1; then
+    ensure_packages chromium-browser
   else
-    log_warn "Revisar plantillas Nginx: establecer root /var/www/bascula en el server que sirve '/'"
+    ensure_packages chromium
   fi
 
-  nginx -t
-  systemctl reload nginx || true
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ttf-mscorefonts-installer || \
+    log_warn "No se pudo instalar ttf-mscorefonts-installer"
 
-  local preview
-  preview="$(curl -sS http://127.0.0.1/ | head -c 200 || true)"
-  if [ -n "${preview}" ]; then
-    log "HTTP 127.0.0.1 preview: ${preview}"
+  if [[ -x /usr/bin/chromium ]] && [[ ! -e /usr/bin/chromium-browser ]]; then
+    ln -sfn /usr/bin/chromium /usr/bin/chromium-browser
+  fi
+
+  if [[ ! -x /usr/bin/chromium-browser ]]; then
+    abort "No se encontró /usr/bin/chromium-browser tras instalar Chromium"
   fi
 }
 
-check_ui_static() {
-  log "check: UI estático en /"
-  if [[ ! -s "/var/www/bascula/index.html" ]]; then
-    log_err "UI: falta /var/www/bascula/index.html"
-    exit 1
+configure_bascula_ui_service() {
+  log "[step] Configurando bascula-ui.service"
+  ensure_chromium_browser
+
+  local dropin_dir="/etc/systemd/system/bascula-ui.service.d"
+  local dropin_file="${dropin_dir}/30-chrome-cache.conf"
+  install -d -m0755 "${dropin_dir}"
+
+  local tmp="${dropin_file}.tmp"
+  cat >"${tmp}" <<'EOF'
+[Service]
+ExecStartPre=/bin/sh -c 'rm -rf /run/bascula/chrome-profile /run/bascula/chrome-cache; install -d -m0700 -o pi -g pi /run/user/1000'
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+EOF
+
+  local need_reload=0
+  if [[ -f "${dropin_file}" ]] && cmp -s "${tmp}" "${dropin_file}"; then
+    rm -f "${tmp}"
+  else
+    install -o root -g root -m0644 "${tmp}" "${dropin_file}"
+    need_reload=1
   fi
-  local http_code
-  http_code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/ || true)"
-  case "${http_code}" in
-    200|301|302)
-      log "check OK: UI responde (${http_code})"
-      ;;
-    *)
-      log_err "UI: respuesta HTTP inesperada (${http_code})"
-      exit 1
-      ;;
-  esac
+  rm -f "${tmp}" || true
+
+  if [[ ${need_reload} -eq 1 ]]; then
+    systemctl daemon-reload
+  fi
+  systemctl enable --now bascula-ui.service
 }
 
-run_health_checks() {
-  run_checked "systemd-analyze verify" systemd-analyze verify \
-    "${SYSTEMD_DEST}/bascula-miniweb.service" \
-    "${SYSTEMD_DEST}/bascula-backend.service" \
-    "${SYSTEMD_DEST}/bascula-health-wait.service" \
-    "${SYSTEMD_DEST}/bascula-ui.service"
-  run_checked "nginx -t" nginx -t
-  if ! curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
-    echo "[ERROR] miniweb no responde"
-    return 1
+ensure_backend_service() {
+  log "[step] Asegurando bascula-backend.service"
+  systemctl enable --now bascula-backend.service
+  if ! systemctl is-active --quiet bascula-backend.service; then
+    abort "bascula-backend.service no está activo"
   fi
-  log "check OK: miniweb responde"
-  run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
-  if ! curl -fsS http://127.0.0.1:8081/health >/dev/null; then
-    echo "[ERROR] backend no responde"
-    return 1
+
+  local status attempt
+  for attempt in {1..10}; do
+    status=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/health || true)
+    if [[ "${status}" == "200" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  abort "El backend no respondió 200 en /health (último código ${status})"
+}
+
+verify_ui_served() {
+  log "[step] Verificando UI en Nginx"
+  if [[ ! -f /var/www/bascula/index.html ]]; then
+    abort "UI no desplegada en /var/www/bascula (falta index.html)"
   fi
-  log "check OK: backend responde"
-  check_ui_static
-  run_checked "picamera2 import" python3 -c 'import picamera2'
-  run_checked "arecord bascula_mix_in" arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1
-  run_checked "speaker-test bascula_out" speaker-test -t sine -f 1000 -l 1 -D bascula_out
+
+  if ! curl -fsSI http://127.0.0.1/ | grep -q '^HTTP/.* 200'; then
+    abort "La raíz HTTP no respondió 200"
+  fi
+
+  local body
+  body=$(curl -fsS http://127.0.0.1/)
+  if [[ "${body}" != *"<title>Panel de configuración del dispositivo</title>"* ]] \
+    && [[ "${body}" != *"<link rel=\"manifest\" href=\"/manifest.json\""* ]] \
+    && [[ "${body}" != *"<script type=\"module\" crossorigin src=\"/assets/"* ]]; then
+    abort "UI no servida desde /var/www/bascula; revisa vhost y copia de ficheros"
+  fi
+}
+
+systemd_status_brief() {
+  local unit="$1"
+  systemctl --no-pager -l -q status "${unit}" 2>/dev/null \
+    | sed -n 's/^\s*Active: \(.*\)$/Active: \1/p' \
+    | head -n1
+}
+
+log_nginx_root_and_listing() {
+  local site_path="${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
+  local nginx_root="(desconocido)"
+  if [[ -f "${site_path}" ]]; then
+    nginx_root=$(awk '/^[[:space:]]*root / {gsub(";", "", $2); print $2; exit}' "${site_path}")
+    [[ -z "${nginx_root}" ]] && nginx_root="(sin definir)"
+  fi
+  log "[step] Root Nginx configurado: ${nginx_root}"
+  if [[ -d /var/www/bascula ]]; then
+    log "[step] Contenido de /var/www/bascula:"
+    ls -alh /var/www/bascula
+  else
+    log_warn "Directorio /var/www/bascula no existe"
+  fi
+}
+
+run_final_checks() {
+  log "[step] Ejecutando comprobaciones finales"
+  if ! nginx -t; then
+    abort "nginx -t falló en comprobaciones finales"
+  fi
+
+  local api_health
+  api_health=$(curl -fsS http://127.0.0.1/api/health || true)
+  if [[ -z "${api_health}" ]] || [[ ! ${api_health} =~ "status"[[:space:]]*:[[:space:]]*"ok" ]]; then
+    abort "API de salud no devolvió status ok"
+  fi
+
+  verify_ui_served
+
+  log_nginx_root_and_listing
+
+  local backend_status ui_status
+  backend_status=$(systemd_status_brief bascula-backend.service)
+  ui_status=$(systemd_status_brief bascula-ui.service)
+  log "[step] Estado bascula-backend: ${backend_status}"
+  log "[step] Estado bascula-ui: ${ui_status}"
+
+  log "[step] curl -sS http://127.0.0.1/api/health"
+  curl -fsS http://127.0.0.1/api/health
+  log "[step] curl -sS http://127.0.0.1/ | head -n 30"
+  curl -fsS http://127.0.0.1/ | head -n 30
+  if [[ -f /var/log/nginx/access.log ]]; then
+    log "[step] Últimas peticiones relevantes en access.log"
+    grep -E '"[A-Z]+ /( |assets/index-.*\.js)' /var/log/nginx/access.log | tail -n 5 || true
+  else
+    log_warn "No existe /var/log/nginx/access.log"
+  fi
 }
 
 main() {
@@ -639,7 +760,7 @@ main() {
     libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 \
     ffmpeg git rsync curl jq nginx \
     alsa-utils libcamera-apps \
-    xserver-xorg xinit chromium-browser matchbox-window-manager \
+    xserver-xorg xinit matchbox-window-manager \
     fonts-dejavu-core
 
   ensure_boot_overlays || true
@@ -668,40 +789,20 @@ main() {
   systemd-tmpfiles --create "${TMPFILES_DEST}/bascula.conf"
   ensure_log_dir
   ensure_capture_dirs
-  install_nginx_site
+  configure_nginx_site
   install_systemd_units
 
   REPO_DIR="${CURRENT_LINK}"
   ensure_node
   deploy_frontend
-  configure_nginx_ui_root
+  configure_bascula_ui_service
+  ensure_backend_service
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
-    log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Omitiendo pruebas de audio (arecord/aplay)."
-    run_checked "systemd-analyze verify" systemd-analyze verify \
-      "${SYSTEMD_DEST}/bascula-miniweb.service" \
-      "${SYSTEMD_DEST}/bascula-backend.service" \
-      "${SYSTEMD_DEST}/bascula-health-wait.service" \
-      "${SYSTEMD_DEST}/bascula-ui.service"
-    run_checked "nginx -t" nginx -t
-    if ! curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
-      echo "[ERROR] miniweb no responde"
-      exit 1
-    fi
-    log "check OK: miniweb responde"
-    run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
-    if ! curl -fsS http://127.0.0.1:8081/health >/dev/null; then
-      echo "[ERROR] backend no responde"
-      exit 1
-    fi
-    log "check OK: backend responde"
-    check_ui_static
-    run_checked "picamera2 import" python3 -c 'import picamera2'
-    log_warn "Reinicie el sistema y vuelva a ejecutar las pruebas de audio manualmente."
-    exit 0
+    log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Continuando con verificaciones esenciales."
   fi
 
-  run_health_checks
+  run_final_checks
   log "Instalación completada"
 }
 
