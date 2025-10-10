@@ -6,6 +6,7 @@ import errno
 import io
 import logging
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -133,10 +134,11 @@ class Picamera2Service:
                     return temp_camera
                 except (RuntimeError, CameraUnavailableError) as exc:
                     last_error = exc
-                    LOG_CAMERA.exception(
+                    LOG_CAMERA.warning(
                         "Fallo al inicializar Picamera2 (intento %d): %s",
                         attempts,
                         exc,
+                        exc_info=False,
                     )
                     self._release_camera()
                 except Exception as exc:  # pragma: no cover - hardware specific failure
@@ -269,7 +271,11 @@ class Picamera2Service:
                 snapshot = dict(self._properties)
                 return snapshot
             except CameraUnavailableError as exc:
-                LOG_CAMERA.error("No se detectó cámara al solicitar información: %s", exc)
+                LOG_CAMERA.warning(
+                    "No se detectó cámara al solicitar información: %s",
+                    exc,
+                    exc_info=False,
+                )
                 raise
             finally:
                 self._release_camera()
@@ -328,6 +334,12 @@ class Picamera2Service:
         data = self.capture_bytes(full=full, timeout_ms=timeout_ms)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+        try:
+            shutil.chown(target, group="www-data")
+        except LookupError:
+            LOG_CAMERA.debug("Grupo www-data inexistente al ajustar %s", target, exc_info=True)
+        except Exception:
+            LOG_CAMERA.debug("No se pudo ajustar grupo www-data a %s", target, exc_info=True)
         try:
             os.chmod(target, 0o660)  # rw-rw----
         except Exception:

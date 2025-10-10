@@ -1,7 +1,8 @@
 [Unit]
 Description=Bascula Digital Pro - UI (Chromium kiosk)
-After=graphical.target bascula-miniweb.service systemd-user-sessions.service network-online.target sound.target
-Wants=graphical.target bascula-miniweb.service network-online.target sound.target
+After=systemd-user-sessions.service network-online.target sound.target bascula-miniweb.service
+Wants=network-online.target sound.target bascula-miniweb.service
+Requires=bascula-miniweb.service
 Conflicts=getty@tty1.service
 StartLimitIntervalSec=0
 
@@ -14,16 +15,17 @@ Environment=HOME=/home/pi
 Environment=USER=pi
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+StandardOutput=journal
+StandardError=journal
+PermissionsStartOnly=yes
 StandardInput=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
-StandardOutput=journal
-StandardError=journal
-PermissionsStartOnly=yes
+ExecStartPre=/bin/sh -c 'install -d -m0700 -o pi -g pi /run/user/1000 && install -d -m0755 -o pi -g pi /var/log/bascula && install -o pi -g pi -m0644 /dev/null /var/log/bascula/ui.log && rm -f /tmp/.X0-lock'
 ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
 Restart=always
-RestartSec=2
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target

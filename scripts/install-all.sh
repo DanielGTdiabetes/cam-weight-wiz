@@ -267,68 +267,49 @@ configure_hifiberry_audio() {
   local tmp_conf
   tmp_conf="$(mktemp)"
   cat <<'EOF' >"${tmp_conf}"
-# === Entrada (MIC) ===
-pcm.bascula_mix_in {
-    type plug
-    slave.pcm "softvol_mic"
-}
-
-pcm.softvol_mic {
-    type softvol
-    slave.pcm "dsnoop_mic"
-    control { name "SoftMicGain"; card 0; }
-    min_dB -20.0
-    max_dB +30.0
-}
-
-pcm.dsnoop_mic {
-    type dsnoop
-    ipc_key 2048
-    slave {
-        pcm "hw:0,0"
-        channels 1
-        rate 48000
-        format S16_LE
-        period_time 0
-        buffer_time 0
-        period_size 1024
-        buffer_size 8192
-    }
-}
-
-# === Salida (SPEAKER) ===
 pcm.bascula_out {
-    type plug
-    slave.pcm "softvol_out"
+  type softvol
+  slave.pcm "hw:1,0"
+  control { name "SoftSpeaker"; card 1 }
+  min_dB -51.0
+  max_dB 0.0
 }
 
-pcm.softvol_out {
-    type softvol
-    slave.pcm "dmix_out"
-    control { name "SoftOutVol"; card 0; }
-    min_dB -20.0
-    max_dB +10.0
-}
-
-pcm.dmix_out {
-    type dmix
-    ipc_key 4096
-    slave {
-        pcm "hw:0,0"
-        channels 2
-        rate 48000
-        format S16_LE
-        period_time 0
-        buffer_time 0
-        period_size 1024
-        buffer_size 8192
-    }
+pcm.bascula_mix_in {
+  type dsnoop
+  ipc_key 55555
+  slave {
+    pcm "hw:2,0"
+    channels 1
+    rate 16000
+    format S16_LE
+  }
 }
 EOF
 
-  if [[ ! -f "${asound_conf}" ]] || ! cmp -s "${tmp_conf}" "${asound_conf}"; then
+  local had_invalid=0
+  if [[ -f "${asound_conf}" ]]; then
+    if grep -qE 'max_dB \+[0-9]+' "${asound_conf}"; then
+      had_invalid=1
+    fi
+  fi
+
+  local needs_update=0
+  if [[ ! -f "${asound_conf}" ]]; then
+    needs_update=1
+  elif [[ "${had_invalid}" -eq 1 ]]; then
+    needs_update=1
+  elif ! cmp -s "${tmp_conf}" "${asound_conf}"; then
+    needs_update=1
+  fi
+
+  if [[ "${needs_update}" -eq 1 ]]; then
     install -m 0644 "${tmp_conf}" "${asound_conf}"
     log "✓ /etc/asound.conf actualizado"
+    if [[ "${had_invalid}" -eq 1 ]]; then
+      warn "Perfil ALSA antiguo reemplazado; se requiere reinicio para aplicar"
+      require_reboot "Actualizar /etc/asound.conf (softvol válido)"
+    fi
   else
     log "✓ /etc/asound.conf sin cambios"
   fi
@@ -345,15 +326,15 @@ EOF
   fi
 
   if command -v arecord >/dev/null 2>&1; then
-    try_or_warn "arecord bascula_mix_in 48k" \
-      "timeout 8 arecord -q -D bascula_mix_in -t raw -f S16_LE -r 48000 -c 1 -d 1 /dev/null"
+    try_or_warn "arecord bascula_mix_in 16k" \
+      "timeout 8 arecord -q -D bascula_mix_in -t raw -f S16_LE -r 16000 -c 1 -d 1 /dev/null"
   else
     log_warn "arecord no disponible; omitiendo prueba de entrada"
   fi
 
   if command -v speaker-test >/dev/null 2>&1; then
     try_or_warn "speaker-test bascula_out" \
-      "timeout 8 speaker-test -D bascula_out -c 2 -t sine -l 1"
+      "timeout 8 speaker-test -D bascula_out -l 1"
   else
     log_warn "speaker-test no disponible; omitiendo prueba de salida"
   fi
@@ -1744,6 +1725,16 @@ fi
 chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}"
 log "✓ Estructura OTA configurada"
 
+POSTINSTALL_SRC="${PROJECT_ROOT}/scripts/postinstall-resume.sh"
+POSTINSTALL_DST="${BASCULA_CURRENT_LINK}/scripts/postinstall-resume.sh"
+if [[ -f "${POSTINSTALL_SRC}" ]]; then
+  install -D -m 0755 "${POSTINSTALL_SRC}" "${POSTINSTALL_DST}"
+  chown "${TARGET_USER}:${TARGET_GROUP}" "${POSTINSTALL_DST}" || true
+  log "✓ Script postinstall-resume desplegado"
+else
+  warn "scripts/postinstall-resume.sh no encontrado en el repositorio"
+fi
+
 # Setup Python virtual environment
 log "[12/20] Preparando entorno Python (.venv)..."
 cd "${BASCULA_CURRENT_LINK}"
@@ -1994,6 +1985,7 @@ else
 fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
+install -d -m 0755 /etc/nginx/bascula
 install -d -m0755 /run/bascula || true
 # Configurar permisos para nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
@@ -2001,6 +1993,21 @@ install -d -o pi -g www-data -m 02770 /run/bascula/captures
 chmod g+s /run/bascula/captures || true
 # asegurar que el usuario pi pertenece al grupo www-data
 usermod -aG www-data pi || true
+
+CAPTURES_ACL_FILE="/etc/nginx/bascula/captures-acl.conf"
+if [[ "${BASCULA_EXPOSE_CAPTURES:-0}" == "1" ]]; then
+  cat > "${CAPTURES_ACL_FILE}" <<'EOF'
+# WARNING: exposed to LAN
+allow all;
+EOF
+  log_warn "Capturas expuestas en LAN (BASCULA_EXPOSE_CAPTURES=1)"
+else
+  cat > "${CAPTURES_ACL_FILE}" <<'EOF'
+allow 127.0.0.1;
+allow ::1;
+deny all;
+EOF
+fi
 cat > /etc/nginx/sites-available/bascula <<'EOF'
 server {
     listen 80 default_server;
@@ -2061,10 +2068,10 @@ server {
     }
 
     # Exponer capturas de la cámara
-    location ^~ /captures/ {
+    location /captures/ {
         alias /run/bascula/captures/;
+        include /etc/nginx/bascula/captures-acl.conf;
         autoindex off;
-        try_files $uri =404;
         add_header Cache-Control "no-store";
     }
 }
@@ -2261,6 +2268,20 @@ cat > /etc/chromium/policies/managed/bascula_policy.json <<'EOF'
 EOF
 log "✓ Políticas de Chromium configuradas"
 
+# Postinstall resume service (disponible tras copiar script)
+POSTINSTALL_UNIT_SRC="${PROJECT_ROOT}/systemd/bascula-postinstall.service"
+if [[ -f "${POSTINSTALL_UNIT_SRC}" ]]; then
+  install -m 0644 "${POSTINSTALL_UNIT_SRC}" /etc/systemd/system/bascula-postinstall.service
+  if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+    systemctl_safe daemon-reload
+    if ! systemctl enable bascula-postinstall.service; then
+      warn "No se pudo habilitar bascula-postinstall.service"
+    fi
+  fi
+else
+  warn "systemd/bascula-postinstall.service no encontrado en el repositorio"
+fi
+
 # Setup tmpfiles
 log "[19/20] Configurando tmpfiles..."
 if [[ -f "${PROJECT_ROOT}/systemd/tmpfiles.d/bascula.conf" ]]; then
@@ -2290,15 +2311,15 @@ try_or_warn "apt Xorg & kiosk" "sudo apt-get update -y && sudo apt-get install -
 
 # Ensure Python virtual environment and backend dependencies
 log "Verificando entorno Python en /opt/bascula/current..."
-if ! cd /opt/bascula/current; then
-  echo "[ERR] no se encontró /opt/bascula/current" >&2
-  exit 1
-fi
-
-if [[ ! -x .venv/bin/python ]]; then
+if [[ ! -x "/opt/bascula/current/.venv/bin/python" ]]; then
   echo "[ERR] no existe /opt/bascula/current/.venv/bin/python" >&2
   exit 1
 fi
+
+pushd /opt/bascula/current >/dev/null || {
+  echo "[ERR] no se pudo acceder a /opt/bascula/current" >&2
+  exit 1
+}
 
 if ! .venv/bin/python -m uvicorn --version >/dev/null 2>&1; then
   warn "uvicorn no instalado en .venv; ejecuta pip install -r requirements.txt"
@@ -2333,12 +2354,13 @@ else
   warn "package.json no encontrado; se omite build de frontend"
 fi
 
+popd >/dev/null || true
+
 # Runtime directories for captures served by Nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
 chmod g+s /run/bascula/captures || true
 usermod -aG www-data pi || true
-cd "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 
 # Final permissions
 log "[20/20] Ajustando permisos finales..."
@@ -2422,17 +2444,11 @@ else
   warn "Herramienta 'ss' no disponible; omitiendo comprobación de puertos"
 fi
 
-if [[ -f "${REBOOT_FLAG_FILE}" && "${HAS_SYSTEMD}" -eq 1 ]]; then
-  if [[ -f "${PROJECT_ROOT}/systemd/bascula-postinstall.service" ]]; then
-    install -m 0755 -o root -g root "${PROJECT_ROOT}/systemd/bascula-postinstall.service" /etc/systemd/system/bascula-postinstall.service
-    if ! systemctl daemon-reload; then
-      warn "systemctl daemon-reload falló al registrar bascula-postinstall.service"
-    fi
+if [[ -f "${REBOOT_FLAG_FILE}" && "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
+  if ! systemctl is-enabled bascula-postinstall.service >/dev/null 2>&1; then
     if ! systemctl enable bascula-postinstall.service; then
       warn "No se pudo habilitar bascula-postinstall.service"
     fi
-  else
-    warn "systemd/bascula-postinstall.service no encontrado en el repositorio"
   fi
 fi
 
