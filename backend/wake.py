@@ -95,6 +95,32 @@ NUMBER_WORDS: Dict[str, float] = {
 _STOP_WORDS = {"y", "con", "de", "la", "el"}
 
 
+def get_backend_base_url() -> str:
+    """Resolve the backend base URL honoring environment overrides."""
+
+    url = os.getenv("BACKEND_BASE_URL")
+    if url:
+        return url.rstrip("/")
+
+    legacy_url = os.getenv("BASCULA_API_URL")
+    if legacy_url:
+        return legacy_url.rstrip("/")
+
+    host = os.getenv("BASCULA_BACKEND_HOST", "127.0.0.1")
+    port_value = os.getenv("BASCULA_BACKEND_PORT", "8081")
+
+    try:
+        port = int(port_value)
+    except (TypeError, ValueError):
+        LOG_WAKE.warning(
+            "[wake] Invalid BASCULA_BACKEND_PORT=%r; falling back to 8081",
+            port_value,
+        )
+        port = 8081
+
+    return f"http://{host}:{port}"
+
+
 def _compute_frame_samples(sample_rate: int) -> int:
     return max(1, int(sample_rate * FRAME_DURATION))
 
@@ -629,9 +655,9 @@ class WakeListener:
     def _try_remote_transcription(self, wav_audio: bytes) -> Optional[str]:
         if requests is None:
             return None
-        base_url = os.getenv("BASCULA_API_URL", "http://127.0.0.1:8080")
+        base_url = get_backend_base_url()
         if self._transcribe_url is None:
-            self._transcribe_url = f"{base_url.rstrip('/')}/api/voice/transcribe"
+            self._transcribe_url = f"{base_url}/api/voice/transcribe"
         try:
             response = requests.post(
                 self._transcribe_url,
