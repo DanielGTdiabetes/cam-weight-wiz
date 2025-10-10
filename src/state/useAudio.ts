@@ -157,7 +157,7 @@ const ensureInitialized = () => {
     console.warn("No se pudo sincronizar la preferencia de voz desde settings", error);
   }
 
-  applyState(true);
+  applyState(true, { persist: true, updateSettings: true });
   void attemptRemoteFallback();
 };
 

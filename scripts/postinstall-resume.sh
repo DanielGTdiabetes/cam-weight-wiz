@@ -1,75 +1,66 @@
 #!/bin/bash
+# Reanudación tras reinicio para Báscula Digital Pro
 set -euo pipefail
-IFS=$'\n\t'
+
+exec 9>/var/lock/bascula.install && flock -n 9 || { echo "[postinstall] otro instalador en marcha"; exit 0; }
 
 log() { printf '[postinstall] %s\n' "$*"; }
 log_warn() { printf '[postinstall][warn] %s\n' "$*" >&2; }
 
-run_or_warn() {
-  local label="$1"
-  shift
-  if "$@"; then
-    log "${label}"
-    return 0
-  fi
-  local status=$?
-  log_warn "${label} falló (status ${status})"
-  return ${status}
-}
-
 STATE_DIR="/var/lib/bascula"
-FLAG_FILE="${STATE_DIR}/reboot-required"
-REASONS_FILE="${STATE_DIR}/reboot-reasons.txt"
-CAPTURE_ROOT="/run/bascula"
-CAPTURE_DIR="${CAPTURE_ROOT}/captures"
+MARKER="${STATE_DIR}/postinstall.done"
+TMPFILES_BASE="/etc/tmpfiles.d"
+APP_ROOT="/opt/bascula/current"
+TARGET_USER="${BASCULA_TARGET_USER:-$(stat -c '%U' "${APP_ROOT}" 2>/dev/null || echo pi)}"
+TARGET_GROUP="${BASCULA_TARGET_GROUP:-$(stat -c '%G' "${APP_ROOT}" 2>/dev/null || echo pi)}"
 
-log "Reanudando post-instalación tras reboot..."
+install -d -m 0755 -o root -g root "${STATE_DIR}"
 
-if [[ -f "${REASONS_FILE}" && -s "${REASONS_FILE}" ]]; then
-  log "Motivos del reinicio previo:"
-  sed 's/^/[postinstall]  - /' "${REASONS_FILE}" || true
+if [[ -f "${MARKER}" ]]; then
+  log "[postinstall][skip] ya aplicado (${MARKER})"
+  exit 0
 fi
 
-install -d -m 0755 "${CAPTURE_ROOT}"
-install -d -o pi -g www-data -m 02770 "${CAPTURE_DIR}"
-chmod g+s "${CAPTURE_DIR}" || true
+log "Aplicando tareas post-reinicio mínimas..."
 
-run_or_warn "systemd-tmpfiles --create" systemd-tmpfiles --create
-run_or_warn "systemctl daemon-reload" systemctl daemon-reload
-run_or_warn "systemctl enable --now bascula-miniweb.service" systemctl enable --now bascula-miniweb.service
-run_or_warn "systemctl enable --now bascula-ui.service" systemctl enable --now bascula-ui.service
-
-if command -v curl >/dev/null 2>&1; then
-  if curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
-    log "miniweb responde en /api/miniweb/status"
-  else
-    log_warn "miniweb no respondió en /api/miniweb/status"
+if command -v systemd-tmpfiles >/dev/null 2>&1; then
+  systemd-tmpfiles --create "${TMPFILES_BASE}/bascula.conf" || log_warn "tmpfiles bascula.conf falló"
+  if [[ -f "${TMPFILES_BASE}/bascula-x11.conf" ]]; then
+    systemd-tmpfiles --create "${TMPFILES_BASE}/bascula-x11.conf" || log_warn "tmpfiles bascula-x11.conf falló"
   fi
-  if curl -fsS http://127.0.0.1/ >/dev/null; then
-    log "nginx responde en http://127.0.0.1/"
-  else
-    log_warn "nginx no respondió en http://127.0.0.1/"
-  fi
-  tmp_file="$(mktemp "${CAPTURE_DIR}/postinstall.XXXXXX")"
-  echo "postinstall" > "${tmp_file}"
-  capture_name="$(basename "${tmp_file}")"
-  if curl -fsS "http://127.0.0.1/captures/${capture_name}" >/dev/null; then
-    log "Nginx sirve /captures/${capture_name} en loopback"
-  else
-    log_warn "No se pudo acceder a /captures/${capture_name} en loopback"
-  fi
-  rm -f "${tmp_file}" || true
 else
-  log_warn "curl no disponible; omitiendo smoke HTTP"
+  log_warn "systemd-tmpfiles no disponible"
 fi
 
-rm -f "${FLAG_FILE}" || true
-: > "${REASONS_FILE}" || true
+install -d -o "${TARGET_USER}" -g www-data -m 0755 /run/bascula
+install -d -o "${TARGET_USER}" -g www-data -m 02770 /run/bascula/captures
+chmod g+s /run/bascula/captures || true
+chgrp www-data /run/bascula /run/bascula/captures || true
 
 if command -v systemctl >/dev/null 2>&1; then
-  if systemctl list-unit-files | grep -q '^bascula-postinstall.service'; then
-    run_or_warn "systemctl disable bascula-postinstall.service" systemctl disable bascula-postinstall.service
-  fi
+  systemctl daemon-reload || true
+  for unit in nginx.service bascula-miniweb.service bascula-ui.service; do
+    if systemctl list-unit-files | grep -q "^${unit}"; then
+      if ! systemctl is-enabled "${unit}" >/dev/null 2>&1; then
+        systemctl enable "${unit}" || log_warn "No se pudo habilitar ${unit}"
+      fi
+      systemctl try-restart "${unit}" || true
+    fi
+  done
+else
+  log_warn "systemctl no disponible"
 fi
 
-log "Post-instalación completada"
+systemctl_status_cmd() {
+  local unit="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl is-active --quiet "${unit}" && printf '%s' "active" || printf '%s' "inactive"
+  else
+    printf '%s' "n/a"
+  fi
+}
+
+log "Estados tras postinstalación: nginx=$(systemctl_status_cmd nginx.service), miniweb=$(systemctl_status_cmd bascula-miniweb.service), ui=$(systemctl_status_cmd bascula-ui.service)"
+
+touch "${MARKER}"
+log "[postinstall][done] Reanudación completada (${MARKER})"
