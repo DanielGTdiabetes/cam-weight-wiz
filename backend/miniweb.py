@@ -67,6 +67,7 @@ _SERIAL_AVAILABLE = SerialScaleService is not None
 _LOGGED_HX711_WARNING = False
 _LOGGED_SERIAL_WARNING = False
 from backend.voice import router as voice_router
+from backend.voice_prefs import get_voice_enabled, set_voice_enabled
 from backend.camera import router as camera_router
 from backend.wake import router as wake_router, init_wake_if_enabled
 from backend.routers.food import router as food_router
@@ -233,6 +234,10 @@ class CalibrationApplyPayload(BaseModel):
 
 class OTAApplyPayload(BaseModel):
     target: Optional[str] = None
+
+
+class VoiceStatePayload(BaseModel):
+    enabled: bool
 
 
 # ---------- Helpers ----------
@@ -711,6 +716,9 @@ def _default_config() -> Dict[str, Any]:
             "flags": {},
             "offline_mode": False,
             "sound_enabled": True,
+        },
+        "voice": {
+            "enabledDefault": True,
         },
     }
 
@@ -3589,6 +3597,17 @@ app.include_router(voice_router)
 app.include_router(camera_router)
 app.include_router(wake_router)
 app.include_router(food_router, prefix="/api/food", tags=["food"])
+
+
+@app.get("/api/voice/state")
+async def api_voice_state() -> Dict[str, bool]:
+    return {"enabled": get_voice_enabled()}
+
+
+@app.post("/api/voice/state")
+async def api_voice_state_update(payload: VoiceStatePayload) -> Dict[str, bool]:
+    set_voice_enabled(payload.enabled)
+    return {"enabled": get_voice_enabled()}
 
 
 @app.get("/health")
