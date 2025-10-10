@@ -7,7 +7,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import tests.test_backend_url_resolution  # noqa: F401  # Ensure dependency stubs are registered
 
-from backend.wake import get_backend_base_url
+from backend.utils_urls import get_backend_base_url
 
 
 def test_backend_url_defaults(monkeypatch):

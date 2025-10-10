@@ -40,6 +40,8 @@ except Exception:  # pragma: no cover - optional at runtime
 
 from rapidfuzz import fuzz
 
+from backend.utils_urls import get_backend_base_url
+
 LOG_WAKE = logging.getLogger("bascula.wake")
 
 DEFAULT_MIC_DEVICE = "hw:0,0"
@@ -93,22 +95,6 @@ NUMBER_WORDS: Dict[str, float] = {
 }
 
 _STOP_WORDS = {"y", "con", "de", "la", "el"}
-
-
-def get_backend_base_url() -> str:
-    """Obtiene la URL base del backend, respetando ENV y fallback seguro."""
-
-    url = os.getenv("BACKEND_BASE_URL")
-    if url:
-        return url.rstrip("/")
-
-    host = os.getenv("BASCULA_BACKEND_HOST", "127.0.0.1")
-    port_value = os.getenv("BASCULA_BACKEND_PORT", "8081")
-    try:
-        port = int(port_value)
-    except (TypeError, ValueError):
-        port = 8081
-    return f"http://{host}:{port}"
 
 
 def _compute_frame_samples(sample_rate: int) -> int:

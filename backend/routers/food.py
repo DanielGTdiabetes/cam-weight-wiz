@@ -39,13 +39,14 @@ from pyzbar.pyzbar import Decoded, decode
 
 import pytesseract
 
-from backend.wake import get_backend_base_url
+from backend.utils_urls import get_backend_base_url, get_miniweb_base_url
 
 SCAN_DIR = Path("/var/lib/bascula/scans")
 BACKEND_BASE_URL = get_backend_base_url()
-CAMERA_CAPTURE_ENDPOINT = f"{BACKEND_BASE_URL}/api/camera/capture-to-file"
-SCALE_WEIGHT_ENDPOINT = f"{BACKEND_BASE_URL}/api/scale/weight"
-TTS_ENDPOINT = f"{BACKEND_BASE_URL}/api/voice/tts/say"
+MINIWEB_BASE_URL = get_miniweb_base_url()
+CAMERA_CAPTURE_ENDPOINT = f"{MINIWEB_BASE_URL}/api/camera/capture-to-file"
+SCALE_WEIGHT_ENDPOINT = f"{MINIWEB_BASE_URL}/api/scale/weight"
+TTS_ENDPOINT = f"{MINIWEB_BASE_URL}/api/voice/tts/say"
 OPENFOODFACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
 
 router = APIRouter()

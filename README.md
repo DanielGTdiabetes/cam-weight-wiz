@@ -14,6 +14,8 @@ Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 - **Variables relevantes**:
   - `BACKEND_BASE_URL` para forzar la URL completa usada por componentes clientes.
   - `BASCULA_BACKEND_HOST` y `BASCULA_BACKEND_PORT` (por defecto `127.0.0.1` y `8081`) para componer la URL cuando no se fija la anterior.
+  - `MINIWEB_BASE_URL` para fijar explícitamente la URL base del miniweb.
+  - `BASCULA_MINIWEB_HOST` y `BASCULA_MINIWEB_PORT` (por defecto `127.0.0.1` y `8080`) como fallback cuando no se define `MINIWEB_BASE_URL`.
 
 ## Instalación limpia en Raspberry Pi OS Bookworm Lite (Pi 5)
 

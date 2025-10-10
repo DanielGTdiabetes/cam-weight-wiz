@@ -92,7 +92,7 @@ except ModuleNotFoundError:
     rapidfuzz.fuzz = _FakeFuzzModule("rapidfuzz.fuzz")  # type: ignore[attr-defined]
     sys.modules["rapidfuzz"] = rapidfuzz
 
-import backend.wake as wake
+import backend.utils_urls as utils_urls
 
 
 def _reset_env(monkeypatch):
@@ -104,15 +104,15 @@ def _reset_env(monkeypatch):
     ]:
         monkeypatch.delenv(key, raising=False)
 
-    importlib.reload(wake)
+    importlib.reload(utils_urls)
 
 
 def test_backend_base_url_prefers_explicit_env(monkeypatch):
     _reset_env(monkeypatch)
     monkeypatch.setenv("BACKEND_BASE_URL", "https://example.local/base/")
 
-    importlib.reload(wake)
-    assert wake.get_backend_base_url() == "https://example.local/base"
+    importlib.reload(utils_urls)
+    assert utils_urls.get_backend_base_url() == "https://example.local/base"
 
 
 def test_backend_base_url_from_host_and_port(monkeypatch):
@@ -120,12 +120,12 @@ def test_backend_base_url_from_host_and_port(monkeypatch):
     monkeypatch.setenv("BASCULA_BACKEND_HOST", "0.0.0.0")
     monkeypatch.setenv("BASCULA_BACKEND_PORT", "9001")
 
-    importlib.reload(wake)
-    assert wake.get_backend_base_url() == "http://0.0.0.0:9001"
+    importlib.reload(utils_urls)
+    assert utils_urls.get_backend_base_url() == "http://0.0.0.0:9001"
 
 
 def test_backend_base_url_defaults(monkeypatch):
     _reset_env(monkeypatch)
 
-    importlib.reload(wake)
-    assert wake.get_backend_base_url() == "http://127.0.0.1:8081"
+    importlib.reload(utils_urls)
+    assert utils_urls.get_backend_base_url() == "http://127.0.0.1:8081"
