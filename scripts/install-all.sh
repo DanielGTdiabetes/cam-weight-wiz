@@ -50,6 +50,8 @@ SUMMARY_CAMERA="pending"
 SUMMARY_AUDIO="pending"
 CAMERA_SUMMARY_STATUS="UNKNOWN"
 CAMERA_SUMMARY_HINT=""
+AUDIO_RECORD_STATUS="pending"
+AUDIO_PLAY_STATUS="pending"
 
 build_frontend_once() {
   local project_dir="$1"
@@ -381,58 +383,86 @@ configure_pi_boot_hardware() {
 
 configure_hifiberry_audio() {
   local asound_conf="/etc/asound.conf"
-  local tmp_conf
+  local defaults_conf="/etc/default/bascula"
+  local tmp_conf tmp_defaults
+
   tmp_conf="$(mktemp)"
   cat <<'EOF' >"${tmp_conf}"
+# ============================================================
+# /etc/asound.conf – Configuración estable Báscula Digital Pro
+# DAC I2S HiFiBerry MAX98357A + Micrófono USB PnP
+# ============================================================
+
+pcm.dmix_dac {
+    type dmix
+    ipc_key 1024
+    ipc_perm 0666
+    slave {
+        pcm "hw:1,0"
+        rate 44100
+        channels 2
+        format S16_LE
+        period_time 0
+        buffer_time 0
+    }
+}
+
+pcm.dsnoop_mic {
+    type dsnoop
+    ipc_key 2048
+    ipc_perm 0666
+    slave {
+        pcm "hw:0,0"
+        channels 1
+        rate 16000
+        format S16_LE
+    }
+}
+
 pcm.bascula_out {
-  type softvol
-  slave.pcm "hw:1,0"
-  control { name "SoftSpeaker"; card 1 }
-  min_dB -51.0
-  max_dB 0.0
+    type plug
+    slave.pcm "dmix_dac"
 }
 
 pcm.bascula_mix_in {
-  type dsnoop
-  ipc_key 55555
-  slave {
-    pcm "hw:2,0"
-    channels 1
-    rate 16000
-    format S16_LE
-  }
+    type plug
+    slave.pcm "dsnoop_mic"
 }
+
+pcm.!default bascula_out
+ctl.!default bascula_out
 EOF
 
-  local had_invalid=0
-  if [[ -f "${asound_conf}" ]]; then
-    if grep -qE 'max_dB \+[0-9]+' "${asound_conf}"; then
-      had_invalid=1
-    fi
-  fi
-
-  local needs_update=0
-  if [[ ! -f "${asound_conf}" ]]; then
-    needs_update=1
-  elif [[ "${had_invalid}" -eq 1 ]]; then
-    needs_update=1
-  elif ! cmp -s "${tmp_conf}" "${asound_conf}"; then
-    needs_update=1
+  local needs_update=1
+  if [[ -f "${asound_conf}" ]] && cmp -s "${tmp_conf}" "${asound_conf}"; then
+    needs_update=0
   fi
 
   if [[ "${needs_update}" -eq 1 ]]; then
-    install -m 0644 "${tmp_conf}" "${asound_conf}"
+    install -D -m 0644 "${tmp_conf}" "${asound_conf}"
     log "✓ /etc/asound.conf actualizado"
-    if [[ "${had_invalid}" -eq 1 ]]; then
-      warn "Perfil ALSA antiguo reemplazado; se requiere reinicio para aplicar"
-      require_reboot "Actualizar /etc/asound.conf (softvol válido)"
-    fi
   else
     log "✓ /etc/asound.conf sin cambios"
   fi
-  rm -f "${tmp_conf}"
+  chmod 0644 "${asound_conf}" || warn "No se pudo ajustar permisos de ${asound_conf}"
+  rm -f "${tmp_conf}" || true
 
-  local card_list
+  tmp_defaults="$(mktemp)"
+  cat <<'EOF' >"${tmp_defaults}"
+BASCULA_AUDIO_DEVICE=bascula_out
+BASCULA_MIC_DEVICE=bascula_mix_in
+BASCULA_SAMPLE_RATE=16000
+EOF
+
+  if [[ ! -f "${defaults_conf}" ]] || ! cmp -s "${tmp_defaults}" "${defaults_conf}"; then
+    install -D -m 0644 "${tmp_defaults}" "${defaults_conf}"
+    log "✓ /etc/default/bascula actualizado"
+  else
+    log "✓ /etc/default/bascula sin cambios"
+  fi
+  rm -f "${tmp_defaults}" || true
+
+  local card_list=""
   if command -v aplay >/dev/null 2>&1; then
     card_list="$(aplay -l 2>/dev/null || true)"
     if ! printf '%s' "${card_list}" | grep -q "card 0:"; then
@@ -442,19 +472,37 @@ EOF
     log_warn "aplay no disponible para verificar tarjetas ALSA"
   fi
 
+  local test_wav="/tmp/test.wav"
   if command -v arecord >/dev/null 2>&1; then
-    try_or_warn "arecord bascula_mix_in 16k" \
-      "timeout 8 arecord -q -D bascula_mix_in -t raw -f S16_LE -r 16000 -c 1 -d 1 /dev/null"
+    log "[check] arecord bascula_mix_in -> ${test_wav}"
+    if arecord -q -D bascula_mix_in -f S16_LE -r 16000 -c 1 -d 2 "${test_wav}"; then
+      AUDIO_RECORD_STATUS="ok"
+    else
+      AUDIO_RECORD_STATUS="fail"
+      log_warn "arecord bascula_mix_in falló; revisa micrófono"
+    fi
   else
+    AUDIO_RECORD_STATUS="skipped"
     log_warn "arecord no disponible; omitiendo prueba de entrada"
   fi
 
-  if command -v speaker-test >/dev/null 2>&1; then
-    try_or_warn "speaker-test bascula_out" \
-      "timeout 8 speaker-test -D bascula_out -l 1"
+  if command -v aplay >/dev/null 2>&1; then
+    log "[check] aplay bascula_out <- ${test_wav}"
+    if [[ ! -f "${test_wav}" ]]; then
+      : > "${test_wav}"
+    fi
+    if aplay -q -D bascula_out "${test_wav}"; then
+      AUDIO_PLAY_STATUS="ok"
+    else
+      AUDIO_PLAY_STATUS="fail"
+      log_warn "aplay bascula_out falló; revisa salida de audio"
+    fi
   else
-    log_warn "speaker-test no disponible; omitiendo prueba de salida"
+    AUDIO_PLAY_STATUS="skipped"
+    log_warn "aplay no disponible; omitiendo prueba de salida"
   fi
+
+  rm -f "${test_wav}" || true
 }
 
 configure_usb_microphone() {
@@ -521,6 +569,9 @@ ensure_audio_playback_defaults() {
   fi
 
   SUMMARY_AUDIO="desmuted=${unmuted} (${card_list})"
+  if [[ "${AUDIO_RECORD_STATUS}" != "pending" || "${AUDIO_PLAY_STATUS}" != "pending" ]]; then
+    SUMMARY_AUDIO+="; rec=${AUDIO_RECORD_STATUS}; play=${AUDIO_PLAY_STATUS}"
+  fi
   if [[ "${unmuted}" != "yes" ]]; then
     warn "No se pudo confirmar desmute de audio; revisa alsamixer"
   else
@@ -560,6 +611,37 @@ ensure_libcamera_ready() {
   local list_output=""
   local cameras_detected=0
   local needs_reinstall=0
+
+  if [[ "${NET_OK:-0}" -eq 1 ]]; then
+    if ! apt-get install -y libcamera-apps; then
+      warn "No se pudo instalar/actualizar libcamera-apps"
+    fi
+  else
+    warn "Sin red: no se puede asegurar instalación de libcamera-apps"
+  fi
+
+  if command -v libcamera-hello >/dev/null 2>&1; then
+    if ! timeout 5 libcamera-hello -t 1000 >/dev/null 2>&1; then
+      log_warn "libcamera-hello falló"
+    fi
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - <<'PY'
+try:
+    from picamera2 import Picamera2
+except Exception as exc:  # noqa: BLE001
+    print("[warn] Picamera2 error:", exc)
+else:
+    try:
+        cams = Picamera2.global_camera_info()
+        print(f"[check] cámaras detectadas: {len(cams)} -> {cams}")
+    except Exception as exc:  # noqa: BLE001
+        print("[warn] Picamera2 error:", exc)
+PY
+  else
+    log_warn "python3 no disponible para comprobar Picamera2"
+  fi
 
   if ! command -v libcamera-hello >/dev/null 2>&1; then
     log_warn "libcamera-hello no está instalado; instala libcamera-apps/rpicam-apps"
@@ -1955,24 +2037,37 @@ if [[ ! -f "${VENV_MARKER}" ]]; then
   export PIP_INDEX_URL="https://www.piwheels.org/simple"
   export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
 
-  REQUIREMENTS_FILE="${BASCULA_CURRENT_LINK}/requirements.txt"
-
   if [[ "${NET_OK}" -eq 1 ]]; then
     if ! "${VENV_PY}" -m pip install --upgrade pip setuptools; then
       fail "No se pudo actualizar pip/setuptools en la venv"
     fi
-    if [[ -f "${REQUIREMENTS_FILE}" ]]; then
-      if ! "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
-        fail "No se pudieron instalar las dependencias Python desde requirements.txt"
-      fi
+
+    req_files=()
+    if [[ -f "requirements.txt" ]]; then
+      req_files+=("requirements.txt")
     else
-      fail "No se encontró ${REQUIREMENTS_FILE}; instala las dependencias manualmente"
+      fail "No se encontró ${BASCULA_CURRENT_LINK}/requirements.txt; instala las dependencias manualmente"
     fi
-    if [[ -f "requirements-voice.txt" ]]; then
-      if ! "${VENV_PIP}" install -r requirements-voice.txt; then
-        warn "requirements-voice.txt no se pudo instalar completamente"
+
+    while IFS= read -r extra_req; do
+      extra_req="${extra_req#./}"
+      if [[ "${extra_req}" != "requirements.txt" ]]; then
+        req_files+=("${extra_req}")
       fi
-    fi
+    done < <(find . -maxdepth 1 -type f -name 'requirements-*.txt' -print | sort)
+
+    for req in "${req_files[@]}"; do
+      if [[ "${req}" == "requirements.txt" ]]; then
+        if ! "${VENV_PIP}" install -r "${req}"; then
+          fail "No se pudieron instalar las dependencias Python desde ${req}"
+        fi
+      else
+        if ! "${VENV_PIP}" install -r "${req}"; then
+          warn "${req} no se pudo instalar completamente"
+        fi
+      fi
+    done
+    unset req req_files
   else
     warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
   fi
@@ -2205,11 +2300,9 @@ fi
 systemctl_safe enable nginx
 install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -d -m 0755 /etc/nginx/bascula
-install -d -m0755 /run/bascula || true
-# Configurar permisos para nginx
-install -d -o pi -g www-data -m 0755 /run/bascula
+install -d -o pi -g www-data -m 02770 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula/captures || true
+chmod g+s /run/bascula /run/bascula/captures || true
 # asegurar que el usuario pi pertenece al grupo www-data
 usermod -aG www-data pi || true
 
@@ -2228,6 +2321,14 @@ server {
     set_real_ip_from ::1;
     real_ip_header X-Forwarded-For;
     real_ip_recursive on;
+
+    # Exponer capturas de la cámara solo a loopback por defecto
+    location /captures/ {
+        alias /run/bascula/captures/;
+        autoindex off;
+        allow 127.0.0.1;
+        deny all;
+    }
 
     # PWA/SPA
     location / {
@@ -2484,9 +2585,10 @@ fi
 configure_bascula_ui_service
 
 if command -v systemd-analyze >/dev/null 2>&1; then
+  try_or_warn "systemd verify bascula-miniweb" "systemd-analyze verify /etc/systemd/system/bascula-miniweb.service"
   try_or_warn "systemd verify bascula-ui" "systemd-analyze verify /etc/systemd/system/bascula-ui.service"
 else
-  warn "systemd-analyze no disponible para verificar bascula-ui.service"
+  warn "systemd-analyze no disponible para verificar servicios bascula"
 fi
 
 # Chromium managed policies
@@ -2541,8 +2643,9 @@ else
   warn "tmpfiles no ejecutado (systemd o ALLOW_SYSTEMD deshabilitado)"
 fi
 # Bootstrap defensivo: asegurar setgid y grupo correcto si tmpfiles aún no corrió
+install -d -o pi -g www-data -m 02770 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula/captures || true
+chmod g+s /run/bascula /run/bascula/captures || true
 chgrp www-data /run/bascula /run/bascula/captures || true
 log "✓ tmpfiles configurado"
 stat -c '[inst] captures perms: %A %U:%G %a %n' /run/bascula/captures || true
@@ -2563,9 +2666,9 @@ if ! /opt/bascula/current/.venv/bin/python -m uvicorn --version >/dev/null 2>&1;
 fi
 
 # Runtime directories for captures served by Nginx
-install -d -o pi -g www-data -m 0755 /run/bascula
+install -d -o pi -g www-data -m 02770 /run/bascula
 install -d -o pi -g www-data -m 02770 /run/bascula/captures
-chmod g+s /run/bascula/captures || true
+chmod g+s /run/bascula /run/bascula/captures || true
 usermod -aG www-data pi || true
 
 # Final permissions

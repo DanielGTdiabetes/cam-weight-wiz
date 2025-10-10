@@ -68,7 +68,17 @@ BACKEND_RESULT=$(BASCULA_KIOSK_WAIT_S="${BASCULA_KIOSK_WAIT_S}" \
 PY_STATUS=$?
 set -e
 if [[ ${PY_STATUS} -ne 0 || -z "${BACKEND_RESULT}" ]]; then
-  BACKEND_RESULT="fallback|http://localhost/"
+  BACKEND_RESULT=""
+  for i in 1 2 3; do
+    if curl -sf http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
+      BACKEND_RESULT="ready|http://localhost/"
+      break
+    fi
+    sleep 3
+  done
+  if [[ -z "${BACKEND_RESULT}" ]]; then
+    BACKEND_RESULT="fallback|http://localhost/config"
+  fi
 fi
 
 BACKEND_STATE="${BACKEND_RESULT%%|*}"
