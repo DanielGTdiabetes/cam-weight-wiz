@@ -21,6 +21,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from typing import Optional, Dict, Any, List, Union, Set
+import argparse
 import asyncio
 import base64
 import json
@@ -2499,6 +2500,56 @@ async def root():
     """Root endpoint"""
     return {"message": "Bascula Backend API", "version": "1.0"}
 
+
+def _coerce_port(value: str | None, fallback: int) -> int:
+    """Convert an environment port value into an integer, with fallback."""
+    if not value:
+        return fallback
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        logging.getLogger("bascula.backend").warning(
+            "Invalid BASCULA_BACKEND_PORT=%r provided; falling back to %s", value, fallback
+        )
+        return fallback
+    if port <= 0 or port > 65535:
+        logging.getLogger("bascula.backend").warning(
+            "Out-of-range BASCULA_BACKEND_PORT=%r provided; falling back to %s", value, fallback
+        )
+        return fallback
+    return port
+
+
+def _parse_server_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """Parse CLI arguments to configure the embedded uvicorn server."""
+    env_host = os.getenv("BASCULA_BACKEND_HOST", "0.0.0.0")
+    env_port = _coerce_port(os.getenv("BASCULA_BACKEND_PORT"), 8081)
+
+    parser = argparse.ArgumentParser(description="Bascula backend server")
+    parser.add_argument("--host", default=env_host, help="Interface to bind the API server")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=env_port,
+        help="TCP port for the API server",
+    )
+    return parser.parse_args(argv)
+
+
+def _get_server_bind(argv: Optional[List[str]] = None) -> tuple[str, int]:
+    """Resolve the host/port uvicorn should bind to."""
+    args = _parse_server_args(argv)
+    return args.host, int(args.port)
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+
+    bind_host, bind_port = _get_server_bind()
+    uvicorn.run(
+        app,
+        host=bind_host,
+        port=bind_port,
+        log_level="info",
+        factory=False,
+    )

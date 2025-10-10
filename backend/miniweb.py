@@ -278,6 +278,19 @@ def _normalize_http_url(raw: str) -> str:
     return candidate.rstrip("/")
 
 
+_DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8081"
+_RAW_BACKEND_BASE_URL = os.getenv("BACKEND_BASE_URL", _DEFAULT_BACKEND_BASE_URL)
+try:
+    BACKEND_BASE_URL = _normalize_http_url(_RAW_BACKEND_BASE_URL) or _DEFAULT_BACKEND_BASE_URL
+except ValueError:
+    LOG_MINIWEB.warning(
+        "Valor inválido para BACKEND_BASE_URL=%r; usando %s",
+        _RAW_BACKEND_BASE_URL,
+        _DEFAULT_BACKEND_BASE_URL,
+    )
+    BACKEND_BASE_URL = _DEFAULT_BACKEND_BASE_URL
+
+
 def _reload_backend_service() -> Tuple[bool, Optional[str]]:
     commands = [
         ["sudo", "systemctl", "reload", SETTINGS_RELOAD_SERVICE],
@@ -3434,6 +3447,8 @@ def _get_wifi_status(config: Optional[Dict[str, Any]] | None = None) -> Dict[str
         "offline_mode": offline_mode_enabled,
     }
 
+    status["backend_base_url"] = BACKEND_BASE_URL
+
     if ap_service_active is not None:
         status["ap_service_active"] = ap_service_active
 
@@ -5206,6 +5221,7 @@ async def miniweb_info():
         "version": "1.0",
         "hostname": os.uname().nodename if hasattr(os, "uname") else "bascula",
         "listen": {"host": host, "port": port},
+        "backend": {"base_url": BACKEND_BASE_URL},
         "endpoints": {
             "health": "/health",
             "info": "/info",

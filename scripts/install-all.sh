@@ -375,6 +375,7 @@ run_health_checks() {
   run_checked "nginx -t" nginx -t
   run_checked "curl miniweb" curl -fsS http://127.0.0.1:8080/api/miniweb/status
   run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
+  run_checked "backend health" /bin/sh -c 'curl -fsS http://127.0.0.1:8081/health || true'
   run_checked "picamera2 import" python3 -c 'import picamera2'
   run_checked "arecord bascula_mix_in" arecord -D bascula_mix_in -f S16_LE -r 16000 -d 1
   run_checked "speaker-test bascula_out" speaker-test -t sine -f 1000 -l 1 -D bascula_out
@@ -432,6 +433,7 @@ main() {
     run_checked "nginx -t" nginx -t
     run_checked "curl miniweb" curl -fsS http://127.0.0.1:8080/api/miniweb/status
     run_checked "miniweb ok=true" /bin/sh -c 'curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q "\"ok\"[[:space:]]*:[[:space:]]*true"'
+    run_checked "backend health" /bin/sh -c 'curl -fsS http://127.0.0.1:8081/health || true'
     run_checked "picamera2 import" python3 -c 'import picamera2'
     log_warn "Reinicie el sistema y vuelva a ejecutar las pruebas de audio manualmente."
     exit 0
