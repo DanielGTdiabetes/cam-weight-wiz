@@ -12,6 +12,7 @@ WorkingDirectory=/opt/bascula/current
 Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/default/bascula
+EnvironmentFile=-/etc/default/bascula-audio
 Environment=BASCULA_AUDIO_DEVICE=bascula_out
 Environment=BASCULA_MIC_DEVICE=bascula_mix_in
 Environment=BASCULA_SAMPLE_RATE=16000
