@@ -150,6 +150,7 @@ class Picamera2Service:
         attempts = 0
         max_attempts = 3
         last_error: Optional[BaseException] = None
+        last_error_cause: Optional[BaseException] = None
 
         while attempts < max_attempts:
             attempts += 1
@@ -189,7 +190,8 @@ class Picamera2Service:
                     )
                     return temp_camera
                 except IndexError as exc:
-                    last_error = exc
+                    last_error = CameraUnavailableError("No camera detected")
+                    last_error_cause = exc
                     LOG_CAMERA.warning(
                         "Picamera2 no lista (intento %d): %s",
                         attempts,
@@ -199,6 +201,7 @@ class Picamera2Service:
                     self._release_camera()
                 except (RuntimeError, CameraUnavailableError) as exc:
                     last_error = exc
+                    last_error_cause = exc
                     LOG_CAMERA.warning(
                         "Fallo al inicializar Picamera2 (intento %d): %s",
                         attempts,
@@ -210,6 +213,7 @@ class Picamera2Service:
                         break
                 except Exception as exc:  # pragma: no cover - hardware specific failure
                     last_error = exc
+                    last_error_cause = exc
                     LOG_CAMERA.exception("Error inesperado al inicializar Picamera2: %s", exc)
                     self._release_camera()
                     raise CameraUnavailableError(str(exc)) from exc
@@ -226,6 +230,10 @@ class Picamera2Service:
         LOG_CAMERA.error("No se detectó cámara Picamera2 tras %d intentos", attempts)
         if last_error is not None:
             message = str(last_error) or "No se pudo inicializar la cámara"
+            if isinstance(last_error, CameraUnavailableError):
+                if last_error_cause is not None and last_error_cause is not last_error:
+                    raise CameraUnavailableError(message) from last_error_cause
+                raise last_error
             raise CameraUnavailableError(message) from last_error
         raise CameraUnavailableError("No se pudo inicializar la cámara")
 

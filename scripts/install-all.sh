@@ -52,6 +52,7 @@ CAMERA_SUMMARY_STATUS="UNKNOWN"
 CAMERA_SUMMARY_HINT=""
 AUDIO_RECORD_STATUS="pending"
 AUDIO_PLAY_STATUS="pending"
+NEED_REBOOT=0
 
 build_frontend_once() {
   local project_dir="$1"
@@ -603,6 +604,96 @@ EOF
   printf '[install] Override de audio para bascula-miniweb.service aplicado\n'
 }
 
+ensure_libcamera_stack() {
+  local is_pi5=0
+  local list_file="/tmp/libcamera_list.txt"
+  local cameras_detected=0
+
+  if uname -r | grep -q 'rpi-2712'; then
+    is_pi5=1
+  elif [[ -d /sys/bus/platform/drivers/rp1-cfe ]]; then
+    is_pi5=1
+  elif command -v lsmod >/dev/null 2>&1 && lsmod | grep -q '^rp1_cfe'; then
+    is_pi5=1
+  fi
+
+  if [[ ${is_pi5} -ne 1 ]]; then
+    log "Pi 5 no detectada; omitiendo realineación libcamera específica."
+    return 0
+  fi
+
+  echo "[inst] Verificando pila libcamera…"
+
+  if [[ "${NET_OK:-0}" -eq 1 ]]; then
+    if ! apt-get update -y; then
+      log_warn "apt-get update falló (libcamera); continuando con datos en caché"
+    fi
+  else
+    log_warn "Sin red: no se puede actualizar índice APT antes de comprobar libcamera"
+  fi
+
+  if ! command -v libcamera-hello >/dev/null 2>&1 || ! command -v rpicam-hello >/dev/null 2>&1; then
+    if [[ "${NET_OK:-0}" -eq 1 ]]; then
+      if ! apt-get install -y libcamera-apps rpicam-apps; then
+        log_warn "No se pudieron instalar libcamera-apps/rpicam-apps"
+      fi
+    else
+      log_warn "Sin red: no se pueden instalar libcamera-apps/rpicam-apps"
+    fi
+  fi
+
+  rm -f "${list_file}"
+  if ! timeout 6 libcamera-hello --list-cameras >"${list_file}" 2>&1; then
+    echo "[inst][warn] libcamera-hello falló; forzando realineación de kernel/firmware/libcamera…"
+    if [[ "${NET_OK:-0}" -eq 1 ]]; then
+      if ! apt-get purge -y "libcamera*" rpicam-apps; then
+        log_warn "Purge de libcamera falló (se continuará)"
+      fi
+      echo "[inst][info] Realineando kernel/libcamera (Pi5)…"
+      if ! apt-get install -y --reinstall raspberrypi-kernel raspberrypi-kernel-headers \
+        libraspberrypi0 libraspberrypi-bin libraspberrypi-dev libraspberrypi-doc; then
+        log_warn "Reinstalación de kernel/firmware falló"
+      fi
+      if ! apt-get install -y libcamera-apps rpicam-apps; then
+        log_warn "Reinstalación de libcamera-apps/rpicam-apps falló"
+      fi
+      NEED_REBOOT=1
+      require_reboot "Realinear libcamera (Pi5)"
+    else
+      log_warn "Sin red: no se puede realinear libcamera en Pi5"
+    fi
+  fi
+
+  if ! timeout 6 libcamera-hello --list-cameras >"${list_file}" 2>&1; then
+    log_warn "libcamera aún no lista cámaras (posible reboot pendiente)."
+    NEED_REBOOT=1
+    require_reboot "Realinear libcamera (Pi5)"
+  else
+    cameras_detected=$(grep -E '^[0-9]+[[:space:]]*:' "${list_file}" | wc -l | tr -d ' ')
+    echo "[check] cámaras detectadas: ${cameras_detected}"
+    if [[ ${cameras_detected} -lt 1 ]]; then
+      log_warn "Sin cámaras tras la instalación; marcando reinicio necesario."
+      NEED_REBOOT=1
+      require_reboot "Realinear libcamera (Pi5)"
+    else
+      if [[ -s "${list_file}" ]]; then
+        echo "[inst] libcamera --list-cámaras:"
+        sed -n '1,60p' "${list_file}"
+      fi
+    fi
+  fi
+
+  if [[ "${NEED_REBOOT}" = "1" ]]; then
+    touch /.needs-reboot-libcamera 2>/dev/null || true
+    echo "[inst][warn] Reboot requerido para completar la activación de la cámara."
+    echo "[inst][info] Reboot requerido tras realinear libcamera (Pi5)."
+  elif [[ -f /.needs-reboot-libcamera ]]; then
+    rm -f /.needs-reboot-libcamera 2>/dev/null || true
+  fi
+
+  return 0
+}
+
 ensure_libcamera_ready() {
   local status="WARN"
   local hint="sin verificación"
@@ -644,10 +735,16 @@ PY
   fi
 
   if ! command -v libcamera-hello >/dev/null 2>&1; then
-    log_warn "libcamera-hello no está instalado; instala libcamera-apps/rpicam-apps"
-    CAMERA_SUMMARY_STATUS="FAIL"
-    CAMERA_SUMMARY_HINT="libcamera-hello ausente"
-    SUMMARY_CAMERA="FAIL (libcamera-hello ausente)"
+    log_warn "libcamera-hello ausente tras verificación de pila (posible reboot pendiente)"
+    if [[ "${NEED_REBOOT}" = "1" ]]; then
+      CAMERA_SUMMARY_STATUS="WARN"
+      CAMERA_SUMMARY_HINT="libcamera pendiente de reinicio"
+      SUMMARY_CAMERA="WARN (reboot pendiente libcamera)"
+    else
+      CAMERA_SUMMARY_STATUS="FAIL"
+      CAMERA_SUMMARY_HINT="libcamera-hello ausente"
+      SUMMARY_CAMERA="FAIL (libcamera-hello ausente)"
+    fi
     return
   fi
 
@@ -704,6 +801,11 @@ PY
   else
     status="FAIL"
     hint="${hint}"
+  fi
+
+  if [[ "${NEED_REBOOT}" = "1" && "${status}" = "FAIL" ]]; then
+    status="WARN"
+    hint="${hint}; reboot pendiente"
   fi
 
   CAMERA_SUMMARY_STATUS="${status}"
@@ -1392,6 +1494,7 @@ systemctl_safe enable NetworkManager --now
 systemctl_safe enable NetworkManager-wait-online.service
 
 # Install camera dependencies
+ensure_libcamera_stack
 log "[4/20] Instalando dependencias de cámara..."
 if [[ "${NET_OK}" -eq 1 ]]; then
     if apt-get install -y rpicam-apps libcamera-apps v4l-utils python3-picamera2; then
@@ -3019,19 +3122,23 @@ CAPTURE_TEST_URL="http://127.0.0.1:8080/api/camera/test"
 CAPTURE_FILE="/run/bascula/captures/camera-capture.jpg"
 CAPTURE_PUBLIC_URL="http://127.0.0.1/captures/camera-capture.jpg"
 
-if command -v curl >/dev/null 2>&1; then
-  try_or_warn "smoke /api/camera/test" \
-    "curl -s ${CAPTURE_TEST_URL} | jq . | sed -n '1,40p'"
-  try_or_warn "capture-to-file" \
-    "curl -s -X POST '${CAPTURE_API_URL}' | jq ."
-  try_or_warn "curl captura pública" \
-    "curl -sI ${CAPTURE_PUBLIC_URL}"
+if [[ "${NEED_REBOOT}" = "1" ]]; then
+  log_warn "Reinicio pendiente por realineación de cámara; omitiendo pruebas HTTP de captura"
 else
-  log_warn "curl no disponible; omitiendo pruebas HTTP"
-fi
+  if command -v curl >/dev/null 2>&1; then
+    try_or_warn "smoke /api/camera/test" \
+      "curl -s ${CAPTURE_TEST_URL} | jq . | sed -n '1,40p'"
+    try_or_warn "capture-to-file" \
+      "curl -s -X POST '${CAPTURE_API_URL}' | jq ."
+    try_or_warn "curl captura pública" \
+      "curl -sI ${CAPTURE_PUBLIC_URL}"
+  else
+    log_warn "curl no disponible; omitiendo pruebas HTTP"
+  fi
 
-if [[ -f "${CAPTURE_FILE}" ]]; then
-  ls -l "${CAPTURE_FILE}" || true
-else
-  log_warn "${CAPTURE_FILE} no existe tras la captura"
+  if [[ -f "${CAPTURE_FILE}" ]]; then
+    ls -l "${CAPTURE_FILE}" || true
+  else
+    log_warn "${CAPTURE_FILE} no existe tras la captura"
+  fi
 fi
