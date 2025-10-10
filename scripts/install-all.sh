@@ -39,6 +39,7 @@ try_or_warn() {
 }
 
 OVERLAY_ADDED=0
+BOOT_CONFIG_CHANGED=0
 INSTALL_LOG=""
 
 disable_cloud_init() {
@@ -142,6 +143,7 @@ ensure_enable_uart() {
   if grep -qE '^\s*enable_uart=' "${conf_file}"; then
     if sed -i 's/^\s*enable_uart=.*/enable_uart=1/' "${conf_file}"; then
       log "Actualizado enable_uart=1 en ${conf_file}"
+      BOOT_CONFIG_CHANGED=1
     else
       warn "No se pudo actualizar enable_uart en ${conf_file}"
     fi
@@ -151,6 +153,7 @@ ensure_enable_uart() {
       printf 'enable_uart=1\n'
     } >>"${conf_file}" || warn "No se pudo escribir enable_uart en ${conf_file}"
     log "Añadido enable_uart=1 a ${conf_file}"
+    BOOT_CONFIG_CHANGED=1
   fi
 }
 
@@ -213,7 +216,7 @@ configure_pi_boot_hardware() {
     warn "No se pudo limpiar bloque previo Bascula-Cam en ${bootcfg}"
   fi
 
-  {
+  if {
     printf '\n%s\n' "${block_start}"
     printf '# (autoconfig generado por install-all.sh)\n'
     printf 'dtparam=i2c_arm=on\n'
@@ -225,7 +228,11 @@ configure_pi_boot_hardware() {
     printf 'camera_auto_detect=1\n'
     printf 'dtoverlay=imx708\n'
     printf '%s\n' "${block_end}"
-  } >> "${bootcfg}" || warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
+  } >> "${bootcfg}"; then
+    BOOT_CONFIG_CHANGED=1
+  else
+    warn "No se pudo escribir bloque Bascula-Cam en ${bootcfg}"
+  fi
 
   local tmp_file="${bootcfg}.tmp.$$"
   if awk 'NR==1 {prev=$0; print; next} {if ($0 != prev) print; prev=$0}' "${bootcfg}" > "${tmp_file}"; then
@@ -696,20 +703,23 @@ EOF
 
     local backend_ready=0
     if command -v curl >/dev/null 2>&1; then
+      local response
       for _ in {1..15}; do
-        if curl -sf http://127.0.0.1:8080/health >/dev/null; then
-          backend_ready=1
-          break
+        if response=$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null); then
+          if printf '%s' "${response}" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+            backend_ready=1
+            break
+          fi
         fi
         sleep 1
       done
       if (( backend_ready == 1 )); then
-        log "Backend miniweb saludable"
+        log "Mini-web saludable (status 200 /api/miniweb/status)"
       else
-        log_warn "Backend miniweb no respondió en http://127.0.0.1:8080/health"
+        warn "Mini-web no respondió con ok=true en /api/miniweb/status"
       fi
     else
-      log_warn "curl no disponible para verificar miniweb"
+      warn "curl no disponible para verificar miniweb"
     fi
 
     if [[ -x "${SCRIPT_DIR}/test-x-kms.sh" ]]; then
@@ -1262,6 +1272,7 @@ if grep -q "Raspberry Pi 5" /proc/device-tree/model 2>/dev/null; then
       overlay_added_msg="[inst][info] Overlay añadido; se aplicará tras reinicio."
       echo "${overlay_added_msg}"
       OVERLAY_ADDED=1
+      BOOT_CONFIG_CHANGED=1
       if [[ -n "${INSTALL_LOG}" ]]; then
         printf '%s\n' "${overlay_added_msg}" >> "${INSTALL_LOG}" 2>/dev/null || true
       fi
@@ -1713,22 +1724,15 @@ chown -R "${TARGET_USER}:${TARGET_GROUP}" "${BASCULA_ROOT}"
 log "✓ Estructura OTA configurada"
 
 # Setup Python virtual environment
-log "[12/20] Configurando entorno Python..."
+log "[12/20] Preparando entorno Python (.venv)..."
 cd "${BASCULA_CURRENT_LINK}"
 if [[ ! -d ".venv" ]]; then
-  set +e
-  runuser -l "${TARGET_USER}" -c "python3 -m venv '${BASCULA_CURRENT_LINK}/.venv'"
-  create_rc=$?
-  set -e
-  if [[ ${create_rc} -ne 0 ]]; then
-    warn "No se pudo crear la venv como ${TARGET_USER}; intentando como root"
-    python3 -m venv .venv
-  fi
+  python3 -m venv .venv
 fi
 VENV_DIR="${BASCULA_CURRENT_LINK}/.venv"
-chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
 VENV_PY="${VENV_DIR}/bin/python"
 VENV_PIP="${VENV_DIR}/bin/pip"
+chown -R "${TARGET_USER}:${TARGET_GROUP}" "${VENV_DIR}" || warn "No se pudo ajustar el propietario de la venv"
 
 # Allow venv to see system packages (picamera2)
 VENV_SITE="$(${VENV_PY} -c 'import sysconfig; print(sysconfig.get_paths().get("purelib"))')"
@@ -1743,33 +1747,26 @@ export PIP_EXTRA_INDEX_URL="https://pypi.org/simple"
 REQUIREMENTS_FILE="${BASCULA_CURRENT_LINK}/requirements.txt"
 
 if [[ "${NET_OK}" -eq 1 ]]; then
-  if ! sudo -H -u "${TARGET_USER}" env \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_ROOT_USER_ACTION=ignore \
-    PIP_PREFER_BINARY=1 \
-    PIP_INDEX_URL="${PIP_INDEX_URL}" \
-    PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
-    "${VENV_PY}" -m pip install --upgrade pip wheel setuptools; then
-    fail "No se pudo actualizar pip/wheel/setuptools en la venv"
+  if ! "${VENV_PY}" -m pip install --upgrade pip setuptools; then
+    fail "No se pudo actualizar pip/setuptools en la venv"
   fi
   if [[ -f "${REQUIREMENTS_FILE}" ]]; then
-    if ! sudo -H -u "${TARGET_USER}" env \
-      PIP_DISABLE_PIP_VERSION_CHECK=1 \
-      PIP_ROOT_USER_ACTION=ignore \
-      PIP_PREFER_BINARY=1 \
-      PIP_INDEX_URL="${PIP_INDEX_URL}" \
-      PIP_EXTRA_INDEX_URL="${PIP_EXTRA_INDEX_URL}" \
-      "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
+    if ! "${VENV_PIP}" install -r "${REQUIREMENTS_FILE}"; then
       fail "No se pudieron instalar las dependencias Python desde requirements.txt"
     fi
   else
     fail "No se encontró ${REQUIREMENTS_FILE}; instala las dependencias manualmente"
   fi
+  if [[ -f "requirements-voice.txt" ]]; then
+    if ! "${VENV_PIP}" install -r requirements-voice.txt; then
+      warn "requirements-voice.txt no se pudo instalar completamente"
+    fi
+  fi
 else
   warn "Sin red: omitiendo instalación de dependencias Python (se verificará la venv existente)"
 fi
 
-if ! sudo -H -u "${TARGET_USER}" "${VENV_PY}" - <<'PY'
+if ! "${VENV_PY}" - <<'PY'
 import fastapi
 import httpx
 import pydantic
@@ -1953,23 +1950,16 @@ systemctl_safe enable ocr-service.service
 systemctl_safe restart ocr-service.service
 log "✓ Servicio OCR configurado"
 
-# Setup Frontend (build if node_modules exists)
-log "[15/20] Configurando frontend..."
+# Setup Frontend (preparación)
+log "[15/20] Preparando frontend..."
 cd "${BASCULA_CURRENT_LINK}"
 if [[ -f "package.json" ]]; then
   if [[ -f ".env.device" ]]; then
     cp -f .env.device .env
   fi
-  npm install || warn "npm install falló, continuar con backend"
-  if command -v node >/dev/null 2>&1; then
-    if ! node scripts/generate-service-worker.mjs; then
-      warn "No se pudo generar service worker"
-    fi
-  else
-    warn "Node.js no disponible para generar service worker"
-  fi
-  npm run build || warn "npm build falló"
-  log "✓ Frontend compilado"
+  log "Entorno frontend listo para compilar"
+else
+  warn "package.json no encontrado; se omite build de frontend"
 fi
 
 # Install and configure Nginx
@@ -1986,7 +1976,7 @@ install -d -m 0755 /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -d -m0755 /run/bascula || true
 # Configurar permisos para nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -o pi -g www-data -m 02770 /run/bascula/captures
+install -d -o pi -g www-data -m 0770 /run/bascula/captures
 # asegurar que el usuario pi pertenece al grupo www-data
 usermod -aG www-data pi || true
 cat > /etc/nginx/sites-available/bascula <<'EOF'
@@ -2048,172 +2038,19 @@ server {
         proxy_set_header Host $host;
     }
 
-    # Exponer capturas de la cámara (solo localhost)
+    # Exponer capturas de la cámara
     location ^~ /captures/ {
         alias /run/bascula/captures/;
-        default_type image/jpeg;
         autoindex off;
+        try_files $uri =404;
         add_header Cache-Control "no-store";
-        allow 127.0.0.1;
-        allow ::1;
-        deny all;
     }
 }
 EOF
-if command -v sudo >/dev/null 2>&1; then
-  sudo tee /etc/nginx/sites-enabled/bascula >/dev/null <<'EOF'
-server {
-    listen 80 default_server;
-    server_name _;
-    root /opt/bascula/current/dist;
-    index index.html;
-
-    gzip on;
-    gzip_vary on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
-
-    set_real_ip_from 127.0.0.1;
-    set_real_ip_from ::1;
-    real_ip_header X-Forwarded-For;
-    real_ip_recursive on;
-
-    # PWA/SPA
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Archivos estáticos
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-
-    # Proxy principal hacia FastAPI
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    # Compatibilidad rutas legacy sin /api
-    location /camera/  { proxy_pass http://127.0.0.1:8080/api/camera/;  include proxy_params; }
-    location /voice/   { proxy_pass http://127.0.0.1:8080/api/voice/;   include proxy_params; }
-    location /miniweb/ { proxy_pass http://127.0.0.1:8080/api/miniweb/; include proxy_params; }
-    location /net/     { proxy_pass http://127.0.0.1:8080/api/net/;     include proxy_params; }
-
-    # WebSocket
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header Host $host;
-    }
-
-    # Exponer capturas de la cámara (solo localhost)
-    location ^~ /captures/ {
-        alias /run/bascula/captures/;
-        default_type image/jpeg;
-        autoindex off;
-        add_header Cache-Control "no-store";
-        allow 127.0.0.1;
-        allow ::1;
-        deny all;
-    }
-}
-EOF
-else
-  cat <<'EOF' > /etc/nginx/sites-enabled/bascula
-server {
-    listen 80 default_server;
-    server_name _;
-    root /opt/bascula/current/dist;
-    index index.html;
-
-    gzip on;
-    gzip_vary on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml;
-
-    set_real_ip_from 127.0.0.1;
-    set_real_ip_from ::1;
-    real_ip_header X-Forwarded-For;
-    real_ip_recursive on;
-
-    # PWA/SPA
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Archivos estáticos
-    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf)$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-    }
-
-    # Proxy principal hacia FastAPI
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
-    }
-
-    # Compatibilidad rutas legacy sin /api
-    location /camera/  { proxy_pass http://127.0.0.1:8080/api/camera/;  include proxy_params; }
-    location /voice/   { proxy_pass http://127.0.0.1:8080/api/voice/;   include proxy_params; }
-    location /miniweb/ { proxy_pass http://127.0.0.1:8080/api/miniweb/; include proxy_params; }
-    location /net/     { proxy_pass http://127.0.0.1:8080/api/net/;     include proxy_params; }
-
-    # WebSocket
-    location /ws/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "Upgrade";
-        proxy_set_header Host $host;
-    }
-
-    # Exponer capturas de la cámara (solo localhost)
-    location ^~ /captures/ {
-        alias /run/bascula/captures/;
-        default_type image/jpeg;
-        autoindex off;
-        add_header Cache-Control "no-store";
-        allow 127.0.0.1;
-        allow ::1;
-        deny all;
-    }
-}
-EOF
-fi
+ln -sf /etc/nginx/sites-available/bascula /etc/nginx/sites-enabled/bascula
 rm -f /etc/nginx/sites-enabled/default
-if command -v sudo >/dev/null 2>&1; then
-  if try_or_warn "nginx -t" "sudo nginx -t"; then
-    sudo systemctl reload nginx || warn "No se pudo recargar Nginx"
-  fi
-else
-  if try_or_warn "nginx -t" "nginx -t"; then
-    systemctl_safe reload nginx
-  fi
+if try_or_warn "nginx -t" "nginx -t"; then
+  systemctl_safe reload nginx
 fi
 log "✓ Nginx configurado"
 
@@ -2425,37 +2262,55 @@ log "Instalando dependencias mínimas de Xorg y Chromium..."
 try_or_warn "apt Xorg & kiosk" "sudo apt-get update -y && sudo apt-get install -y xserver-xorg xinit openbox chromium unclutter fonts-dejavu-core libxi6 libxrender1 libxrandr2 libgtk-3-0"
 
 # Ensure Python virtual environment and backend dependencies
-log "Preparando entorno Python en /opt/bascula/current..."
+log "Verificando entorno Python en /opt/bascula/current..."
 if ! cd /opt/bascula/current; then
   echo "[ERR] no se encontró /opt/bascula/current" >&2
   exit 1
 fi
 
-python3 -m venv .venv || exit 1
-. .venv/bin/activate
-pip install --upgrade pip wheel || exit 1
-pip install -r requirements.txt || exit 1
-if [ -f requirements-voice.txt ]; then pip install -r requirements-voice.txt || true; fi
-.venv/bin/uvicorn --version >/dev/null 2>&1 || { echo "[ERR] uvicorn no instalado en .venv"; exit 1; }
-
-# Build frontend assets
-log "Compilando frontend..."
-if command -v npm >/dev/null 2>&1; then
-  npm ci --prefer-offline || { echo "[ERR] npm ci falló"; exit 1; }
-  npm run build || { echo "[ERR] npm run build falló"; exit 1; }
-else
-  echo "[ERR] npm no disponible; instala Node/NPM antes de construir"
+if [[ ! -x .venv/bin/python ]]; then
+  echo "[ERR] no existe /opt/bascula/current/.venv/bin/python" >&2
   exit 1
 fi
-[ -d "/opt/bascula/current/dist" ] || { echo "[ERR] dist/ no generado"; exit 1; }
+
+if ! .venv/bin/python -m uvicorn --version >/dev/null 2>&1; then
+  warn "uvicorn no instalado en .venv; ejecuta pip install -r requirements.txt"
+fi
+
+# Build frontend assets (única compilación)
+log "Compilando frontend..."
+if [[ -f "package.json" ]]; then
+  if command -v npm >/dev/null 2>&1; then
+    if ! npm ci; then
+      err "[ERROR] npm ci falló"
+      exit 1
+    fi
+    if command -v node >/dev/null 2>&1; then
+      if ! node scripts/generate-service-worker.mjs; then
+        warn "No se pudo generar service worker"
+      fi
+    else
+      warn "Node.js no disponible para generar service worker"
+    fi
+    if ! npm run build; then
+      err "[ERROR] npm run build falló"
+      exit 1
+    fi
+  else
+    err "[ERROR] npm no disponible; instala Node/NPM antes de construir"
+    exit 1
+  fi
+  [ -d "${BASCULA_CURRENT_LINK}/dist" ] || { err "[ERROR] dist/ no generado"; exit 1; }
+  log "✓ Frontend compilado (npm ci + build)"
+else
+  warn "package.json no encontrado; se omite build de frontend"
+fi
 
 # Runtime directories for captures served by Nginx
 install -d -o pi -g www-data -m 0755 /run/bascula
-install -d -o pi -g www-data -m 02770 /run/bascula/captures
+install -d -o pi -g www-data -m 0770 /run/bascula/captures
 usermod -aG www-data pi || true
-
-deactivate >/dev/null 2>&1 || true
-cd - >/dev/null 2>&1 || true
+cd "${PROJECT_ROOT}" >/dev/null 2>&1 || true
 
 # Final permissions
 log "[20/20] Ajustando permisos finales..."
@@ -2495,28 +2350,34 @@ else
 fi
 
 # Smoke checks
-try_or_warn "miniweb alive" "curl -s http://127.0.0.1:8080/api/health"
+try_or_warn "miniweb status" "curl -fsS http://127.0.0.1:8080/api/miniweb/status | grep -q '\"ok\"[[:space:]]*:[[:space:]]*true'"
 try_or_warn "nginx root" "curl -sI http://127.0.0.1/ | head -n1"
 try_or_warn "ui kiosk log" "tail -n 50 /var/log/bascula/ui.log"
 
 # Final message
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 log "============================================"
-log "  ¡Instalación Completada!"
+log "  Resumen instalación Báscula Digital Pro"
 log "============================================"
-log "Sistema instalado con éxito:"
-log "  ✅ Estructura OTA en: ${BASCULA_CURRENT_LINK}"
-log "  ✅ Config en: ${CFG_PATH}"
-log "  ✅ Audio I2S + Piper TTS"
-log "  ✅ Camera Module 3 + OCR"
-log "  ✅ Nginx + Mini-web + UI kiosk"
-log_warn "═══════════════════════════════════════════"
-log_warn "  ⚠ REINICIO REQUERIDO"
-log_warn "═══════════════════════════════════════════"
-log "  sudo reboot"
-log "Después del reinicio, acceder a:"
+log "  OTA releases: ${BASCULA_RELEASES_DIR}"
+log "  OTA activo -> ${BASCULA_CURRENT_LINK}"
+log "  Configuración -> ${CFG_PATH}"
+log "  Entorno Python -> ${BASCULA_CURRENT_LINK}/.venv"
+if [[ -d "${BASCULA_CURRENT_LINK}/dist" ]]; then
+  log "  Frontend compilado: dist/ (npm ci + npm run build)"
+else
+  warn "  Frontend no generado (dist/ ausente)"
+fi
+log "  Servicios habilitados: nginx bascula-miniweb bascula-backend bascula-ui ocr-service"
+log "  Capturas servidas desde: /run/bascula/captures (grupo www-data)"
+if [[ ${BOOT_CONFIG_CHANGED} -eq 1 ]]; then
+  log_warn "  ⚠ Cambios en /boot/firmware/config.txt -> ejecuta 'sudo reboot'"
+else
+  log "  sudo reboot (recomendado tras instalación)"
+fi
+log "Accesos tras el reinicio:"
 log "  http://${IP:-<IP>} o http://localhost"
-log "  Mini-Web: visita http://${IP:-<IP>}:8080 · PIN: consulta /api/miniweb/pin en AP o mira la pantalla"
+log "  Mini-Web -> http://${IP:-<IP>}:8080 (consulta /api/miniweb/pin en AP o en pantalla)"
 log "Comandos útiles:"
 log "  journalctl -u bascula-miniweb.service -f"
 log "  journalctl -u bascula-ui.service -f"
@@ -2582,8 +2443,6 @@ install_services() {
     systemctl is-active --quiet bascula-miniweb || systemctl start bascula-miniweb
     systemctl is-active --quiet bascula-backend  || systemctl start bascula-backend
 
-    systemd-tmpfiles --create /etc/tmpfiles.d/bascula.conf || true
-    systemd-tmpfiles --create /etc/tmpfiles.d/bascula-x11.conf || true
   else
     echo "[install] ALLOW_SYSTEMD!=1; units copiados pero no habilitados"
   fi
@@ -2606,9 +2465,19 @@ if [[ ${SERVICES_INSTALLED} -eq 1 && "${HAS_SYSTEMD}" -eq 1 ]]; then
   systemctl daemon-reload || warn "systemctl daemon-reload falló"
   if systemctl restart bascula-miniweb; then
     sleep 5
-    if ! curl -fsS http://127.0.0.1:8080/health >/dev/null; then
-      err "[ERROR] miniweb no responde"
-      exit 1
+    if command -v curl >/dev/null 2>&1; then
+      miniweb_status=""
+      if miniweb_status=$(curl -fsS http://127.0.0.1:8080/api/miniweb/status 2>/dev/null); then
+        if printf '%s' "${miniweb_status}" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+          log "Mini-web saludable (status 200 /api/miniweb/status)"
+        else
+          warn "Mini-web respondió sin ok=true tras reinicio"
+        fi
+      else
+        warn "No se pudo consultar /api/miniweb/status tras reinicio"
+      fi
+    else
+      warn "curl no disponible para verificar miniweb tras reinicio"
     fi
     run_audio_io_self_tests 0 1
   else

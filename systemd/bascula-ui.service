@@ -14,12 +14,16 @@ Environment=HOME=/home/pi
 Environment=USER=pi
 Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/1000
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
 StandardOutput=journal
 StandardError=journal
 PermissionsStartOnly=yes
-ExecStart=/usr/bin/startx /opt/bascula/current/scripts/start-kiosk.sh -- :0 vt1
+ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
 Restart=always
-RestartSec=2s
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
