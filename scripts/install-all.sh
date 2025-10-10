@@ -2255,7 +2255,12 @@ if [[ "${HAS_SYSTEMD}" -eq 1 && "${ALLOW_SYSTEMD:-1}" -eq 1 ]]; then
 else
   warn "tmpfiles no ejecutado (systemd o ALLOW_SYSTEMD deshabilitado)"
 fi
+# Bootstrap defensivo: asegurar setgid y grupo correcto si tmpfiles aún no corrió
+install -d -o pi -g www-data -m 02770 /run/bascula/captures
+chmod g+s /run/bascula/captures || true
+chgrp www-data /run/bascula /run/bascula/captures || true
 log "✓ tmpfiles configurado"
+stat -c '[inst] captures perms: %A %U:%G %a %n' /run/bascula/captures || true
 
 # Lite UI dependencies (Xorg + Chromium kiosk)
 log "Instalando dependencias mínimas de Xorg y Chromium..."
