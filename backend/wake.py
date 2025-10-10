@@ -136,6 +136,24 @@ def _format_sample_rate(sample_rate: int) -> str:
     return f"{sample_rate} Hz"
 
 
+def _resolve_backend_base_url() -> str:
+    """
+    Prioridad (de mayor a menor):
+    1) BASCULA_API_URL (nueva)
+    2) BACKEND_BASE_URL (compat previa)
+    3) Composición BASCULA_BACKEND_HOST + BASCULA_BACKEND_PORT
+    4) Fallback seguro: http://127.0.0.1:8081
+    """
+
+    url = os.getenv("BASCULA_API_URL") or os.getenv("BACKEND_BASE_URL")
+    if not url:
+        host = os.getenv("BASCULA_BACKEND_HOST")
+        port = os.getenv("BASCULA_BACKEND_PORT")
+        if host and port:
+            url = f"http://{host}:{port}"
+    return (url or "http://127.0.0.1:8081").rstrip("/")
+
+
 class WakeSimulatePayload(BaseModel):
     text: str
 
@@ -630,10 +648,7 @@ class WakeListener:
     def _try_remote_transcription(self, wav_audio: bytes) -> Optional[str]:
         if requests is None:
             return None
-        base_url = os.getenv("BASCULA_API_URL", "http://127.0.0.1:8081")
-        if not base_url:
-            base_url = "http://127.0.0.1:8081"
-        base_url = base_url.rstrip("/")
+        base_url = _resolve_backend_base_url()
         if self._transcribe_url is None:
             self._transcribe_url = f"{base_url}/api/voice/transcribe"
         try:
