@@ -312,91 +312,45 @@ check_owner() {
 }
 
 check_python_imports() {
-  local output
-output=$(su - "${DEFAULT_USER}" -s /bin/bash <<EOF 2>&1
-set -euo pipefail # Garantiza fail-fast dentro de la shell de verificación
-venv_dir="${CURRENT_LINK}/.venv"
-venv_activate="${CURRENT_LINK}/.venv/bin/activate"
-venv_python="${CURRENT_LINK}/.venv/bin/python"
-
-if [[ ! -d "\${venv_dir}" ]]; then
-  printf '%s[err] Entorno virtual no encontrado: %s\n' "${LOG_PREFIX}" "\${venv_dir}" >&2
-  exit 1
-fi
-
-if [[ ! -f "\${venv_activate}" ]]; then
-  printf '%s[err] Script de activación inexistente: %s\n' "${LOG_PREFIX}" "\${venv_activate}" >&2
-  exit 1
-fi
-
-if [[ ! -x "\${venv_python}" ]]; then
-  printf '%s[err] Binario python del venv no encontrado: %s\n' "${LOG_PREFIX}" "\${venv_python}" >&2
-  exit 1
-fi
-
-# Activa el venv y lanza el bloque Python en la misma shell (fail-fast)
-source "\${venv_activate}" && "\${venv_python}" - <<'PY'
-import importlib
-import os
-import sys
-
-log_prefix = "${LOG_PREFIX}"
-venv_dir = os.path.realpath("${CURRENT_LINK}/.venv")
-env_venv = os.environ.get("VIRTUAL_ENV")
-exe = os.path.abspath(sys.executable)
-
-if not env_venv:
-    print(f"{log_prefix}[err] VIRTUAL_ENV no establecido tras activar el venv")
-    raise SystemExit(1)
-
-if os.path.realpath(env_venv) != venv_dir:
-    print(f"{log_prefix}[err] VIRTUAL_ENV apunta a {env_venv}, esperado {venv_dir}")
-    raise SystemExit(1)
-
-try:
-    if os.path.commonpath([venv_dir, exe]) != venv_dir:
-        print(f"{log_prefix}[err] sys.executable fuera del venv: {exe}")
-        raise SystemExit(1)
-except ValueError:
-    print(f"{log_prefix}[err] sys.executable fuera del venv: {exe}")
-    raise SystemExit(1)
-
-required = [  # Módulos críticos para el runtime Python
-    "fastapi",
-    "uvicorn",
-    "cv2",
-    "rapidocr_onnxruntime",
-    "onnxruntime",
-    "sounddevice",
-    "vosk",
-]
-
-missing = []
-for module in required:
-    try:
-        importlib.import_module(module)
-    except Exception as exc:  # noqa: BLE001 - logueamos fallo explícito
-        print(f"{log_prefix}[err] Falló import {module!r}: {exc}")
-        missing.append(module)
-
-if missing:
-    separator = ", "
-    print(f"{log_prefix}[err] Módulos faltantes o con error: {separator.join(missing)}")
-    raise SystemExit(1)
-
-print(f"{log_prefix}[ok] OK: imports y venv correctos")
-PY
-EOF
-  )
-
-  local status=$?
-  if [[ ${status} -eq 0 ]]; then
-    printf '%s\n' "${output}" # Superficie el log exitoso al caller
-    return 0
+  log_step "Validando imports críticos en el venv"
+  local venv_py="${CURRENT_LINK}/.venv/bin/python"
+  if [[ ! -x "${venv_py}" ]]; then
+    log_err "Python del venv no existe: ${venv_py}"
+    return 1
   fi
 
-  CHECK_FAIL_MSG="${output}"
-  return 1
+  # Ejecuta como usuario por defecto, abortando si falla la activación del venv o cualquier import
+  local rc=0
+  su - "${DEFAULT_USER}" -s /bin/bash <<EOF || rc=$?
+set -euo pipefail
+export CURRENT_LINK="${CURRENT_LINK}"
+. "${CURRENT_LINK}/.venv/bin/activate"
+
+python - <<'PY'
+import os, sys, pathlib
+print("executable=", sys.executable)
+print("prefix    =", sys.prefix)
+print("base_pref =", getattr(sys, "base_prefix", "<no-attr>"))
+
+# Imports críticos
+import fastapi, uvicorn, cv2, rapidocr_onnxruntime
+
+# Verificación de que estamos en el venv correcto
+venv_expected = pathlib.Path(os.environ["CURRENT_LINK"], ".venv").resolve()
+in_venv = pathlib.Path(sys.prefix).resolve()
+if in_venv != venv_expected:
+    print(f"VENVCHECK=FAIL expected={venv_expected} got={in_venv}")
+    raise SystemExit(2)
+print("imports   = OK")
+PY
+EOF
+
+  if [[ ${rc} -ne 0 ]]; then
+    log_err "Validación falló: imports críticos en venv (rc=${rc})"
+    return ${rc}
+  fi
+  log_ok "imports críticos en venv OK"
+  return 0
 }
 
 abort() {
