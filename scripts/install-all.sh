@@ -843,6 +843,7 @@ install_systemd_units() {
   local units=(
     bascula-miniweb.service
     bascula-backend.service
+    bascula-health-wait.service
     bascula-ui.service
   )
   local unit
