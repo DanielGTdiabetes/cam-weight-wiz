@@ -283,10 +283,12 @@ check_owner() {
 }
 
 check_python_imports() {
-  local command
-  command=". ${CURRENT_LINK}/.venv/bin/activate && python -c \"import fastapi,uvicorn,cv2,rapidocr_onnxruntime\""
   local output
-  output=$(su - "${DEFAULT_USER}" -s /bin/bash -c "${command//"/\"}" 2>&1)
+  output=$(su - "${DEFAULT_USER}" -s /bin/bash <<EOF 2>&1
+. "${CURRENT_LINK}/.venv/bin/activate"
+python -c 'import fastapi,uvicorn,cv2,rapidocr_onnxruntime'
+EOF
+  )
   local status=$?
   if [[ ${status} -eq 0 ]]; then
     return 0
@@ -596,24 +598,19 @@ get_playback_hw() {
     local list
     list=$(aplay -L 2>/dev/null)
     local hifiberry
-    hifiberry=$(printf '%s
-' "${list}" | awk '/^hw:CARD=sndrpihifiberry/ {print; exit}')
+    hifiberry=$(printf '%s\n' "${list}" | awk '/^hw:CARD=sndrpihifiberry/ {print; exit}')
     if [[ -n "${hifiberry}" ]]; then
-      printf '%s
-' "${hifiberry}"
+      printf '%s\n' "${hifiberry}"
       return 0
     fi
     local hdmi
-    hdmi=$(printf '%s
-' "${list}" | awk '/^hw:CARD=vc4hdmi/ {print; exit}')
+    hdmi=$(printf '%s\n' "${list}" | awk '/^hw:CARD=vc4hdmi/ {print; exit}')
     if [[ -n "${hdmi}" ]]; then
-      printf '%s
-' "${hdmi}"
+      printf '%s\n' "${hdmi}"
       return 0
     fi
   fi
-  printf 'hw:0,0
-'
+  printf 'hw:0,0\n'
 }
 
 get_capture_hw() {
@@ -621,24 +618,19 @@ get_capture_hw() {
     local list
     list=$(arecord -L 2>/dev/null)
     local preferred
-    preferred=$(printf '%s
-' "${list}" | awk '/^hw:CARD=/ {print}' | grep -Ei 'usb|mic|seeed|input' | head -n1)
+    preferred=$(printf '%s\n' "${list}" | awk '/^hw:CARD=/ {print}' | grep -Ei 'usb|mic|seeed|input' | head -n1)
     if [[ -n "${preferred}" ]]; then
-      printf '%s
-' "${preferred}"
+      printf '%s\n' "${preferred}"
       return 0
     fi
     local first
-    first=$(printf '%s
-' "${list}" | awk '/^hw:CARD=/ {print; exit}')
+    first=$(printf '%s\n' "${list}" | awk '/^hw:CARD=/ {print; exit}')
     if [[ -n "${first}" ]]; then
-      printf '%s
-' "${first}"
+      printf '%s\n' "${first}"
       return 0
     fi
   fi
-  printf 'hw:1,0
-'
+  printf 'hw:1,0\n'
 }
 
 install_asound_conf() {
