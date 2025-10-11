@@ -11,6 +11,11 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# --- Frontend/WWW ---
+export WWW_ROOT="${WWW_ROOT:-/opt/bascula/www}"
+# Si el usuario fija FRONTEND_DIR, lo respetamos; si no, autodetección.
+export FRONTEND_DIR="${FRONTEND_DIR:-}"
+
 LOG_PREFIX="[install]"
 RELEASES_DIR="/opt/bascula/releases"
 CURRENT_LINK="/opt/bascula/current"
@@ -28,8 +33,6 @@ BOOT_FIRMWARE_DIR="/boot/firmware"
 BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
 REBOOT_FLAG=0
 
-WWW_ROOT="${WWW_ROOT:-/opt/bascula/www}"
-FRONTEND_DIR="${FRONTEND_DIR:-/opt/bascula/current}"
 : "${SKIP_UI_BUILD:=0}"
 
 umask 022
@@ -44,6 +47,121 @@ log_warn() {
 
 log_err() {
   printf '%s[err] %s\n' "${LOG_PREFIX}" "$*" >&2
+}
+
+choose_pkg_manager() {
+  # Detecta gestor por lockfile; fallback npm
+  if [[ -f "${FRONTEND_DIR}/pnpm-lock.yaml" ]]; then echo "pnpm"; return; fi
+  if [[ -f "${FRONTEND_DIR}/yarn.lock" ]]; then echo "yarn"; return; fi
+  echo "npm"
+}
+
+ensure_node_runtime() {
+  if command -v node >/dev/null 2>&1; then
+    local v
+    v="$(node -v | sed 's/^v//;s/\..*$//')" || true
+    if [[ -n "${v:-}" && "${v}" -ge 16 ]]; then
+      log "Node ya presente: $(node -v), npm $(npm -v)"
+      return 0
+    fi
+  fi
+  log "Instalando Node.js 20.x (Nodesource)"
+  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+  sudo apt-get install -y nodejs
+  log "Node $(node -v), npm $(npm -v)"
+}
+
+detect_frontend_dir() {
+  if [[ -n "${FRONTEND_DIR:-}" && -f "${FRONTEND_DIR}/package.json" ]]; then
+    echo "${FRONTEND_DIR}"; return 0
+  fi
+  # Rutas comunes
+  local candidates=(
+    "${PWD}"
+    "${PWD}/frontend"
+    "${PWD}/ui"
+    "${PWD}/web"
+    "${PWD}/app"
+    "${PWD}/frontend/ui"
+    "${PWD}/frontend/web"
+    "${PWD}/frontend/app"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -f "${c}/package.json" ]]; then
+      echo "${c}"; return 0
+    fi
+  done
+  # Búsqueda limitada y rápida en repo (excluye node_modules)
+  local found
+  found="$(find "${PWD}" -maxdepth 4 -type f -name package.json \
+            -not -path '*/node_modules/*' \
+            -exec dirname {} \; | head -n1 || true)"
+  if [[ -n "${found}" ]]; then
+    echo "${found}"; return 0
+  fi
+  echo ""
+}
+
+has_build_script() {
+  local dir="$1"
+  jq -e -r '.scripts.build // empty' "${dir}/package.json" >/dev/null 2>&1
+}
+
+run_pkg_install() {
+  local dir="$1" mgr="$2"
+  case "${mgr}" in
+    pnpm)
+      corepack enable >/dev/null 2>&1 || true
+      (cd "${dir}" && pnpm install --frozen-lockfile || pnpm install)
+      ;;
+    yarn)
+      corepack enable >/dev/null 2>&1 || true
+      (cd "${dir}" && yarn install --frozen-lockfile || yarn install)
+      ;;
+    npm|*)
+      (cd "${dir}" && npm ci || npm install)
+      ;;
+  esac
+}
+
+run_pkg_build() {
+  local dir="$1" mgr="$2"
+  case "${mgr}" in
+    pnpm) (cd "${dir}" && pnpm run build) ;;
+    yarn) (cd "${dir}" && yarn build) ;;
+    npm|*) (cd "${dir}" && npm run build) ;;
+  esac
+}
+
+detect_build_output_dir() {
+  # Preferencia típica: dist (Vite) > build (CRA)
+  local dir="$1"
+  if [[ -d "${dir}/dist" ]]; then echo "${dir}/dist"; return 0; fi
+  if [[ -d "${dir}/build" ]]; then echo "${dir}/build"; return 0; fi
+  # Fallback: busca index.html recién generado
+  local out
+  out="$(find "${dir}" -maxdepth 3 -type f -name index.html \
+          -not -path '*/node_modules/*' \
+          -printf '%h\n' | head -n1 || true)"
+  echo "${out}"
+}
+
+publish_frontend() {
+  local src="$1"
+  local dst="${WWW_ROOT}"
+
+  if [[ -z "${src}" || ! -d "${src}" ]]; then
+    log_err "Carpeta de artefactos de build inválida: ${src}"
+    return 1
+  fi
+  sudo mkdir -p "${dst}"
+  # Copia limpia (idempotente)
+  sudo rsync -a --delete "${src}/" "${dst}/"
+  # Permisos legibles por nginx
+  sudo find "${dst}" -type d -exec chmod 0755 {} \;
+  sudo find "${dst}" -type f -exec chmod 0644 {} \;
+  log "Frontend publicado en ${dst}"
 }
 
 abort() {
@@ -466,89 +584,6 @@ configure_nginx_site() {
   rm -f "${rendered}"
 
   ln -sfn "${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}" "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
-  rm -f "${NGINX_SITES_ENABLED}/default"
-
-  if ! nginx -t; then
-    echo "[install][err] nginx -t falló" >&2
-    exit 1
-  fi
-  systemctl reload nginx
-}
-
-ensure_node() {
-  if ! command -v node >/dev/null 2>&1; then
-    log "Instalando Node.js 20.x"
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-  fi
-  log "Node $(node -v), npm $(npm -v)"
-  corepack enable 2>/dev/null || true
-  corepack prepare yarn@stable --activate 2>/dev/null || true
-  corepack prepare pnpm@latest --activate 2>/dev/null || true
-}
-
-build_frontend() {
-  if [[ "${SKIP_UI_BUILD}" == "1" ]]; then
-    log_warn "SKIP_UI_BUILD=1, omitiendo build de UI"
-    return 0
-  fi
-
-  local pkg_json="${FRONTEND_DIR}/package.json"
-  if [[ ! -f "${pkg_json}" ]]; then
-    log_warn "Frontend no encontrado; se servirá miniweb."
-    return 0
-  fi
-
-  pushd "${FRONTEND_DIR}" >/dev/null
-
-  if ! node -e 'const pkg=require("./package.json"); process.exit(pkg.scripts && pkg.scripts.build ? 0 : 1);' >/dev/null 2>&1; then
-    log_warn "Frontend no encontrado; se servirá miniweb."
-    popd >/dev/null
-    return 0
-  fi
-
-  if [[ -f pnpm-lock.yaml ]]; then
-    if ! command -v pnpm >/dev/null 2>&1; then
-      npm install -g pnpm
-    fi
-    pnpm i --frozen-lockfile
-    pnpm build
-  elif [[ -f yarn.lock ]]; then
-    corepack enable 2>/dev/null || true
-    yarn install --frozen-lockfile
-    yarn build
-  else
-    if [[ -f package-lock.json ]]; then
-      npm ci || npm install
-    else
-      npm install
-    fi
-    npm run build
-  fi
-
-  local build_dir=""
-  if [[ -d "dist" ]]; then
-    build_dir="dist"
-  elif [[ -d "build" ]]; then
-    build_dir="build"
-  else
-    popd >/dev/null
-    abort "No se encontró carpeta dist ni build tras el build del frontend"
-  fi
-
-  ensure_www_root
-
-  local tmpdir
-  tmpdir="$(mktemp -d)"
-  rsync -a --delete "${FRONTEND_DIR}/${build_dir}/" "${tmpdir}/"
-  rsync -a --delete "${tmpdir}/" "${WWW_ROOT}/"
-  rm -rf "${tmpdir}"
-
-  chown -R pi:pi "${WWW_ROOT}"
-
-  popd >/dev/null
-
-  log "UI publicada en ${WWW_ROOT}"
 }
 
 ensure_chromium_browser() {
@@ -728,10 +763,79 @@ main() {
 
   install_systemd_units
   configure_bascula_ui_service
-  ensure_node
-  build_frontend
+  log "[step] Construyendo y publicando frontend"
+  if [[ "${SKIP_UI_BUILD}" == "1" ]]; then
+    log_warn "SKIP_UI_BUILD=1, omitiendo build de UI"
+  else
+    pushd "${REPO_DIR}" >/dev/null
+
+    ensure_node_runtime
+
+    FRONTEND_DIR="$(detect_frontend_dir)"
+    if [[ -z "${FRONTEND_DIR}" ]]; then
+      log_err "No se encontró carpeta de frontend (package.json). Aborto."
+      popd >/dev/null
+      exit 1
+    fi
+    FRONTEND_DIR="$(cd "${FRONTEND_DIR}" && pwd)"
+    export FRONTEND_DIR
+    log "Frontend detectado: ${FRONTEND_DIR}"
+
+    if ! has_build_script "${FRONTEND_DIR}"; then
+      log_err "package.json sin script 'build' en ${FRONTEND_DIR}. Aborto."
+      jq -r '.scripts // {}' "${FRONTEND_DIR}/package.json" 2>/dev/null || true
+      popd >/dev/null
+      exit 1
+    fi
+
+    mgr="$(choose_pkg_manager)"
+    log "Gestor seleccionado: ${mgr}"
+
+    run_pkg_install "${FRONTEND_DIR}" "${mgr}"
+    run_pkg_build "${FRONTEND_DIR}" "${mgr}"
+
+    OUT_DIR="$(detect_build_output_dir "${FRONTEND_DIR}")"
+    if [[ -z "${OUT_DIR}" || ! -d "${OUT_DIR}" ]]; then
+      log_err "No se encontró carpeta de salida tras build (dist/build). Aborto."
+      popd >/dev/null
+      exit 1
+    fi
+    log "Artefactos: ${OUT_DIR}"
+
+    if ! publish_frontend "${OUT_DIR}"; then
+      popd >/dev/null
+      exit 1
+    fi
+    popd >/dev/null
+  fi
   ensure_www_root
   configure_nginx_site
+  log "[step] Validando y recargando Nginx"
+  if sudo nginx -t; then
+    sudo systemctl reload nginx
+    log "Nginx recargado"
+  else
+    log_err "nginx -t falló. Abortando instalación."
+    exit 1
+  fi
+
+  if [[ -f /etc/nginx/sites-available/bascula.conf ]]; then
+    sudo ln -sfn /etc/nginx/sites-available/bascula.conf /etc/nginx/sites-enabled/bascula.conf
+    # No tocamos otros sites; si el default está, el admin puede retirarlo manualmente
+    if sudo nginx -t; then sudo systemctl reload nginx; fi
+  fi
+
+  log "[step] Comprobación final de salud"
+  set +e
+  ui_code="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/)"
+  api_code="$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/api/health)"
+  set -e
+  log "UI http://127.0.0.1 -> ${ui_code}"
+  log "API http://127.0.0.1/api/health -> ${api_code}"
+  if [[ "${api_code}" != "200" ]]; then
+    log_err "API no responde 200 tras el deploy."
+    exit 1
+  fi
   ensure_services_and_health
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
