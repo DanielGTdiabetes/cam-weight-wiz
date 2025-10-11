@@ -31,7 +31,7 @@ ASOUND_CONF="/etc/asound.conf"
 AUDIO_ENV_FILE="/etc/default/bascula-audio"
 BOOT_FIRMWARE_DIR="/boot/firmware"
 BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
-PIPER_VOICES_DIR="/opt/bascula/voices"
+PIPER_VOICES_DIR="/opt/bascula/voices/piper"
 REBOOT_FLAG=0
 
 : "${SKIP_UI_BUILD:=0}"
@@ -706,47 +706,18 @@ EOF
 }
 
 ensure_piper_voices() {
-  log_step "Preparando voces Piper"
-
-  install -d -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" -m 0755 "${PIPER_VOICES_DIR}"
-
-  local configured_models="${BASCULA_PIPER_MODELS:-}"
-  if [[ -n "${configured_models}" ]]; then
-    configured_models="${configured_models//,/ }"
+  if ! command -v jq >/dev/null 2>&1; then
+    ensure_packages jq
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    ensure_packages curl
   fi
 
-  local -a models
-  if [[ -n "${configured_models}" ]]; then
-    read -r -a models <<<"${configured_models}"
-  else
-    models=(
-      "es_ES-mls_10246-medium"
-      "es_ES-mls_10246-high"
-    )
+  echo "[install] [step] Preparando voces Piper"
+  if ! bash "$(dirname "$0")/fetch-piper-voices.sh"; then
+    log_err "Error al preparar voces Piper"
+    exit 1
   fi
-
-  local model lang_prefix base_url
-  for model in "${models[@]}"; do
-    model="$(printf '%s' "${model}" | xargs 2>/dev/null || printf '%s' "${model}")"
-    if [[ -z "${model}" ]]; then
-      continue
-    fi
-
-    lang_prefix="${model%%_*}"
-    if [[ -z "${lang_prefix}" || "${lang_prefix}" == "${model}" ]]; then
-      lang_prefix="${model%%-*}"
-    fi
-    if [[ -z "${lang_prefix}" ]]; then
-      lang_prefix="es"
-    fi
-
-    base_url="https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang_prefix}/${model}"
-
-    ensure_remote_file "${base_url}.onnx?download=1" "${PIPER_VOICES_DIR}/${model}.onnx" "${model}.onnx"
-    ensure_remote_file "${base_url}.onnx.json?download=1" "${PIPER_VOICES_DIR}/${model}.onnx.json" "${model}.onnx.json"
-  done
-
-  chown -R "${DEFAULT_USER}:${DEFAULT_USER}" "${PIPER_VOICES_DIR}"
 }
 
 ensure_audio_env_file() {
@@ -1044,6 +1015,7 @@ run_final_checks() {
   final_check "health vía nginx" check_http_endpoint "http://127.0.0.1/api/health" '{"status":"ok"}'
   final_check "cabeceras SSE en proxy" check_sse_headers "http://127.0.0.1/api/scale/events"
   final_check "voces Piper instaladas" check_piper_voices_installed "${PIPER_VOICES_DIR}"
+  test -f /opt/bascula/voices/piper/default.onnx || (echo "[ERR] Piper sin voz por defecto" && exit 1)
   if [[ ${FRONTEND_EXPECTED} -eq 1 ]]; then
     final_check "frontend publicado en ${WWW_ROOT}/index.html" check_file_exists "${WWW_ROOT}/index.html"
   else
