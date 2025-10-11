@@ -1237,8 +1237,9 @@ ensure_python_venv() {
   pip uninstall -y numpy simplejpeg picamera2 || true
   rm -rf "${venv_dir}/lib/python3.11/site-packages"/{numpy*,simplejpeg*,picamera2*} || true
   pip install --upgrade pip wheel
+  # Instalamos uvicorn sin extras para evitar watchfiles (requiere Rust en Pi).
   pip install \
-    "uvicorn[standard]" \
+    "uvicorn>=0.30,<1.0" \
     "fastapi>=0.115" \
     "starlette>=0.38" \
     "click>=8.1" \

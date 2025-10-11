@@ -21,6 +21,7 @@ shapely!=2.0.4,>=2.0.1
 requests
 sounddevice
 starlette>=0.38
-uvicorn[standard]
+# Evitamos extras ([standard]) para no arrastrar watchfiles (requiere Rust en Pi).
+uvicorn>=0.30,<1.0
 vosk
 websockets
