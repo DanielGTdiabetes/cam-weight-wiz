@@ -1040,7 +1040,7 @@ get_capture_hw() {
     fi
     if [[ -n "${preferred}" ]]; then
       CAPTURE_HW_RECOMMENDATION="${preferred}"
-      log "Micrófono recomendado para Vosk/Piper: ${preferred}"
+      log "Micrófono recomendado para Vosk/Piper: ${preferred}" >&2
     fi
   fi
 
