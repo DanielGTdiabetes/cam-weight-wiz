@@ -497,11 +497,22 @@ configure_nginx_site() {
     fi
   done
 
-  if nginx -t; then
-    systemctl reload nginx || systemctl restart nginx || true
-  else
-    log_err "nginx -t ha fallado; revisa configuración antes de recargar."
+  # Validación estricta y recarga segura de Nginx (fail-fast)
+  log "Validando configuración de Nginx…"
+  if ! nginx -t; then
+    log_err "nginx -t ha fallado; abortando instalación."
+    # Mostrar detalle de error por salida estándar (útil para CI y diagnóstico)
+    nginx -t || true
+    exit 1
   fi
+
+  # Recarga (sin silencios). Si reload falla, intenta restart. Si restart falla, aborta.
+  log "Recargando Nginx…"
+  if ! systemctl reload nginx; then
+    log_warn "reload falló, intentando restart…"
+    systemctl restart nginx
+  fi
+  log "Nginx recargado correctamente."
 }
 
 ensure_node() {
