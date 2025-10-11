@@ -1328,6 +1328,23 @@ ensure_piper_cli() {
     log_warn "Comando piper existente pero inválido (${existing}); se reinstalará"
   fi
 
+  local venv_piper="${CURRENT_LINK}/.venv/bin/piper"
+  if [[ -x "${venv_piper}" ]]; then
+    install -Dm0755 "${venv_piper}" "${PIPER_BIN_PATH}"
+    if [[ -w "${PIPER_BIN_PATH}" ]]; then
+      sed -i '1c#!/opt/bascula/current/.venv/bin/python' "${PIPER_BIN_PATH}" || true
+    fi
+    if "${PIPER_BIN_PATH}" --help >/dev/null 2>&1; then
+      SUMMARY_PIPER_CLI="ok (${PIPER_BIN_PATH})"
+      log_ok "Piper CLI operativo vía entorno virtual (${PIPER_BIN_PATH})"
+      return 0
+    fi
+    local venv_err
+    venv_err="$("${PIPER_BIN_PATH}" --help 2>&1 || true)"
+    log_warn "Piper CLI de la venv no respondió correctamente, se intentará binario precompilado"
+    log_warn "Salida (--help): ${venv_err}"
+  fi
+
   local tmpdir archive
   tmpdir="$(mktemp -d)"
   archive="${tmpdir}/piper.tar.gz"
@@ -1407,8 +1424,9 @@ ensure_piper_cli() {
   install -Dm0755 "${binary}" "${PIPER_BIN_PATH}"
   rm -rf "${tmpdir}"
 
-  if ! "${PIPER_BIN_PATH}" --help >/dev/null 2>&1; then
-    log_err "piper CLI instalado pero --help falló"
+  local help_output
+  if ! help_output="$("${PIPER_BIN_PATH}" --help 2>&1)"; then
+    log_err "piper CLI instalado pero --help falló: ${help_output}"
     exit 1
   fi
 
