@@ -35,6 +35,8 @@ Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 - Personaliza la ruta exportando `BASCULA_LOG_DIR=/ruta` o `BASCULA_LOG_FILE=/ruta/fichero.log` antes de ejecutarlo.
 - Activa el trazado detallado con `BASCULA_TRACE=1`; el `PS4` enriquecido añade timestamps, PID, archivo, línea y función a cada comando.
 - Al finalizar (incluso si falla) muestra la ruta exacta del log generado.
+- Consulta el último log con `sudo tail -n 200 "$(ls -1t ${BASCULA_LOG_DIR:-/var/log/bascula}/install-*.log | head -n1)"`.
+- Para habilitar el trace desde `sudo`, exporta la variable y conserva el entorno: `sudo -E BASCULA_TRACE=1 ./scripts/install-all.sh`.
 
 ### Qué hace `scripts/install-all.sh`
 
