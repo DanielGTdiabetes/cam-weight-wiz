@@ -1092,24 +1092,27 @@ disable_fbdev_xorg_configs() {
 }
 
 detect_drm_card_with_hdmi() {
-  local card connector status first_hdmi=""
+  local card connector status first_card=""
   for card in /sys/class/drm/card*; do
     [[ -d "${card}" ]] || continue
     local card_name
     card_name="$(basename "${card}")"
     while IFS= read -r connector; do
       [[ -e "${connector}" ]] || continue
+      local connector_name connector_card
+      connector_name="$(basename "${connector}")"
+      connector_card="${connector_name%%-*}"
       status="$(cat "${connector}/status" 2>/dev/null || echo unknown)"
       if [[ "${status}" == "connected" ]]; then
-        printf '%s\n' "${card_name}"
+        printf '%s\n' "${connector_card}"
         return 0
       fi
-      first_hdmi="${first_hdmi:-${card_name}}"
+      first_card="${first_card:-${connector_card}}"
     done < <(find "${card}" -maxdepth 1 -type l -name 'card*-HDMI-*' 2>/dev/null | sort)
   done
 
-  if [[ -n "${first_hdmi}" ]]; then
-    printf '%s\n' "${first_hdmi}"
+  if [[ -n "${first_card}" ]]; then
+    printf '%s\n' "${first_card}"
     return 0
   fi
 
