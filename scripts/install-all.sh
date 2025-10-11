@@ -87,8 +87,14 @@ on_exit() {
   log_step "Resumen final (rc=${rc})"
   # Estados clave (no fallan el resumen)
   systemctl is-active --quiet bascula-backend.service && log_ok "backend activo" || log_warn "backend inactivo"
-  systemctl is-active --quiet bascula-miniweb.service && log_ok "miniweb activo" || log_warn "miniweb inactivo o no instalado"
-  systemctl is-active --quiet bascula-ui.service && log_ok "UI activa" || log_warn "UI inactiva"
+  systemctl is-active --quiet bascula-miniweb.service && log_ok "miniweb activo" || log_warn "miniweb inactivo"
+  local ui_active=0
+  if systemctl is-active --quiet bascula-ui.service; then
+    log_ok "UI activa"
+    ui_active=1
+  else
+    log_warn "UI inactiva"
+  fi
 
   # Endpoints (sin abortar)
   curl -fsS http://127.0.0.1:8081/api/health >/dev/null && log_ok "health backend 200" || log_warn "health backend no devuelve 200"
@@ -98,9 +104,25 @@ on_exit() {
   [[ -e /dev/dri/card0 ]] && log_ok "/dev/dri/card0 presente" || log_warn "No existe /dev/dri/card0"
   grep -E 'dtoverlay=vc4-(fkms|kms)-v3d(-pi5)?' -n /boot/firmware/config.txt 2>/dev/null || true
 
+  log "CAPTURE_HW_DETECTED=${CAPTURE_HW_DETECTED}"
+  if [[ -n "${CAPTURE_HW_RECOMMENDATION}" ]]; then
+    log "CAPTURE_HW_RECOMMENDATION=${CAPTURE_HW_RECOMMENDATION}"
+  fi
+
+  if [[ -z "${KMS_KMSDEV_PATH}" && -f /etc/X11/xorg.conf.d/10-kms.conf ]]; then
+    KMS_KMSDEV_PATH="$(awk '/Option/ && /"kmsdev"/ {gsub("\"","",$0); print $NF}' /etc/X11/xorg.conf.d/10-kms.conf | tail -n1)"
+  fi
+  if [[ -n "${KMS_KMSDEV_PATH}" ]]; then
+    log "kmsdev configurado en 10-kms.conf: ${KMS_KMSDEV_PATH}"
+  fi
+
   echo
   if [[ $rc -ne 0 ]]; then
     log_err "Instalación con errores. Revisa arriba y en: ${BASCULA_LOG_FILE}"
+    if [[ ${ui_active} -eq 0 ]]; then
+      log_warn "Diagnóstico bascula-ui (últimas 20 líneas)"
+      systemctl status bascula-ui.service -n 20 --no-pager || true
+    fi
   else
     log_ok "Instalación completada correctamente. Log: ${BASCULA_LOG_FILE}"
   fi
@@ -123,6 +145,10 @@ BOOT_FIRMWARE_DIR="/boot/firmware"
 BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
 PIPER_VOICES_DIR="/opt/bascula/voices/piper"
 REBOOT_FLAG=0
+
+CAPTURE_HW_DETECTED=0
+CAPTURE_HW_RECOMMENDATION=""
+KMS_KMSDEV_PATH=""
 
 PI_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
 IS_PI5=0
@@ -750,6 +776,55 @@ disable_fbdev_xorg_configs() {
   done
 }
 
+detect_drm_card_with_hdmi() {
+  local card symlink status
+  for card in /sys/class/drm/card*; do
+    [[ -d "${card}" ]] || continue
+    while IFS= read -r symlink; do
+      [[ -e "${symlink}" ]] || continue
+      status="$(cat "${symlink}/status" 2>/dev/null || echo unknown)"
+      if [[ "${status}" == "connected" ]]; then
+        basename "${card}"
+        return 0
+      fi
+    done < <(find "${card}" -maxdepth 1 -type l -name 'card*-HDMI-*' 2>/dev/null)
+  done
+  echo "card0"
+}
+
+ensure_kms_device_config() {
+  if [[ ${IS_PI5} -ne 1 ]]; then
+    return 0
+  fi
+
+  local dir="/etc/X11/xorg.conf.d"
+  local conf="${dir}/10-kms.conf"
+  local card
+  card="$(detect_drm_card_with_hdmi)"
+  KMS_KMSDEV_PATH="/dev/dri/${card}"
+
+  install -d -m0755 "${dir}"
+
+  local tmp
+  tmp="$(mktemp)"
+  cat >"${tmp}" <<EOF
+Section "Device"
+  Identifier "Pi5KMS"
+  Driver     "modesetting"
+  Option     "kmsdev" "${KMS_KMSDEV_PATH}"
+EndSection
+EOF
+
+  if [[ -f "${conf}" ]] && cmp -s "${tmp}" "${conf}"; then
+    rm -f "${tmp}"
+    log "10-kms.conf sin cambios (kmsdev=${KMS_KMSDEV_PATH})"
+  else
+    install -o root -g root -m0644 "${tmp}" "${conf}"
+    log "10-kms.conf actualizado (kmsdev=${KMS_KMSDEV_PATH})"
+  fi
+  rm -f "${tmp}" || true
+}
+
 ensure_boot_overlays() {
   if [[ ! -d "${BOOT_FIRMWARE_DIR}" ]]; then
     log_warn "${BOOT_FIRMWARE_DIR} no encontrado; omitiendo configuración de overlays"
@@ -938,23 +1013,51 @@ get_playback_hw() {
 }
 
 get_capture_hw() {
-  if command -v arecord >/dev/null 2>&1; then
-    local list
-    list=$(arecord -L 2>/dev/null)
-    local preferred
-    preferred=$(printf '%s\n' "${list}" | awk '/^hw:CARD=/ {print}' | grep -Ei 'usb|mic|seeed|input' | head -n1)
-    if [[ -n "${preferred}" ]]; then
-      printf '%s\n' "${preferred}"
-      return 0
+  CAPTURE_HW_RECOMMENDATION="hw:1,0"
+
+  if ! command -v arecord >/dev/null 2>&1; then
+    log_warn "arecord no disponible; instala alsa-utils para detectar micrófonos"
+    return 0
+  fi
+
+  local capture_cards capture_list preferred
+  capture_cards="$(arecord -l 2>/dev/null || true)"
+  capture_list="$(arecord -L 2>/dev/null || true)"
+
+  if [[ -n "${capture_cards//[[:space:]]/}" ]]; then
+    CAPTURE_HW_DETECTED=1
+  else
+    log_warn "No se detectaron dispositivos de captura ALSA (arecord -l)"
+  fi
+
+  if [[ -n "${capture_list}" ]]; then
+    preferred=$(printf '%s\n' "${capture_list}" | awk '/^(default|plughw|hw):CARD=/ {print}' | grep -Ei 'usb|mic|seeed|input|record' | head -n1)
+    if [[ -z "${preferred}" ]]; then
+      preferred=$(printf '%s\n' "${capture_list}" | awk '/^(default|plughw):CARD=/ {print; exit}')
     fi
-    local first
-    first=$(printf '%s\n' "${list}" | awk '/^hw:CARD=/ {print; exit}')
-    if [[ -n "${first}" ]]; then
-      printf '%s\n' "${first}"
-      return 0
+    if [[ -z "${preferred}" ]]; then
+      preferred=$(printf '%s\n' "${capture_list}" | awk '/^hw:CARD=/ {print; exit}')
+    fi
+    if [[ -n "${preferred}" ]]; then
+      CAPTURE_HW_RECOMMENDATION="${preferred}"
+      log "Micrófono recomendado para Vosk/Piper: ${preferred}"
     fi
   fi
-  printf 'hw:1,0\n'
+
+  if [[ ${CAPTURE_HW_DETECTED} -eq 0 ]]; then
+    if command -v aplay >/dev/null 2>&1; then
+      local playback_cards
+      playback_cards="$(aplay -l 2>/dev/null || true)"
+      if [[ -n "${playback_cards//[[:space:]]/}" ]]; then
+        log_warn "Sólo se detectó salida ALSA; Piper funcionará pero falta micrófono para Vosk"
+      else
+        log_warn "Tampoco se detectaron salidas ALSA (aplay -l)"
+      fi
+    fi
+  fi
+
+  printf '%s\n' "${CAPTURE_HW_RECOMMENDATION}"
+  return 0
 }
 
 install_asound_conf() {
@@ -1033,16 +1136,25 @@ install_tmpfiles_config() {
 
 install_systemd_unit() {
   local name="$1"
-  local src="${RELEASE_DIR}/systemd/${name}"
-  if [[ ! -f "${src}" && -n "${REPO_DIR:-}" && -f "${REPO_DIR}/systemd/${name}" ]]; then
-    src="${REPO_DIR}/systemd/${name}"
-  fi
-  if [[ ! -f "${src}" && -f "${REPO_ROOT}/systemd/${name}" ]]; then
-    src="${REPO_ROOT}/systemd/${name}"
-  fi
+  local src=""
+  local candidate
+
+  for candidate in \
+    "${RELEASE_DIR}/systemd/${name}" \
+    "${RELEASE_DIR}/scripts/systemd/${name}" \
+    "${REPO_DIR:-}/scripts/systemd/${name}" \
+    "${REPO_DIR:-}/systemd/${name}" \
+    "${REPO_ROOT}/scripts/systemd/${name}" \
+    "${REPO_ROOT}/systemd/${name}"; do
+    if [[ -n "${candidate}" && -f "${candidate}" ]]; then
+      src="${candidate}"
+      break
+    fi
+  done
+
   local dest="${SYSTEMD_DEST}/${name}"
   local changed=0
-  if [[ ! -f "${src}" ]]; then
+  if [[ -z "${src}" ]]; then
     abort "No se encontró unidad systemd ${src}"
   fi
   if [[ -f "${dest}" ]] && cmp -s "${src}" "${dest}"; then
@@ -1203,50 +1315,42 @@ EOF
 
 ensure_services_started() {
   log_step "Activando servicios básicos"
-  systemctl enable --now bascula-backend.service
-
-  if systemctl list-unit-files | grep -q '^bascula-miniweb.service'; then
-    systemctl enable --now bascula-miniweb.service
-  else
-    log_warn "bascula-miniweb.service no instalado"
-  fi
-
-  if systemctl list-unit-files | grep -q '^bascula-ui.service'; then
-    systemctl enable bascula-ui.service
-    if ! systemctl start bascula-ui.service; then
-      log_err "Fallo al iniciar bascula-ui.service"
-      journalctl -u bascula-ui.service -n 80 --no-pager || true
-      exit 1
+  local services=(
+    bascula-backend.service
+    bascula-miniweb.service
+    bascula-health-wait.service
+    bascula-ui.service
+  )
+  local service
+  for service in "${services[@]}"; do
+    if [[ ! -f "${SYSTEMD_DEST}/${service}" ]]; then
+      log_warn "${service} no existe en ${SYSTEMD_DEST}; omitiendo enable/start"
+      continue
     fi
-    sleep 1
-    if ! systemctl is-active --quiet bascula-ui.service; then
-      log_err "bascula-ui.service no está activo tras el arranque"
-      journalctl -u bascula-ui.service -n 80 --no-pager || true
-      exit 1
+    if systemctl enable --now "${service}"; then
+      log "Servicio ${service} habilitado y arrancado"
+    else
+      log_warn "Fallo al enable/start ${service}; revisa journalctl -u ${service}"
     fi
-  else
-    log_warn "bascula-ui.service no instalado"
-  fi
+  done
 }
 
 run_final_checks() {
   log_step "Ejecutando validaciones finales"
   FINAL_FAILURES=0
 
-  final_check "servicio bascula-backend activo" systemctl is-active --quiet bascula-backend.service
+  local svc unit_path
+  for svc in bascula-backend bascula-miniweb bascula-health-wait bascula-ui; do
+    unit_path="${SYSTEMD_DEST}/${svc}.service"
+    if [[ ! -f "${unit_path}" ]]; then
+      log_err "Falta unidad systemd requerida: ${unit_path}"
+      FINAL_FAILURES=1
+      continue
+    fi
+    final_check "servicio ${svc} activo" systemctl is-active --quiet "${svc}.service"
+  done
+
   final_check "servicio nginx activo" systemctl is-active --quiet nginx
-
-  if systemctl list-unit-files | grep -q '^bascula-miniweb.service'; then
-    final_check "servicio bascula-miniweb activo" systemctl is-active --quiet bascula-miniweb.service
-  else
-    log_warn "bascula-miniweb.service no instalado; omitiendo validación"
-  fi
-
-  if systemctl list-unit-files | grep -q '^bascula-ui.service'; then
-    final_check "servicio bascula-ui activo" systemctl is-active --quiet bascula-ui.service
-  else
-    log_warn "bascula-ui.service no instalado; omitiendo validación"
-  fi
 
   final_check "puerto 8081 escuchando" port_listening 8081
   final_check "puerto 80 escuchando" port_listening 80
@@ -1290,6 +1394,7 @@ main() {
   ensure_boot_overlays || true
   purgar_fbdev_driver || true
   disable_fbdev_xorg_configs || true
+  ensure_kms_device_config || true
 
   mkdir -p "${RELEASES_DIR}"
   COMMIT=$(current_commit)
