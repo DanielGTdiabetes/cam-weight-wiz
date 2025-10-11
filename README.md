@@ -29,6 +29,13 @@ Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 
    El script es idempotente: se puede volver a ejecutar sin romper instalaciones previas.
 
+### Logging del instalador
+
+- `scripts/install-all.sh` vuelca siempre el log a consola y a un fichero en `BASCULA_LOG_DIR` (por defecto `/var/log/bascula`).
+- Personaliza la ruta exportando `BASCULA_LOG_DIR=/ruta` o `BASCULA_LOG_FILE=/ruta/fichero.log` antes de ejecutarlo.
+- Activa el trazado detallado con `BASCULA_TRACE=1`; el `PS4` enriquecido añade timestamps, PID, archivo, línea y función a cada comando.
+- Al finalizar (incluso si falla) muestra la ruta exacta del log generado.
+
 ### Qué hace `scripts/install-all.sh`
 
 El instalador crea una estructura tipo OTA y deja los servicios listos para producción:

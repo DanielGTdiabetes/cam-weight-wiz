@@ -7,16 +7,106 @@
 #   - Configura audio, nginx, systemd y dependencias mínimas para Pi 5
 #   - Ejecuta verificaciones básicas y controla reinicios diferidos
 #
+# Variables de entorno útiles:
+#   - BASCULA_TRACE=1 → activa trazas detalladas (set -x) con timestamps enriquecidos
+#   - BASCULA_LOG_DIR=/ruta → define la carpeta de logs (por defecto /var/log/bascula)
+#   - BASCULA_LOG_FILE=/ruta/fichero.log → fija el fichero de log a utilizar
+#
 
-set -euo pipefail
+# --- Logging & tracing (SIEMPRE en pantalla y a fichero) ---
+# Modo estricto
+set -Euo pipefail
 IFS=$'\n\t'
+
+# Ficheros/dirs de log
+export BASCULA_LOG_DIR="${BASCULA_LOG_DIR:-/var/log/bascula}"
+mkdir -p "${BASCULA_LOG_DIR}"
+START_TS="$(date +%Y%m%d-%H%M%S)"
+export BASCULA_LOG_FILE="${BASCULA_LOG_FILE:-${BASCULA_LOG_DIR}/install-${START_TS}.log}"
+touch "${BASCULA_LOG_FILE}" || true
+
+# Doble salida: consola + fichero (línea a línea)
+# stdbuf evita el buffering al tee
+exec > >(stdbuf -oL tee -a "${BASCULA_LOG_FILE}") 2> >(stdbuf -oL tee -a "${BASCULA_LOG_FILE}" >&2)
+
+# PS4 con timestamp, PID, línea y función (para set -x)
+export PS4='+ [$(date "+%F %T")] [$$] [${BASH_SOURCE##*/}:${LINENO}:${FUNCNAME[0]:-main}] '
+
+# Traza detallada opcional (actívala exportando BASCULA_TRACE=1)
+if [[ "${BASCULA_TRACE:-0}" == "1" ]]; then
+  set -x
+fi
+
+echo "=================================================================="
+echo "  BASCULA DIGITAL PRO – install-all.sh"
+echo "  Inicio: $(date +"%F %T")  Host: $(hostname)  Kernel: $(uname -r)"
+echo "  Log: ${BASCULA_LOG_FILE}"
+echo "=================================================================="
 
 # --- Frontend/WWW ---
 export WWW_ROOT="${WWW_ROOT:-/opt/bascula/www}"
 # Si el usuario fija FRONTEND_DIR, lo respetamos; si no, autodetección.
 export FRONTEND_DIR="${FRONTEND_DIR:-}"
 
+# --- Helpers de log unificados ---
 LOG_PREFIX="[install]"
+log()       { printf '%s %s\n' "${LOG_PREFIX}" "$*"; }
+log_step()  { printf '%s %s\n' "${LOG_PREFIX}" "[step] $*"; }
+log_ok()    { printf '%s %s\n' "${LOG_PREFIX}" "[ok]   $*"; }
+log_warn()  { printf '%s[warn] %s\n' "${LOG_PREFIX}" "$*" >&2; }
+log_err()   { printf '%s[err]  %s\n' "${LOG_PREFIX}" "$*" >&2; }
+
+# --- Contexto de error / resumen final ---
+_last_cmd=''
+trap 'rc=$?; _last_cmd="$BASH_COMMAND"' DEBUG
+on_err() {
+  local rc=$?
+  echo
+  log_err "Fallo en: ${_last_cmd}"
+  log_err "Archivo: ${BASH_SOURCE[1]:-?}  Línea: ${BASH_LINENO[0]:-?}  Función: ${FUNCNAME[1]:-main}  RC=${rc}"
+
+  # Pistas rápidas (no bloquean si faltan)
+  if command -v journalctl >/dev/null 2>&1; then
+    log_warn "journalctl últimas 60 líneas de bascula-ui:"
+    journalctl -u bascula-ui -n 60 --no-pager || true
+  fi
+  # Xorg hints
+  local xlog="${HOME:-/home/pi}/.local/share/xorg/Xorg.0.log"
+  [[ -f "${xlog}" ]] || xlog="/var/log/Xorg.0.log"
+  if [[ -f "${xlog}" ]]; then
+    log_warn "Fragmento Xorg (modeset/vc4/HDMI/EE/WW):"
+    grep -E 'modeset|vc4|DRI|HDMI|EE|WW|no screens found|framebuffer' "${xlog}" | tail -n 80 || true
+  fi
+
+  log_err "Log completo: ${BASCULA_LOG_FILE}"
+  return $rc
+}
+on_exit() {
+  local rc=$?
+  echo
+  log_step "Resumen final (rc=${rc})"
+  # Estados clave (no fallan el resumen)
+  systemctl is-active --quiet bascula-backend.service && log_ok "backend activo" || log_warn "backend inactivo"
+  systemctl is-active --quiet bascula-miniweb.service && log_ok "miniweb activo" || log_warn "miniweb inactivo o no instalado"
+  systemctl is-active --quiet bascula-ui.service && log_ok "UI activa" || log_warn "UI inactiva"
+
+  # Endpoints (sin abortar)
+  curl -fsS http://127.0.0.1:8081/api/health >/dev/null && log_ok "health backend 200" || log_warn "health backend no devuelve 200"
+  curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null && log_ok "miniweb status 200" || log_warn "miniweb status no devuelve 200"
+
+  # Info útil de Pi5/GPU
+  [[ -e /dev/dri/card0 ]] && log_ok "/dev/dri/card0 presente" || log_warn "No existe /dev/dri/card0"
+  grep -E 'dtoverlay=vc4-(fkms|kms)-v3d(-pi5)?' -n /boot/firmware/config.txt 2>/dev/null || true
+
+  echo
+  if [[ $rc -ne 0 ]]; then
+    log_err "Instalación con errores. Revisa arriba y en: ${BASCULA_LOG_FILE}"
+  else
+    log_ok "Instalación completada correctamente. Log: ${BASCULA_LOG_FILE}"
+  fi
+}
+trap on_err ERR
+trap on_exit EXIT
 RELEASES_DIR="/opt/bascula/releases"
 CURRENT_LINK="/opt/bascula/current"
 DEFAULT_USER="pi"
@@ -45,22 +135,6 @@ fi
 umask 022
 
 FRONTEND_EXPECTED=0
-
-log() {
-  printf '%s %s\n' "${LOG_PREFIX}" "$*"
-}
-
-log_step() {
-  log "[step] $*"
-}
-
-log_warn() {
-  printf '%s[warn] %s\n' "${LOG_PREFIX}" "$*" >&2
-}
-
-log_err() {
-  printf '%s[err] %s\n' "${LOG_PREFIX}" "$*" >&2
-}
 
 ensure_remote_file() {
   local url="$1"
@@ -1133,21 +1207,25 @@ ensure_services_started() {
 
   if systemctl list-unit-files | grep -q '^bascula-miniweb.service'; then
     systemctl enable --now bascula-miniweb.service
+  else
+    log_warn "bascula-miniweb.service no instalado"
   fi
 
   if systemctl list-unit-files | grep -q '^bascula-ui.service'; then
     systemctl enable bascula-ui.service
     if ! systemctl start bascula-ui.service; then
       log_err "Fallo al iniciar bascula-ui.service"
-      journalctl -u bascula-ui.service -n 50 --no-pager || true
+      journalctl -u bascula-ui.service -n 80 --no-pager || true
       exit 1
     fi
     sleep 1
     if ! systemctl is-active --quiet bascula-ui.service; then
       log_err "bascula-ui.service no está activo tras el arranque"
-      journalctl -u bascula-ui.service -n 50 --no-pager || true
+      journalctl -u bascula-ui.service -n 80 --no-pager || true
       exit 1
     fi
+  else
+    log_warn "bascula-ui.service no instalado"
   fi
 }
 
@@ -1194,7 +1272,7 @@ run_final_checks() {
     exit 1
   fi
 
-  log "[install][ok] Instalación completa"
+  log_ok "Instalación completa"
 }
 
 main() {
@@ -1205,8 +1283,10 @@ main() {
     exit 0
   fi
 
+  log_step "Instalando dependencias del sistema"
   install_system_dependencies
 
+  log_step "Configurando overlays de arranque"
   ensure_boot_overlays || true
   purgar_fbdev_driver || true
   disable_fbdev_xorg_configs || true
@@ -1240,13 +1320,17 @@ main() {
   ensure_log_dir
   ensure_capture_dirs
 
+  log_step "Instalando unidades systemd"
   install_systemd_units
+  log_step "Configurando servicio bascula-ui"
   configure_bascula_ui_service
+  log_step "Construyendo frontend si aplica"
   if ! build_frontend_if_present; then
     exit 1
   fi
 
   ensure_www_root
+  log_step "Configurando sitio Nginx"
   configure_nginx_site
 
   log_step "Validando y recargando Nginx"
@@ -1259,6 +1343,7 @@ main() {
     exit 1
   fi
 
+  log_step "Activando servicios de la Báscula"
   ensure_services_started
 
   if [[ ${IS_PI5} -eq 1 ]]; then
@@ -1280,6 +1365,7 @@ main() {
     log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Continuando con verificaciones esenciales."
   fi
 
+  log_step "Ejecutando comprobaciones finales"
   run_final_checks
 }
 
