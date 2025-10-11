@@ -518,23 +518,6 @@ ensure_node() {
   corepack prepare pnpm@latest --activate 2>/dev/null || true
 }
 
-detect_frontend_dir() {
-  local base="${REPO_DIR:-$PWD}"
-  local candidates=(frontend ui web app dash-ui bascula-ui src/frontend src/web src/ui)
-  if [[ -n "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
-    echo "${FRONTEND_DIR}"
-    return 0
-  fi
-  local d
-  for d in "${candidates[@]}"; do
-    if [[ -f "${base}/${d}/package.json" ]]; then
-      echo "${base}/${d}"
-      return 0
-    fi
-  done
-  return 1
-}
-
 js_install() {
   if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
     pnpm i --frozen-lockfile
@@ -559,44 +542,104 @@ js_build() {
   fi
 }
 
+_find_ui_dir_in() {
+  local base="$1"
+  shift || true
+  local rels=("$@")
+  local d
+  for d in "${rels[@]}"; do
+    [[ -f "${base}/${d}/package.json" ]] || continue
+    if jq -e '.scripts.build' "${base}/${d}/package.json" >/dev/null 2>&1; then
+      echo "${base}/${d}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+detect_frontend_dir() {
+  if [[ -n "${FRONTEND_DIR}" ]]; then
+    if [[ -f "${FRONTEND_DIR}/package.json" ]] \
+      && jq -e '.scripts.build' "${FRONTEND_DIR}/package.json" >/dev/null 2>&1; then
+      echo "${FRONTEND_DIR}"
+      return 0
+    fi
+    log_warn "FRONTEND_DIR=${FRONTEND_DIR} no contiene package.json con scripts.build"
+  fi
+
+  local candidates_rel=(
+    "frontend" "ui" "web" "app" "dash-ui" "bascula-ui"
+    "src/frontend" "src/web" "src/ui"
+  )
+
+  local rel="/opt/bascula/current"
+  if [[ -d "${rel}" ]]; then
+    _find_ui_dir_in "${rel}" "${candidates_rel[@]}" && return 0
+  fi
+
+  local home="${HOME}/bascula-ui"
+  if [[ -d "${home}" ]]; then
+    _find_ui_dir_in "${home}" "" "frontend" "ui" "web" "app" && return 0
+  fi
+
+  local fb="/opt/bascula/ui"
+  if [[ ! -d "${fb}/.git" ]]; then
+    mkdir -p /opt/bascula
+    local repo_url=""
+    if [[ -d "${rel}/.git" ]]; then
+      repo_url="$(git -C "${rel}" remote get-url origin 2>/dev/null || true)"
+    fi
+    if [[ -z "${repo_url}" ]]; then
+      repo_url="https://github.com/DanielGTdiabetes/cam-weight-wiz"
+    fi
+    if [[ -n "${repo_url}" ]]; then
+      log "Clonando UI desde ${repo_url} en ${fb}"
+      git clone --depth=1 "${repo_url}" "${fb}" || log_warn "Clonado de ${repo_url} falló"
+    fi
+  fi
+  if [[ -d "${fb}" ]]; then
+    _find_ui_dir_in "${fb}" "${candidates_rel[@]}" && return 0
+  fi
+
+  return 1
+}
+
 build_frontend() {
   if [[ "${SKIP_UI_BUILD}" == "1" ]]; then
-    echo "[install][warn] SKIP_UI_BUILD=1"
+    log_warn "SKIP_UI_BUILD=1, omitiendo build de UI"
     return 0
   fi
+
   local dir
   if ! dir="$(detect_frontend_dir)"; then
-    echo "[install][err] No se encontró carpeta de frontend"
+    log_err "No se encontró carpeta de frontend (package.json con scripts.build) en: /opt/bascula/current, ~/bascula-ui, ni /opt/bascula/ui"
+    log_err "Revisa que tu UI exista (p.ej. ~/bascula-ui) o añade la UI al repo."
     exit 1
   fi
-  echo "[install] Frontend detectado: ${dir}"
+  log "Frontend detectado: ${dir}"
+
   pushd "${dir}" >/dev/null
-  if ! command -v npm >/dev/null 2>&1; then
-    echo "[install][err] npm no está instalado"
-    exit 1
-  fi
+  [[ -f package.json ]] || { log_err "package.json no encontrado en ${dir}"; exit 1; }
+  command -v npm >/dev/null 2>&1 || { log_err "npm no está instalado"; exit 1; }
   js_install
   js_build
+
   local out=""
-  local c
-  for c in dist build public; do
-    if [[ -f "${c}/index.html" ]]; then
-      out="${c}"
+  local candidate
+  for candidate in dist build public; do
+    if [[ -f "${candidate}/index.html" ]]; then
+      out="${candidate}"
       break
     fi
   done
-  if [[ -z "${out}" ]]; then
-    echo "[install][err] No se encontró index.html tras el build"
-    exit 1
-  fi
+  [[ -n "${out}" ]] || { log_err "No se encontró index.html tras el build"; exit 1; }
+
   sudo mkdir -p "${WWW_ROOT}"
   sudo rsync -a --delete "${out}/" "${WWW_ROOT}/"
   popd >/dev/null
-  if [[ ! -f "${WWW_ROOT}/index.html" ]]; then
-    echo "[install][err] Copia a ${WWW_ROOT} incompleta"
-    exit 1
-  fi
-  echo "[install] UI publicada en ${WWW_ROOT}"
+
+  [[ -f "${WWW_ROOT}/index.html" ]] || { log_err "Copia a ${WWW_ROOT} incompleta"; exit 1; }
+  log "UI publicada en ${WWW_ROOT}"
 }
 
 ensure_chromium_browser() {
@@ -770,11 +813,11 @@ main() {
   ensure_log_dir
   ensure_capture_dirs
 
+  install_systemd_units
+  configure_bascula_ui_service
   ensure_node
   build_frontend
   configure_nginx_site
-  install_systemd_units
-  configure_bascula_ui_service
   ensure_backend_service
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
