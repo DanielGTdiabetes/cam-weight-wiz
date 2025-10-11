@@ -1458,6 +1458,11 @@ EOF
 ensure_backend_env_file() {
   local file="/etc/default/bascula-backend"
   local tmp="${file}.tmp"
+  if [[ -f "${file}" ]]; then
+    log "Se mantiene la configuración existente en ${file}"
+    return
+  fi
+
   cat <<'EOF' > "${tmp}"
 # Variables opcionales para la báscula física.
 #
@@ -1469,10 +1474,6 @@ ensure_backend_env_file() {
 #
 # Dejar BASCULA_SCALE_DEMO=true fuerza modo demo sin hardware.
 EOF
-  if [[ -f "${file}" ]] && cmp -s "${tmp}" "${file}"; then
-    rm -f "${tmp}"
-    return
-  fi
   install -o root -g root -m0644 "${tmp}" "${file}"
   rm -f "${tmp}"
 }
