@@ -2539,9 +2539,9 @@ async def health_check():
 
 
 @app.get("/api/health")
-async def api_health_alias():
-    """Alias de salud simplificado para comprobaciones externas."""
-    return {"status": "ok"}
+async def api_health_check():
+    """Alias de salud para compatibilidad con Nginx/instalador."""
+    return await health_check()
 
 @app.get("/")
 async def root():

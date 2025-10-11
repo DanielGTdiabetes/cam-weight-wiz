@@ -6,7 +6,6 @@ from pathlib import Path
 from threading import Lock
 from typing import Iterable, Optional, Sequence, Tuple
 
-from fastapi import FastAPI
 from PIL import Image
 
 from backend.ocr_models import ensure_ocr_models_dir
@@ -188,22 +187,3 @@ __all__ = [
     "get_ocr_service",
     "reset_ocr_service_cache",
 ]
-
-
-app = FastAPI(title="Bascula OCR Service")
-
-
-@app.get("/api/ocr/health")
-async def ocr_health() -> dict[str, str]:
-    return {"status": "ok", "service": "ocr"}
-
-
-def main() -> None:
-    import uvicorn
-
-    port = int(os.getenv("BASCULA_OCR_PORT", "8082"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
-
-if __name__ == "__main__":
-    main()
