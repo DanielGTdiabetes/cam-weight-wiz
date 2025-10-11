@@ -285,14 +285,83 @@ check_owner() {
 check_python_imports() {
   local output
   output=$(su - "${DEFAULT_USER}" -s /bin/bash <<EOF 2>&1
-. "${CURRENT_LINK}/.venv/bin/activate"
-python -c 'import fastapi,uvicorn,cv2,rapidocr_onnxruntime'
+set -euo pipefail # Garantiza fail-fast dentro de la shell de verificación
+venv_dir="${CURRENT_LINK}/.venv"
+venv_activate="${CURRENT_LINK}/.venv/bin/activate"
+venv_python="${CURRENT_LINK}/.venv/bin/python"
+
+if [[ ! -d "${venv_dir}" ]]; then
+  printf '%s[err] Entorno virtual no encontrado: %s\n' "${LOG_PREFIX}" "${venv_dir}" >&2
+  exit 1
+fi
+
+if [[ ! -f "${venv_activate}" ]]; then
+  printf '%s[err] Script de activación inexistente: %s\n' "${LOG_PREFIX}" "${venv_activate}" >&2
+  exit 1
+fi
+
+if [[ ! -x "${venv_python}" ]]; then
+  printf '%s[err] Binario python del venv no encontrado: %s\n' "${LOG_PREFIX}" "${venv_python}" >&2
+  exit 1
+fi
+
+# Activa el venv y lanza el bloque Python en la misma shell (fail-fast)
+source "${venv_activate}" && python - <<'PY'
+import importlib
+import os
+import sys
+
+log_prefix = "${LOG_PREFIX}"
+venv_dir = os.path.realpath("${CURRENT_LINK}/.venv")
+env_venv = os.environ.get("VIRTUAL_ENV")
+exe = os.path.realpath(sys.executable)
+
+if not env_venv:
+    print(f"{log_prefix}[err] VIRTUAL_ENV no establecido tras activar el venv")
+    raise SystemExit(1)
+
+if os.path.realpath(env_venv) != venv_dir:
+    print(f"{log_prefix}[err] VIRTUAL_ENV apunta a {env_venv}, esperado {venv_dir}")
+    raise SystemExit(1)
+
+if not exe.startswith(os.path.join(venv_dir, "")):
+    print(f"{log_prefix}[err] sys.executable fuera del venv: {exe}")
+    raise SystemExit(1)
+
+required = [  # Módulos críticos para el runtime Python
+    "fastapi",
+    "uvicorn",
+    "cv2",
+    "rapidocr_onnxruntime",
+    "onnxruntime",
+    "sounddevice",
+    "vosk",
+]
+
+missing = []
+for module in required:
+    try:
+        importlib.import_module(module)
+    except Exception as exc:  # noqa: BLE001 - logueamos fallo explícito
+        print(f"{log_prefix}[err] Falló import {module!r}: {exc}")
+        missing.append(module)
+
+if missing:
+    separator = ", "
+    print(f"{log_prefix}[err] Módulos faltantes o con error: {separator.join(missing)}")
+    raise SystemExit(1)
+
+print(f"{log_prefix}[ok] OK: imports y venv correctos")
+PY
 EOF
   )
+
   local status=$?
   if [[ ${status} -eq 0 ]]; then
+    printf '%s\n' "${output}" # Superficie el log exitoso al caller
     return 0
   fi
+
   CHECK_FAIL_MSG="${output}"
   return 1
 }
