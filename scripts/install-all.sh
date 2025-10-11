@@ -473,12 +473,12 @@ server {
 
     # Backend
     location /api/ {
-        proxy_pass http://127.0.0.1:8081/;
+        proxy_pass http://127.0.0.1:8081;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_http_version 1.1;
-      proxy_buffering off;
+        proxy_buffering off;
     }
 }
 EOF
@@ -759,7 +759,7 @@ main() {
     python3-numpy python3-simplejpeg python3-picamera2 \
     libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 \
     ffmpeg git rsync curl jq nginx \
-    alsa-utils libcamera-apps \
+    alsa-utils libcamera-apps espeak-ng \
     xserver-xorg xinit matchbox-window-manager \
     fonts-dejavu-core
 
