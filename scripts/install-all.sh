@@ -429,8 +429,12 @@ configure_nginx_site() {
   local BASCULA_MANAGED_MARK="# BASCULA_MANAGED: do-not-edit-manually"
   local SITES_AVAIL="/etc/nginx/sites-available"
   local SITES_ENABLED="/etc/nginx/sites-enabled"
+  local SITES_DISABLED="/etc/nginx/sites-disabled-by-bascula"
+  local TS
+  TS="$(date +%Y%m%d-%H%M%S)"
 
   install -d -m0755 "${SITES_AVAIL}" "${SITES_ENABLED}" /var/www
+  mkdir -p "${SITES_DISABLED}"
 
   rm -f /etc/nginx/conf.d/00-bascula.conf /etc/nginx/conf.d/00-bascula.conf.off
 
@@ -454,18 +458,21 @@ configure_nginx_site() {
 
   ln -sfn "${site_path}" "${SITES_ENABLED}/${BASCULA_NGINX_SITE}"
 
+  disable_site_entry() {
+    local entry="$1"
+    local base target
+    base="$(basename "${entry}")"
+    target="${SITES_DISABLED}/${base}.${TS}.disabled-by-bascula"
+    # Solo movemos el symlink/fichero en sites-enabled
+    mv -f "${entry}" "${target}" || true
+  }
+
   for entry in "${SITES_ENABLED}"/*; do
     [[ -e "${entry}" ]] || continue
-    local base
-    base="$(basename "${entry}")"
-    if [[ "${base}" == "${BASCULA_NGINX_SITE}" ]]; then
-      continue
-    fi
-    case "${base}" in
-      *.disabled-by-bascula)
-        continue
-        ;;
-    esac
+    local base="$(basename "${entry}")"
+
+    [[ "${base}" == "${BASCULA_NGINX_SITE}" ]] && continue
+    [[ "${base}" == *.disabled-by-bascula ]] && continue
 
     local target="${entry}"
     if [[ -L "${entry}" ]]; then
@@ -478,22 +485,23 @@ configure_nginx_site() {
     if grep -q "${BASCULA_MANAGED_MARK}" "${target}" 2>/dev/null; then
       if grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?80([[:space:]]|;|$)' "${target}"; then
         log "Deshabilitando vhost gestionado en puerto 80: ${entry}"
-        mv -f "${entry}" "${entry}.disabled-by-bascula" || true
+        disable_site_entry "${entry}"
         continue
       fi
     fi
 
     if [[ "${base}" == "default" ]] && grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?80([[:space:]]|;|$)' "${target}"; then
       log "Deshabilitando vhost default en puerto 80: ${entry}"
-      mv -f "${entry}" "${entry}.disabled-by-bascula" || true
+      disable_site_entry "${entry}"
       continue
     fi
   done
 
-  if ! nginx -t; then
-    abort "nginx -t falló tras configurar el vhost"
+  if nginx -t; then
+    systemctl reload nginx || systemctl restart nginx || true
+  else
+    log_err "nginx -t ha fallado; revisa configuración antes de recargar."
   fi
-  systemctl reload nginx
 }
 
 ensure_node() {
