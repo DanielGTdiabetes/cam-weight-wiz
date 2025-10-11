@@ -15,7 +15,7 @@ from fastapi import (
     File,
     Form,
 )
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -1153,6 +1153,37 @@ async def scale_read():
     data = service.get_reading()
     data["success"] = data.get("ok", False)
     return data
+
+
+@app.get("/api/scale/weight")
+async def scale_weight():
+    return await scale_read()
+
+
+@app.get("/api/scale/events")
+async def scale_events(request: Request):
+    service = scale_service
+
+    async def gen():
+        last = None
+
+        if service is None:
+            payload = {"ok": False, "reason": "service_not_initialized"}
+            yield f"data: {json.dumps(payload)}\n\n"
+            return
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            data = await asyncio.to_thread(service.get_reading)
+            if data != last:
+                yield f"data: {json.dumps(data)}\n\n"
+                last = data
+
+            await asyncio.sleep(0.2)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @app.post("/api/scale/tare")
