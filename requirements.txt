@@ -16,6 +16,10 @@ pydantic==2.7.4
 pydantic-core==2.18.4
 # typing_extensions requerido por pydantic; se fija a versión con wheel en PiWheels.
 typing_extensions==4.12.2
+# annotated-types necesario para Pydantic, wheel universal.
+annotated-types==0.7.0
+# uvicorn depende de h11 para HTTP/1.
+h11==0.14.0
 python-multipart
 pyserial
 pyzbar
