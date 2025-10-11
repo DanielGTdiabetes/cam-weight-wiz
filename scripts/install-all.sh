@@ -526,7 +526,9 @@ install_system_dependencies() {
     python3-libcamera python3-picamera2 python3-numpy python3-simplejpeg \
     libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 \
     ffmpeg git rsync curl jq nginx alsa-utils libcamera-apps espeak-ng iproute2 \
-    xserver-xorg xinit matchbox-window-manager fonts-dejavu-core
+    xserver-xorg xinit openbox unclutter x11-xserver-utils upower fonts-dejavu-core
+
+  ensure_package_alternative "chromium" chromium-browser chromium
 
   ensure_package_alternative "libtiff" libtiff6 libtiff5
   ensure_libavformat
@@ -547,11 +549,32 @@ ensure_boot_config_line() {
   set_reboot_required "boot-config: ${line}"
 }
 
+remove_boot_config_lines_matching() {
+  local pattern="$1"
+  local file="${BOOT_CONFIG_FILE}"
+  if [[ ! -f "${file}" ]]; then
+    abort "No se encontró ${file}; verifique montaje de /boot"
+  fi
+  if ! grep -Eq "${pattern}" "${file}"; then
+    return 0
+  fi
+
+  log "Eliminando líneas que coinciden con '${pattern}' en ${file}"
+  local tmp
+  tmp="$(mktemp)"
+  grep -Ev "${pattern}" "${file}" > "${tmp}"
+  install -o root -g root -m 0644 "${tmp}" "${file}"
+  rm -f "${tmp}"
+  set_reboot_required "boot-config remove ${pattern}"
+}
+
 ensure_boot_overlays() {
   if [[ ! -d "${BOOT_FIRMWARE_DIR}" ]]; then
     log_warn "${BOOT_FIRMWARE_DIR} no encontrado; omitiendo configuración de overlays"
     return
   fi
+  remove_boot_config_lines_matching '^dtoverlay=vc4.*'
+  remove_boot_config_lines_matching '^disable_fw_kms_setup=.*'
   ensure_boot_config_line "dtoverlay=vc4-kms-v3d-pi5"
   ensure_boot_config_line "dtoverlay=disable-bt"
   ensure_boot_config_line "dtoverlay=hifiberry-dac"
@@ -937,13 +960,9 @@ ensure_chromium_browser() {
   fi
 
   log "[step] Instalando Chromium para el modo quiosco"
-  ensure_packages xserver-xorg xinit fonts-dejavu-core
+  ensure_packages xserver-xorg xinit openbox unclutter x11-xserver-utils upower fonts-dejavu-core
 
-  if apt-cache show chromium-browser >/dev/null 2>&1; then
-    ensure_packages chromium-browser
-  else
-    ensure_packages chromium
-  fi
+  ensure_package_alternative "chromium" chromium-browser chromium
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ttf-mscorefonts-installer || \
     log_warn "No se pudo instalar ttf-mscorefonts-installer"

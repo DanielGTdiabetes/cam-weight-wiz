@@ -26,8 +26,8 @@ TTYReset=yes
 TTYVHangup=yes
 ExecStartPre=/bin/sh -c 'install -d -m0700 -o pi -g pi /run/user/1000'
 ExecStartPre=/bin/sh -c 'install -d -m0755 -o pi -g pi /var/log/bascula && install -o pi -g pi -m0644 /dev/null /var/log/bascula/ui.log && rm -f /tmp/.X0-lock'
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 ${KIOSK_WAIT_SECS}); do curl -fsS "${KIOSK_MINIWEB_READY_URL}" >/dev/null && exit 0; sleep 1; done; echo "miniweb no responde" >&2; exit 1'
-ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 ${KIOSK_WAIT_SECS}); do curl -fsS "${KIOSK_MINIWEB_READY_URL}" >/dev/null && exit 0; sleep 1; done; echo "miniweb no responde" >&2; exit 1 || true'
+ExecStart=/usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -keeptty -nocursor
 Restart=always
 RestartSec=3
 

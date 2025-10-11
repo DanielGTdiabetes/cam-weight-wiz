@@ -1,11 +1,12 @@
 [Unit]
 Description=Espera a que miniweb (8080) y backend (8081) estén disponibles
-After=bascula-miniweb.service bascula-backend.service
-Wants=bascula-miniweb.service bascula-backend.service
+After=network-online.target bascula-backend.service
+Wants=network-online.target
 
 [Service]
 Type=oneshot
 ExecStart=/opt/bascula/current/systemd/bin/bascula-health-wait.sh
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
