@@ -91,3 +91,9 @@ El instalador verifica explícitamente que estas librerías se carguen desde `/u
 - El endpoint `GET /ocr/health` indica si RapidOCR está listo (`{"ocr": "ready"}`) o si faltan modelos (`503` con `{"ocr": "missing_models"}`), evitando que el backend caiga cuando todavía no se han copiado los `.onnx`. 【F:backend/main.py†L2489-L2498】
 
 Coloca los modelos oficiales de RapidOCR (por ejemplo `det.onnx`, `rec.onnx` y opcionalmente `cls.onnx`) en `/opt/rapidocr/models`; el servicio se cargará automáticamente la primera vez que se utilice OCR.
+
+### Voces Piper
+
+- Las voces se descargan desde GitHub Releases del repositorio `DanielGTdiabetes/bascula-cam` (configurable con `BASCULA_VOICES_TAG`). `scripts/install-all.sh` invoca `scripts/fetch-piper-voices.sh`, que es idempotente y puede relanzarse manualmente sin eliminar archivos existentes. 【F:scripts/fetch-piper-voices.sh†L1-L154】【F:scripts/install-all.sh†L708-L723】
+- Los modelos se instalan en `/opt/bascula/voices/piper`. Para cambiar la voz por defecto basta con actualizar el enlace: `sudo ln -sfn /opt/bascula/voices/piper/es_ES-xxx.onnx /opt/bascula/voices/piper/default.onnx`. 【F:scripts/fetch-piper-voices.sh†L105-L145】
+- Cada descarga valida el `sha256` indicado en el `.onnx.json` cuando está disponible; si falta, se muestra un aviso pero no se aborta. 【F:scripts/fetch-piper-voices.sh†L69-L97】
