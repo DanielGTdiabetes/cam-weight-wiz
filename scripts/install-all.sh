@@ -284,29 +284,29 @@ check_owner() {
 
 check_python_imports() {
   local output
-  output=$(su - "${DEFAULT_USER}" -s /bin/bash <<EOF 2>&1
+output=$(su - "${DEFAULT_USER}" -s /bin/bash <<EOF 2>&1
 set -euo pipefail # Garantiza fail-fast dentro de la shell de verificación
 venv_dir="${CURRENT_LINK}/.venv"
 venv_activate="${CURRENT_LINK}/.venv/bin/activate"
 venv_python="${CURRENT_LINK}/.venv/bin/python"
 
-if [[ ! -d "${venv_dir}" ]]; then
-  printf '%s[err] Entorno virtual no encontrado: %s\n' "${LOG_PREFIX}" "${venv_dir}" >&2
+if [[ ! -d "\${venv_dir}" ]]; then
+  printf '%s[err] Entorno virtual no encontrado: %s\n' "${LOG_PREFIX}" "\${venv_dir}" >&2
   exit 1
 fi
 
-if [[ ! -f "${venv_activate}" ]]; then
-  printf '%s[err] Script de activación inexistente: %s\n' "${LOG_PREFIX}" "${venv_activate}" >&2
+if [[ ! -f "\${venv_activate}" ]]; then
+  printf '%s[err] Script de activación inexistente: %s\n' "${LOG_PREFIX}" "\${venv_activate}" >&2
   exit 1
 fi
 
-if [[ ! -x "${venv_python}" ]]; then
-  printf '%s[err] Binario python del venv no encontrado: %s\n' "${LOG_PREFIX}" "${venv_python}" >&2
+if [[ ! -x "\${venv_python}" ]]; then
+  printf '%s[err] Binario python del venv no encontrado: %s\n' "${LOG_PREFIX}" "\${venv_python}" >&2
   exit 1
 fi
 
 # Activa el venv y lanza el bloque Python en la misma shell (fail-fast)
-source "${venv_activate}" && python - <<'PY'
+source "\${venv_activate}" && python - <<'PY'
 import importlib
 import os
 import sys
