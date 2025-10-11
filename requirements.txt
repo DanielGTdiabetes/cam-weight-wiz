@@ -3,13 +3,15 @@
 # No añadir numpy/simplejpeg/picamera2 aquí: se proporcionan vía paquetes del sistema.
 aiofiles
 click>=8.1
-fastapi>=0.115
+# FastAPI >=0.116 arrastra versiones nuevas de pydantic-core sin wheel en PiWheels (requiere Rust).
+fastapi==0.115.6
 httpcore>=1.0.0,<2.0.0
 httpx==0.28.1
 opencv-python
 piper-tts
 pillow
-pydantic
+# pydantic 2.7.4 sigue teniendo wheel para aarch64 en PiWheels.
+pydantic==2.7.4
 python-multipart
 pyserial
 pyzbar
@@ -20,7 +22,7 @@ pyclipper>=1.3.0
 shapely!=2.0.4,>=2.0.1
 requests
 sounddevice
-starlette>=0.38
+starlette>=0.38,<0.39
 # Evitamos extras ([standard]) para no arrastrar watchfiles (requiere Rust en Pi).
 uvicorn>=0.30,<1.0
 vosk
