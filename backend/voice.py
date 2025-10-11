@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
@@ -24,10 +25,13 @@ VOICE_OUTPUT_DIR = Path("/opt/bascula/data/voice")
 WHISPER_DIR = Path("/opt/whisper.cpp")
 SUPPORTED_UPLOAD_EXTENSIONS = {".webm", ".ogg", ".wav", ".mp3"}
 
+logger = logging.getLogger(__name__)
+
 
 def _discover_piper() -> list[dict]:
     bases = [
         Path("/opt/bascula/voices"),
+        Path("/opt/bascula/voices/piper"),
         Path("/opt/piper/models"),
         Path("/usr/local/share/piper/models"),
         Path("/usr/share/piper/models"),
@@ -164,60 +168,99 @@ async def _play_audio_locally(path: Path) -> None:
 
 def _synthesize_to_file(text: str, voice: Optional[str]) -> Tuple[Path, str]:
     models = _discover_piper()
-    selected_backend = "espeak"
     tmp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp_path = Path(tmp_file.name)
     tmp_file.close()
 
-    try:
-        model_entry: Optional[dict] = None
-        if voice:
-            for candidate_model in models:
-                candidate_path = Path(candidate_model["path"])
-                if (
-                    voice == candidate_model["id"]
-                    or voice == candidate_model["path"]
-                    or voice == candidate_path.name
-                ):
-                    model_entry = candidate_model
-                    break
-            else:
-                voice_path = Path(voice)
-                if voice_path.is_file():
-                    json_candidate = voice_path.with_suffix(voice_path.suffix + ".json")
-                    model_entry = {
-                        "id": voice_path.stem,
-                        "path": str(voice_path),
-                        "json": str(json_candidate) if json_candidate.exists() else None,
-                    }
-        if model_entry is None and models:
-            model_entry = models[0]
-
-        if model_entry:
-            wav_bytes = _piper_to_wav(text, model_entry["path"], model_entry.get("json"))
-            tmp_path.write_bytes(wav_bytes)
-            selected_backend = "piper"
+    model_entry: Optional[dict] = None
+    if voice:
+        for candidate_model in models:
+            candidate_path = Path(candidate_model["path"])
+            if (
+                voice == candidate_model["id"]
+                or voice == candidate_model["path"]
+                or voice == candidate_path.name
+            ):
+                model_entry = candidate_model
+                break
         else:
+            voice_path = Path(voice)
+            if voice_path.is_file():
+                json_candidate = voice_path.with_suffix(voice_path.suffix + ".json")
+                model_entry = {
+                    "id": voice_path.stem,
+                    "path": str(voice_path),
+                    "json": str(json_candidate) if json_candidate.exists() else None,
+                }
+    if model_entry is None and models:
+        model_entry = models[0]
+
+    selected_backend: Optional[str] = None
+    last_error: Optional[Exception] = None
+
+    try:
+        if model_entry:
+            try:
+                wav_bytes = _piper_to_wav(text, model_entry["path"], model_entry.get("json"))
+                tmp_path.write_bytes(wav_bytes)
+                selected_backend = "piper"
+            except RuntimeError as exc:
+                last_error = exc
+                logger.warning("Piper synthesis failed (%s); falling back to espeak if available", exc)
+
+        if selected_backend is None:
             if not _is_espeak_available():
+                if last_error is not None:
+                    logger.error("No espeak-ng available after Piper failure: %s", last_error)
                 raise HTTPException(status_code=503, detail="no_tts_backend_available")
-            _synthesize_with_espeak(text, tmp_path)
-            selected_backend = "espeak"
+            try:
+                _synthesize_with_espeak(text, tmp_path)
+                selected_backend = "espeak"
+            except RuntimeError as exc:
+                last_error = exc
+                logger.error("espeak-ng synthesis failed: %s", exc)
+                raise HTTPException(status_code=503, detail="no_tts_backend_available") from exc
     except Exception:
         tmp_path.unlink(missing_ok=True)
         raise
+
+    if selected_backend is None:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=503, detail="no_tts_backend_available")
 
     return tmp_path, selected_backend
 
 
 @router.post("/tts/synthesize", response_class=FileResponse)
-async def synthesize_tts(text: str, voice: Optional[str] = None, play_local: bool = False):
-    text = (text or "").strip()
+async def synthesize_tts(
+    request: Request,
+    text: str = "",
+    voice: Optional[str] = None,
+    play_local: bool = False,
+):
+    payload_text = text
+    payload_voice = voice
+    payload_play_local = play_local
+
+    # Optional JSON body compatibility
+    if request.headers.get("content-type", "").lower().startswith("application/json"):
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            body = {}
+        if isinstance(body, dict):
+            payload_text = body.get("text", payload_text)
+            payload_voice = body.get("voice", payload_voice)
+            if "play_local" in body:
+                payload_play_local = bool(body["play_local"])
+
+    text = (payload_text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text_required")
 
-    audio_path, backend_used = _synthesize_to_file(text, voice)
+    audio_path, backend_used = _synthesize_to_file(text, payload_voice)
 
-    if play_local:
+    if payload_play_local:
         try:
             await _play_audio_locally(audio_path)
         except Exception:

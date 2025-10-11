@@ -2531,16 +2531,29 @@ async def ocr_health_check():
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
+    scale_connected = False
+    scale_backend = None
+    scale_status: dict[str, object] | None = None
+    if scale_service is not None:
+        status_payload = dict(scale_service.get_status())
+        scale_status = status_payload
+        scale_connected = bool(status_payload.get("ok"))
+        backend_name = status_payload.get("backend")
+        if isinstance(backend_name, str):
+            scale_backend = backend_name
+
     return {
         "status": "ok",
-        "scale_connected": scale_service is not None and scale_service.get_status().get("ok", False),
-        "timestamp": datetime.now().isoformat()
+        "scale_connected": scale_connected,
+        "scale_backend": scale_backend,
+        "scale_status": scale_status,
+        "timestamp": datetime.now().isoformat(),
     }
 
 
 @app.get("/api/health")
 async def api_health_alias():
-    return {"status": "ok"}
+    return await health_check()
 
 @app.get("/")
 async def root():

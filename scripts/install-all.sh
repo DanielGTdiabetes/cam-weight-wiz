@@ -80,10 +80,9 @@ on_exit() {
   local rc=$?
   echo
   log_step "Resumen final (rc=${rc})"
-  # Estados clave (no fallan el resumen)
+  local ui_active=0
   systemctl is-active --quiet bascula-backend.service && log_ok "backend activo" || log_warn "backend inactivo"
   systemctl is-active --quiet bascula-miniweb.service && log_ok "miniweb activo" || log_warn "miniweb inactivo"
-  local ui_active=0
   if systemctl is-active --quiet bascula-ui.service; then
     log_ok "UI activa"
     ui_active=1
@@ -91,18 +90,24 @@ on_exit() {
     log_warn "UI inactiva"
   fi
 
-  # Endpoints (sin abortar)
-  curl -fsS http://127.0.0.1:8081/api/health >/dev/null && log_ok "health backend 200" || log_warn "health backend no devuelve 200"
-  curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null && log_ok "miniweb status 200" || log_warn "miniweb status no devuelve 200"
+  log "HTTP / => ${SUMMARY_HTTP_ROOT_STATUS:-n/d}" 
+  log "HTTP /api/health => ${SUMMARY_HTTP_API_STATUS:-n/d}" 
+  log "Miniweb status => ${SUMMARY_MINIWEB_STATUS:-n/d}"
 
-  # Info útil de Pi5/GPU
-  [[ -e /dev/dri/card0 ]] && log_ok "/dev/dri/card0 presente" || log_warn "No existe /dev/dri/card0"
-  grep -E 'dtoverlay=vc4-(fkms|kms)-v3d(-pi5)?' -n /boot/firmware/config.txt 2>/dev/null || true
+  log "piper CLI => ${SUMMARY_PIPER_CLI:-no-test}"
+  log "Voz: Piper=${SUMMARY_PIPER_MODELS} espeak=${SUMMARY_ESPEAK_AVAILABLE:-unknown}"
+  log "  say => ${SUMMARY_SAY_STATUS:-no-test} backend=${SUMMARY_SAY_BACKEND:-desconocido}"
+  log "  synth => ${SUMMARY_TTS_STATUS:-no-test} backend=${SUMMARY_TTS_BACKEND:-desconocido} bytes=${SUMMARY_TTS_WAV_BYTES}"
 
-  log "CAPTURE_HW_DETECTED=${CAPTURE_HW_DETECTED}"
-  if [[ -n "${CAPTURE_HW_RECOMMENDATION}" ]]; then
-    log "CAPTURE_HW_RECOMMENDATION=${CAPTURE_HW_RECOMMENDATION}"
+  local camera_line="${SUMMARY_CAMERA_STATUS:-no-test}"
+  if [[ -n "${SUMMARY_CAMERA_ERROR}" ]]; then
+    camera_line+=" (${SUMMARY_CAMERA_ERROR})"
   fi
+  log "Cámara => ${camera_line}"
+
+  log "Báscula => ${SUMMARY_SCALE_STATUS:-no-test} scale_connected=${SUMMARY_SCALE_CONNECTED:-unknown}"
+
+  log "KMS => ${SUMMARY_KMS_STATUS:-n/d}; Xorg => ${SUMMARY_XORG_STATUS:-n/d}"
 
   if [[ -z "${KMS_KMSDEV_PATH}" && -f /etc/X11/xorg.conf.d/10-kms.conf ]]; then
     KMS_KMSDEV_PATH="$(awk '/Option/ && /"kmsdev"/ {gsub("\"","",$0); print $NF}' /etc/X11/xorg.conf.d/10-kms.conf | tail -n1)"
@@ -110,6 +115,20 @@ on_exit() {
   if [[ -n "${KMS_KMSDEV_PATH}" ]]; then
     log "kmsdev configurado en 10-kms.conf: ${KMS_KMSDEV_PATH}"
   fi
+
+  if [[ -n "${SUMMARY_AUDIO_DEVICES}" ]]; then
+    log "Audio (aplay -l):"
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] && log "  ${line}"
+    done <<< "${SUMMARY_AUDIO_DEVICES}"
+  fi
+
+  log "CAPTURE_HW_DETECTED=${CAPTURE_HW_DETECTED}"
+  if [[ -n "${CAPTURE_HW_RECOMMENDATION}" ]]; then
+    log "CAPTURE_HW_RECOMMENDATION=${CAPTURE_HW_RECOMMENDATION}"
+  fi
+
+  log "Log: ${BASCULA_LOG_FILE}"
 
   echo
   if [[ $rc -ne 0 ]]; then
@@ -144,6 +163,30 @@ REBOOT_FLAG=0
 CAPTURE_HW_DETECTED=0
 CAPTURE_HW_RECOMMENDATION=""
 KMS_KMSDEV_PATH=""
+
+PIPER_BIN_PATH="${PIPER_BIN_PATH:-/usr/local/bin/piper}"
+: "${PIPER_RELEASE_VERSION:=1.2.0}"
+: "${PIPER_RELEASE_URL:=https://github.com/rhasspy/piper/releases/download/v${PIPER_RELEASE_VERSION}/piper_${PIPER_RELEASE_VERSION}_linux_aarch64.tar.gz}"
+VOICE_SYMLINK_ROOT="/opt/bascula/voices"
+
+SUMMARY_PIPER_CLI=""
+SUMMARY_PIPER_MODELS=0
+SUMMARY_ESPEAK_AVAILABLE=""
+SUMMARY_TTS_BACKEND=""
+SUMMARY_TTS_WAV_BYTES=0
+SUMMARY_TTS_STATUS=""
+SUMMARY_SAY_BACKEND=""
+SUMMARY_SAY_STATUS=""
+SUMMARY_CAMERA_STATUS=""
+SUMMARY_CAMERA_ERROR=""
+SUMMARY_SCALE_STATUS=""
+SUMMARY_SCALE_CONNECTED=""
+SUMMARY_HTTP_ROOT_STATUS=""
+SUMMARY_HTTP_API_STATUS=""
+SUMMARY_MINIWEB_STATUS=""
+SUMMARY_KMS_STATUS=""
+SUMMARY_XORG_STATUS=""
+SUMMARY_AUDIO_DEVICES=""
 
 PI_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
 IS_PI5=0
@@ -438,6 +481,195 @@ check_http_endpoint() {
   return 0
 }
 
+check_piper_cli_ready() {
+  local bin
+  bin="$(command -v piper 2>/dev/null || true)"
+  if [[ -z "${bin}" ]]; then
+    CHECK_FAIL_MSG="piper no está en PATH"
+    SUMMARY_PIPER_CLI="missing"
+    return 1
+  fi
+  if ! "${bin}" --help >/dev/null 2>&1; then
+    CHECK_FAIL_MSG="piper --help devolvió error"
+    SUMMARY_PIPER_CLI="broken (${bin})"
+    return 1
+  fi
+  SUMMARY_PIPER_CLI="ok (${bin})"
+  return 0
+}
+
+check_voice_list_endpoint() {
+  local url="http://127.0.0.1/api/voice/tts/voices"
+  local tmp status rc=0
+  tmp=$(mktemp)
+  status=$(curl -sS -o "${tmp}" -w '%{http_code}' "${url}" || rc=$?)
+  if [[ ${rc} -ne 0 ]]; then
+    CHECK_FAIL_MSG="curl rc=${rc}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  if [[ "${status}" != "200" ]]; then
+    CHECK_FAIL_MSG="HTTP ${status}"
+    SUMMARY_PIPER_MODELS=0
+    SUMMARY_ESPEAK_AVAILABLE=""
+    rm -f "${tmp}"
+    return 1
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    SUMMARY_PIPER_MODELS=$(jq -r '(.piper_models // []) | length' "${tmp}" 2>/dev/null || echo 0)
+    SUMMARY_ESPEAK_AVAILABLE=$(jq -r '.espeak_available // false' "${tmp}" 2>/dev/null || echo false)
+  else
+    SUMMARY_PIPER_MODELS=0
+    SUMMARY_ESPEAK_AVAILABLE="unknown"
+  fi
+  rm -f "${tmp}"
+  if (( SUMMARY_PIPER_MODELS > 0 )); then
+    return 0
+  fi
+  CHECK_FAIL_MSG="Sin voces Piper"
+  return 1
+}
+
+check_voice_say_endpoint() {
+  local url="http://127.0.0.1/api/voice/tts/say?text=Hola&voice=default"
+  local tmp status rc=0
+  tmp=$(mktemp)
+  status=$(curl -sS -X POST -o "${tmp}" -w '%{http_code}' "${url}" || rc=$?)
+  if [[ ${rc} -ne 0 ]]; then
+    CHECK_FAIL_MSG="curl rc=${rc}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  SUMMARY_SAY_STATUS="HTTP ${status}"
+  if [[ "${status}" != "200" ]]; then
+    CHECK_FAIL_MSG="HTTP ${status}"
+    SUMMARY_SAY_BACKEND=""
+    rm -f "${tmp}"
+    return 1
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    SUMMARY_SAY_BACKEND=$(jq -r '.backend // empty' "${tmp}" 2>/dev/null || echo "")
+  fi
+  rm -f "${tmp}"
+  if [[ -z "${SUMMARY_SAY_BACKEND}" ]]; then
+    SUMMARY_SAY_BACKEND="unknown"
+  fi
+  return 0
+}
+
+check_voice_synthesize_endpoint() {
+  local url="http://127.0.0.1/api/voice/tts/synthesize?text=Hola&voice=default"
+  local wav headers status rc=0 backend=""
+  wav=$(mktemp --suffix=.wav)
+  headers=$(mktemp)
+  status=$(curl -sS -X POST -H 'Accept: audio/wav' -o "${wav}" -D "${headers}" -w '%{http_code}' "${url}" || rc=$?)
+  SUMMARY_TTS_STATUS="HTTP ${status}"
+  if [[ ${rc} -ne 0 ]]; then
+    CHECK_FAIL_MSG="curl rc=${rc}"
+    rm -f "${wav}" "${headers}"
+    return 1
+  fi
+  if [[ "${status}" != "200" ]]; then
+    CHECK_FAIL_MSG="HTTP ${status}"
+    rm -f "${wav}" "${headers}"
+    return 1
+  fi
+  if ! grep -qi '^Content-Type: *audio/wav' "${headers}"; then
+    CHECK_FAIL_MSG="Content-Type inesperado"
+    rm -f "${wav}" "${headers}"
+    return 1
+  fi
+  backend=$(awk -F': *' 'tolower($1)=="x-tts-backend" {print tolower($2); exit}' "${headers}" | tr -d '\r')
+  SUMMARY_TTS_BACKEND="${backend:-unknown}"
+  SUMMARY_TTS_WAV_BYTES=$(stat -c '%s' "${wav}" 2>/dev/null || echo 0)
+  rm -f "${headers}"
+  if [[ -z "${backend}" ]]; then
+    CHECK_FAIL_MSG="Sin cabecera X-TTS-Backend"
+    rm -f "${wav}"
+    return 1
+  fi
+  if (( SUMMARY_TTS_WAV_BYTES < 2048 )); then
+    CHECK_FAIL_MSG="WAV demasiado pequeño (${SUMMARY_TTS_WAV_BYTES} bytes)"
+    rm -f "${wav}"
+    return 1
+  fi
+  rm -f "${wav}"
+  return 0
+}
+
+check_camera_info_endpoint() {
+  local url="http://127.0.0.1/api/camera/info"
+  local tmp status rc=0
+  tmp=$(mktemp)
+  status=$(curl -sS -o "${tmp}" -w '%{http_code}' "${url}" || rc=$?)
+  if [[ ${rc} -ne 0 ]]; then
+    SUMMARY_CAMERA_STATUS="curl rc=${rc}"
+    CHECK_FAIL_MSG="curl rc=${rc}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  SUMMARY_CAMERA_STATUS="HTTP ${status}"
+  if command -v jq >/dev/null 2>&1; then
+    SUMMARY_CAMERA_ERROR=$(jq -r '.error // empty' "${tmp}" 2>/dev/null || echo "")
+  else
+    SUMMARY_CAMERA_ERROR=""
+  fi
+  if [[ "${status}" == "200" ]]; then
+    rm -f "${tmp}"
+    return 0
+  fi
+  if [[ "${status}" == "503" && "${SUMMARY_CAMERA_ERROR}" == "camera_unavailable" ]]; then
+    rm -f "${tmp}"
+    return 0
+  fi
+  CHECK_FAIL_MSG="HTTP ${status}"
+  SUMMARY_CAMERA_ERROR=$(head -c 200 "${tmp}" | tr '\n' ' ')
+  rm -f "${tmp}"
+  return 1
+}
+
+check_scale_health() {
+  local url="http://127.0.0.1/api/health"
+  local tmp status rc=0
+  tmp=$(mktemp)
+  status=$(curl -sS -o "${tmp}" -w '%{http_code}' "${url}" || rc=$?)
+  if [[ ${rc} -ne 0 ]]; then
+    CHECK_FAIL_MSG="curl rc=${rc}"
+    SUMMARY_SCALE_STATUS="curl rc=${rc}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  SUMMARY_HTTP_API_STATUS="HTTP ${status}"
+  if [[ "${status}" != "200" ]]; then
+    CHECK_FAIL_MSG="HTTP ${status}"
+    SUMMARY_SCALE_STATUS="HTTP ${status}"
+    rm -f "${tmp}"
+    return 1
+  fi
+  if command -v jq >/dev/null 2>&1; then
+    SUMMARY_SCALE_CONNECTED=$(jq -r '.scale_connected // empty' "${tmp}" 2>/dev/null || echo "")
+    local backend
+    backend=$(jq -r '.scale_backend // .scale_mode // empty' "${tmp}" 2>/dev/null || echo "")
+    if [[ -n "${backend}" ]]; then
+      SUMMARY_SCALE_STATUS="backend=${backend}"
+    fi
+    local reason
+    reason=$(jq -r '.scale_status.reason // empty' "${tmp}" 2>/dev/null || echo "")
+    if [[ -n "${reason}" ]]; then
+      if [[ -n "${SUMMARY_SCALE_STATUS}" ]]; then
+        SUMMARY_SCALE_STATUS+=" reason=${reason}"
+      else
+        SUMMARY_SCALE_STATUS="reason=${reason}"
+      fi
+    fi
+  fi
+  if [[ -z "${SUMMARY_SCALE_STATUS}" ]]; then
+    SUMMARY_SCALE_STATUS="ok"
+  fi
+  rm -f "${tmp}"
+  return 0
+}
+
 check_sse_headers() {
   local url="$1"
   local headers
@@ -605,6 +837,14 @@ ensure_packages() {
   fi
 }
 
+purge_gui_piper() {
+  if dpkg -s piper >/dev/null 2>&1; then
+    log_step "Eliminando paquete Debian piper (GUI)"
+    ensure_apt_cache
+    DEBIAN_FRONTEND=noninteractive apt-get purge -y piper
+  fi
+}
+
 package_available() {
   local pkg="$1"
   local candidate
@@ -676,7 +916,7 @@ install_system_dependencies() {
     python3 python3-venv python3-pip python3-dev \
     python3-libcamera python3-picamera2 python3-numpy python3-simplejpeg \
     libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 \
-    ffmpeg git rsync curl jq nginx alsa-utils libcamera-apps espeak-ng iproute2 \
+    ffmpeg git rsync curl jq unzip nginx alsa-utils libcamera-apps espeak-ng iproute2 \
     xserver-xorg xinit openbox unclutter x11-xserver-utils upower fonts-dejavu-core
 
   ensure_package_alternative "chromium" chromium-browser chromium
@@ -1066,6 +1306,145 @@ ensure_piper_voices() {
   fi
 }
 
+ensure_piper_cli() {
+  log_step "Instalando Piper CLI"
+
+  local existing
+  existing="$(command -v piper 2>/dev/null || true)"
+  if [[ -n "${existing}" ]]; then
+    if "${existing}" --help >/dev/null 2>&1; then
+      if [[ "${existing}" != "${PIPER_BIN_PATH}" ]]; then
+        install -Dm0755 "${existing}" "${PIPER_BIN_PATH}"
+        log "piper CLI copiado a ${PIPER_BIN_PATH}"
+      fi
+      log "piper CLI ya disponible en ${PIPER_BIN_PATH}"
+      SUMMARY_PIPER_CLI="ok (${PIPER_BIN_PATH})"
+      return 0
+    fi
+    log_warn "Comando piper existente pero inválido (${existing}); se reinstalará"
+  fi
+
+  local tmpdir archive rc=0
+  tmpdir="$(mktemp -d)"
+  archive="${tmpdir}/piper.tar.gz"
+  if ! curl --retry 5 --retry-delay 2 --fail --location -o "${archive}" "${PIPER_RELEASE_URL}"; then
+    rc=$?
+    rm -rf "${tmpdir}"
+    log_err "No se pudo descargar Piper CLI desde ${PIPER_RELEASE_URL} (rc=${rc})"
+    exit 1
+  fi
+
+  if ! tar -xzf "${archive}" -C "${tmpdir}"; then
+    rc=$?
+    rm -rf "${tmpdir}"
+    log_err "Extracción de Piper CLI falló (rc=${rc})"
+    exit 1
+  fi
+
+  local binary
+  binary="$(find "${tmpdir}" -type f -name 'piper' -perm -u+x | head -n1)"
+  if [[ -z "${binary}" ]]; then
+    rm -rf "${tmpdir}"
+    log_err "El paquete descargado no contiene binario 'piper' ejecutable"
+    exit 1
+  fi
+
+  install -Dm0755 "${binary}" "${PIPER_BIN_PATH}"
+  rm -rf "${tmpdir}"
+
+  if ! "${PIPER_BIN_PATH}" --help >/dev/null 2>&1; then
+    log_err "piper CLI instalado pero --help falló"
+    exit 1
+  fi
+
+  SUMMARY_PIPER_CLI="ok (${PIPER_BIN_PATH})"
+  log_ok "Piper CLI instalado en ${PIPER_BIN_PATH}"
+}
+
+ensure_voice_symlinks() {
+  install -d -m0755 "${VOICE_SYMLINK_ROOT}"
+
+  shopt -s nullglob
+  local model
+  for model in "${PIPER_VOICES_DIR}"/*.onnx; do
+    local base
+    base="$(basename "${model}")"
+    ln -sfn "piper/${base}" "${VOICE_SYMLINK_ROOT}/${base}"
+    if [[ -f "${model}.json" ]]; then
+      ln -sfn "piper/${base}.json" "${VOICE_SYMLINK_ROOT}/${base}.json"
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ -e "${PIPER_VOICES_DIR}/default.onnx" ]]; then
+    ln -sfn "piper/default.onnx" "${VOICE_SYMLINK_ROOT}/default.onnx"
+  fi
+
+  if getent passwd "${DEFAULT_USER}" >/dev/null 2>&1; then
+    chown -h "${DEFAULT_USER}:${DEFAULT_USER}" "${VOICE_SYMLINK_ROOT}" 2>/dev/null || true
+    shopt -s nullglob
+    local symlinks=("${VOICE_SYMLINK_ROOT}"/*.onnx "${VOICE_SYMLINK_ROOT}"/*.json)
+    shopt -u nullglob
+    if (( ${#symlinks[@]} > 0 )); then
+      chown -h "${DEFAULT_USER}:${DEFAULT_USER}" "${symlinks[@]}" 2>/dev/null || true
+    fi
+  fi
+}
+
+ensure_user_groups() {
+  if ! id "${DEFAULT_USER}" >/dev/null 2>&1; then
+    log_warn "Usuario ${DEFAULT_USER} no encontrado para ajustar grupos"
+    return
+  fi
+
+  local groups=(video render audio input dialout plugdev)
+  local group
+  for group in "${groups[@]}"; do
+    if ! getent group "${group}" >/dev/null 2>&1; then
+      log_warn "Grupo ${group} no existe; omitiendo"
+      continue
+    fi
+    if id -nG "${DEFAULT_USER}" | tr ' ' '\n' | grep -Fxq "${group}"; then
+      continue
+    fi
+    if usermod -a -G "${group}" "${DEFAULT_USER}"; then
+      log "Añadido ${DEFAULT_USER} al grupo ${group}"
+    else
+      log_warn "No se pudo añadir ${DEFAULT_USER} al grupo ${group}"
+    fi
+  done
+}
+
+record_audio_devices() {
+  if command -v aplay >/dev/null 2>&1; then
+    SUMMARY_AUDIO_DEVICES="$(aplay -l 2>/dev/null | head -n 10)"
+  else
+    SUMMARY_AUDIO_DEVICES="aplay no disponible"
+  fi
+}
+
+collect_display_status() {
+  if [[ -e /dev/dri/card1 ]]; then
+    SUMMARY_KMS_STATUS="OK (/dev/dri/card1)"
+  elif [[ -e /dev/dri/card0 ]]; then
+    SUMMARY_KMS_STATUS="WARN (/dev/dri/card0)"
+  else
+    SUMMARY_KMS_STATUS="ERROR (sin /dev/dri/card*)"
+  fi
+
+  local log_path
+  log_path="$(get_xorg_log_path)"
+  if [[ -f "${log_path}" ]]; then
+    if grep -qi 'no screens found' "${log_path}"; then
+      SUMMARY_XORG_STATUS="errores (no screens found)"
+    else
+      SUMMARY_XORG_STATUS="ok"
+    fi
+  else
+    SUMMARY_XORG_STATUS="sin log"
+  fi
+}
+
 ensure_audio_env_file() {
   cat <<'EOF' > "${AUDIO_ENV_FILE}.tmp"
 BASCULA_AUDIO_DEVICE=bascula_out
@@ -1074,6 +1453,28 @@ BASCULA_SAMPLE_RATE=16000
 EOF
   install -o root -g root -m 0644 "${AUDIO_ENV_FILE}.tmp" "${AUDIO_ENV_FILE}"
   rm -f "${AUDIO_ENV_FILE}.tmp"
+}
+
+ensure_backend_env_file() {
+  local file="/etc/default/bascula-backend"
+  local tmp="${file}.tmp"
+  cat <<'EOF' > "${tmp}"
+# Variables opcionales para la báscula física.
+#
+# BASCULA_SCALE_PORT=/dev/ttyUSB0
+# BASCULA_SCALE_BAUD=9600
+# BASCULA_SCALE_PROTOCOL=serial
+# BASCULA_SCALE_DEMO=false
+# BASCULA_SCALE_TIMEOUT_S=2
+#
+# Dejar BASCULA_SCALE_DEMO=true fuerza modo demo sin hardware.
+EOF
+  if [[ -f "${file}" ]] && cmp -s "${tmp}" "${file}"; then
+    rm -f "${tmp}"
+    return
+  fi
+  install -o root -g root -m0644 "${tmp}" "${file}"
+  rm -f "${tmp}"
 }
 
 get_playback_hw() {
@@ -1535,10 +1936,16 @@ run_final_checks() {
 
   final_check "puerto 8081 escuchando" port_listening 8081
   final_check "puerto 80 escuchando" port_listening 80
-  final_check "health backend directo" check_http_endpoint "http://127.0.0.1:8081/api/health" '{"status":"ok"}'
-  final_check "health vía nginx" check_http_endpoint "http://127.0.0.1/api/health" '{"status":"ok"}'
+  final_check "miniweb status" check_http_endpoint "http://127.0.0.1:8080/api/miniweb/status" ""
+  final_check "health backend directo" check_http_endpoint "http://127.0.0.1:8081/health" ""
+  final_check "health vía nginx" check_scale_health
   final_check "cabeceras SSE en proxy" check_sse_headers "http://127.0.0.1/api/scale/events"
   final_check "voces Piper instaladas" check_piper_voices_installed "${PIPER_VOICES_DIR}"
+  final_check "piper CLI disponible" check_piper_cli_ready
+  final_check "API voces Piper" check_voice_list_endpoint
+  final_check "TTS say" check_voice_say_endpoint
+  final_check "TTS synthesize" check_voice_synthesize_endpoint
+  final_check "Cámara info" check_camera_info_endpoint
   test -f /opt/bascula/voices/piper/default.onnx || (echo "[ERR] Piper sin voz por defecto" && exit 1)
   if [[ ${FRONTEND_EXPECTED} -eq 1 ]]; then
     final_check "frontend publicado en ${WWW_ROOT}/index.html" check_file_exists "${WWW_ROOT}/index.html"
@@ -1553,6 +1960,35 @@ run_final_checks() {
   final_check "imports críticos en venv" check_python_imports
 
   verify_xorg_session
+
+  if [[ -z "${SUMMARY_HTTP_ROOT_STATUS}" ]]; then
+    local root_status
+    root_status=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/ 2>/dev/null || echo "curl_error")
+    if [[ "${root_status}" =~ ^[0-9]+$ ]]; then
+      SUMMARY_HTTP_ROOT_STATUS="HTTP ${root_status}"
+    else
+      SUMMARY_HTTP_ROOT_STATUS="${root_status}"
+    fi
+  fi
+  if [[ -z "${SUMMARY_HTTP_API_STATUS}" ]]; then
+    local api_status
+    api_status=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/api/health 2>/dev/null || echo "curl_error")
+    if [[ "${api_status}" =~ ^[0-9]+$ ]]; then
+      SUMMARY_HTTP_API_STATUS="HTTP ${api_status}"
+    else
+      SUMMARY_HTTP_API_STATUS="${api_status}"
+    fi
+  fi
+  if [[ -z "${SUMMARY_MINIWEB_STATUS}" ]]; then
+    local mini_status
+    mini_status=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/miniweb/status 2>/dev/null || echo "curl_error")
+    if [[ "${mini_status}" =~ ^[0-9]+$ ]]; then
+      SUMMARY_MINIWEB_STATUS="HTTP ${mini_status}"
+    else
+      SUMMARY_MINIWEB_STATUS="${mini_status}"
+    fi
+  fi
+  collect_display_status
 
   if [[ ${FINAL_FAILURES} -ne 0 ]]; then
     log_err "Validaciones finales con errores"
@@ -1571,6 +2007,9 @@ main() {
     log_warn "Otro instalador en ejecución; saliendo"
     exit 0
   fi
+
+  log_step "Depurando instalación previa de Piper GUI"
+  purge_gui_piper || true
 
   log_step "Instalando dependencias del sistema"
   install_system_dependencies
@@ -1602,9 +2041,14 @@ main() {
 
   ensure_python_venv
   prepare_ocr_models_dir
+  ensure_piper_cli
   ensure_piper_voices
+  ensure_voice_symlinks
   ensure_audio_env_file
+  ensure_backend_env_file
   install_asound_conf
+  ensure_user_groups
+  record_audio_devices
   install_tmpfiles_config
   systemd-tmpfiles --create "${TMPFILES_DEST}/bascula.conf"
   ensure_log_dir
