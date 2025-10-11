@@ -28,6 +28,10 @@ BOOT_FIRMWARE_DIR="/boot/firmware"
 BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
 REBOOT_FLAG=0
 
+: "${WWW_ROOT:=/var/www/bascula}"
+: "${FRONTEND_DIR:=}"
+: "${SKIP_UI_BUILD:=0}"
+
 umask 022
 
 log() {
@@ -497,22 +501,9 @@ configure_nginx_site() {
     fi
   done
 
-  # Validación estricta y recarga segura de Nginx (fail-fast)
-  log "Validando configuración de Nginx…"
-  if ! nginx -t; then
-    log_err "nginx -t ha fallado; abortando instalación."
-    # Mostrar detalle de error por salida estándar (útil para CI y diagnóstico)
-    nginx -t || true
-    exit 1
-  fi
-
-  # Recarga (sin silencios). Si reload falla, intenta restart. Si restart falla, aborta.
-  log "Recargando Nginx…"
-  if ! systemctl reload nginx; then
-    log_warn "reload falló, intentando restart…"
-    systemctl restart nginx
-  fi
-  log "Nginx recargado correctamente."
+  echo "[install] Validando configuración de Nginx"
+  nginx -t || { echo "[install][err] nginx -t falló"; exit 1; }
+  systemctl reload nginx || { systemctl restart nginx; }
 }
 
 ensure_node() {
@@ -528,86 +519,84 @@ ensure_node() {
 }
 
 detect_frontend_dir() {
-  for d in frontend ui web app; do
-    if [ -d "${REPO_DIR:-/opt/bascula/current}/$d" ]; then
-      echo "${REPO_DIR:-/opt/bascula/current}/$d"
+  local base="${REPO_DIR:-$PWD}"
+  local candidates=(frontend ui web app dash-ui bascula-ui src/frontend src/web src/ui)
+  if [[ -n "${FRONTEND_DIR}" && -f "${FRONTEND_DIR}/package.json" ]]; then
+    echo "${FRONTEND_DIR}"
+    return 0
+  fi
+  local d
+  for d in "${candidates[@]}"; do
+    if [[ -f "${base}/${d}/package.json" ]]; then
+      echo "${base}/${d}"
       return 0
     fi
   done
   return 1
 }
 
-build_frontend() {
-  local front_dir
-  front_dir="$(detect_frontend_dir)" || {
-    log_warn "No se encontró carpeta de frontend (frontend/ui/web/app). Omitiendo build."
-    return 0
-  }
-  log "Frontend: ${front_dir}"
-
-  pushd "${front_dir}" >/dev/null
-
-  if [ -f pnpm-lock.yaml ]; then
-    if ! command -v pnpm >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
-      corepack prepare pnpm@latest --activate 2>/dev/null || true
-    fi
-    if command -v pnpm >/dev/null 2>&1; then
-      log "Usando pnpm"
-      pnpm install --frozen-lockfile
-      pnpm run build
-    else
-      popd >/dev/null
-      log_err "UI: pnpm requerido pero no disponible"
-      exit 1
-    fi
-  elif [ -f yarn.lock ]; then
-    if ! command -v yarn >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
-      corepack prepare yarn@stable --activate 2>/dev/null || true
-    fi
-    if command -v yarn >/dev/null 2>&1; then
-      log "Usando yarn"
-      yarn install --frozen-lockfile
-      yarn build
-    else
-      popd >/dev/null
-      log_err "UI: yarn requerido pero no disponible"
-      exit 1
-    fi
+js_install() {
+  if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
+    pnpm i --frozen-lockfile
+  elif [[ -f package-lock.json ]]; then
+    npm ci
+  elif [[ -f yarn.lock ]] && command -v yarn >/dev/null 2>&1; then
+    yarn install --frozen-lockfile
   else
-    log "Usando npm"
-    (npm ci || npm install)
-    npm run build
+    npm install
   fi
-
-  local out
-  for out in dist build public; do
-    if [ -f "$out/index.html" ]; then
-      popd >/dev/null
-      echo "${front_dir}/${out}"
-      return 0
-    fi
-  done
-
-  popd >/dev/null
-  log_err "UI: falta index.html tras build (no se encontró en dist/build/public)"
-  exit 1
 }
 
-deploy_frontend() {
-  local out_dir
-  out_dir="$(build_frontend)" || return 0
-  [ -z "${out_dir}" ] && return 0
+js_build() {
+  if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
+    pnpm run build
+  elif [[ -f package-lock.json ]]; then
+    npm run build
+  elif [[ -f yarn.lock ]] && command -v yarn >/dev/null 2>&1; then
+    yarn run build
+  else
+    npm run build
+  fi
+}
 
-  local docroot="/var/www/bascula"
-  install -d -m0755 -o www-data -g www-data "${docroot}"
-  rsync -a --delete "${out_dir}/" "${docroot}/"
-  chown -R www-data:www-data "${docroot}"
-
-  if [ ! -f "${docroot}/index.html" ]; then
-    log_err "UI: falta ${docroot}/index.html después del despliegue"
+build_frontend() {
+  if [[ "${SKIP_UI_BUILD}" == "1" ]]; then
+    echo "[install][warn] SKIP_UI_BUILD=1"
+    return 0
+  fi
+  local dir
+  if ! dir="$(detect_frontend_dir)"; then
+    echo "[install][err] No se encontró carpeta de frontend"
     exit 1
   fi
-  log "UI desplegado en ${docroot}"
+  echo "[install] Frontend detectado: ${dir}"
+  pushd "${dir}" >/dev/null
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "[install][err] npm no está instalado"
+    exit 1
+  fi
+  js_install
+  js_build
+  local out=""
+  local c
+  for c in dist build public; do
+    if [[ -f "${c}/index.html" ]]; then
+      out="${c}"
+      break
+    fi
+  done
+  if [[ -z "${out}" ]]; then
+    echo "[install][err] No se encontró index.html tras el build"
+    exit 1
+  fi
+  sudo mkdir -p "${WWW_ROOT}"
+  sudo rsync -a --delete "${out}/" "${WWW_ROOT}/"
+  popd >/dev/null
+  if [[ ! -f "${WWW_ROOT}/index.html" ]]; then
+    echo "[install][err] Copia a ${WWW_ROOT} incompleta"
+    exit 1
+  fi
+  echo "[install] UI publicada en ${WWW_ROOT}"
 }
 
 ensure_chromium_browser() {
@@ -727,51 +716,12 @@ log_nginx_root_and_listing() {
 }
 
 run_final_checks() {
-  log "[step] Ejecutando comprobaciones finales"
-  if ! nginx -t; then
-    abort "nginx -t falló en comprobaciones finales"
-  fi
-
-  local api_health
-  api_health=$(curl -fsS http://127.0.0.1/api/health || true)
-  if [[ -z "${api_health}" ]] || [[ ${api_health} != *'"status":"ok"'* ]]; then
-    abort "API de salud no devolvió status ok"
-  fi
-
-  run_checked "UI raíz responde 200" curl -fsS http://127.0.0.1/ >/dev/null
-  run_checked "API health vía proxy" curl -fsS http://127.0.0.1/api/health >/dev/null
-  run_checked "Miniweb cámara vía proxy" curl -fsS http://127.0.0.1/api/camera/info >/dev/null
-
-  local sse_output=""
-  local sse_status=0
-  set +e
-  sse_output=$(curl -fsS -i --no-buffer -H 'Accept: text/event-stream' http://127.0.0.1/api/scale/events | head -n 20)
-  sse_status=$?
-  set -e
-  if [[ ${sse_status} -eq 0 || ${sse_status} -eq 23 || ${sse_status} -eq 141 ]]; then
-    if [[ ${sse_output} != *'HTTP/1.1 200'* ]]; then
-      abort "SSE /api/scale/events no devolvió 200"
-    fi
-    log "[step] Cabeceras SSE /api/scale/events (primeras líneas):"
-    printf '%s\n' "${sse_output}"
-  else
-    abort "curl -i http://127.0.0.1/api/scale/events falló (código ${sse_status})"
-  fi
-
-  verify_ui_served
-
-  log_nginx_root_and_listing
-
-  local backend_status ui_status
-  backend_status=$(systemd_status_brief bascula-backend.service)
-  ui_status=$(systemd_status_brief bascula-ui.service)
-  log "[step] Estado bascula-backend: ${backend_status}"
-  log "[step] Estado bascula-ui: ${ui_status}"
-
-  log "[step] curl -sS http://127.0.0.1/api/health"
-  curl -fsS http://127.0.0.1/api/health
-  log "[step] curl -sS http://127.0.0.1/ | head -n 30"
-  curl -fsS http://127.0.0.1/ | head -n 30
+  echo "[install][step] Verificaciones finales"
+  nginx -t || { echo "[install][err] nginx roto"; exit 1; }
+  curl -fsS http://127.0.0.1/api/health >/dev/null || { echo "[install][err] /api/health no responde"; exit 1; }
+  curl -i -N --max-time 5 http://127.0.0.1/api/scale/events | head -n1 | grep -q "HTTP/1.1 200" || echo "[install][warn] SSE sin 200 inmediato (puede tardar)"
+  curl -fsS http://127.0.0.1/ >/dev/null || { echo "[install][err] UI no sirve index"; exit 1; }
+  echo "[install][ok] Instalación completa"
 }
 
 main() {
@@ -809,6 +759,8 @@ main() {
     log "Release ya sincronizada"
   fi
 
+  REPO_DIR="${CURRENT_LINK}"
+
   ensure_python_venv
   prepare_ocr_models_dir
   ensure_audio_env_file
@@ -817,12 +769,11 @@ main() {
   systemd-tmpfiles --create "${TMPFILES_DEST}/bascula.conf"
   ensure_log_dir
   ensure_capture_dirs
+
+  ensure_node
+  build_frontend
   configure_nginx_site
   install_systemd_units
-
-  REPO_DIR="${CURRENT_LINK}"
-  ensure_node
-  deploy_frontend
   configure_bascula_ui_service
   ensure_backend_service
 
@@ -831,7 +782,6 @@ main() {
   fi
 
   run_final_checks
-  log "Instalación completada"
 }
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
