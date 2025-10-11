@@ -97,6 +97,9 @@ fi
 
 log "CHROME=${CHROME_BIN} URL=${TARGET_URL}"
 
+export XDG_RUNTIME_DIR="/run/user/1000"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
+
 exec "${CHROME_BIN}" \
   --kiosk \
   --noerrdialogs \
