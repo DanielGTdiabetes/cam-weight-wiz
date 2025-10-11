@@ -34,6 +34,12 @@ BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
 PIPER_VOICES_DIR="/opt/bascula/voices/piper"
 REBOOT_FLAG=0
 
+PI_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
+IS_PI5=0
+if [[ "${PI_MODEL}" == *"Raspberry Pi 5"* ]]; then
+  IS_PI5=1
+fi
+
 : "${SKIP_UI_BUILD:=0}"
 
 umask 022
@@ -549,6 +555,13 @@ ensure_boot_config_line() {
   set_reboot_required "boot-config: ${line}"
 }
 
+ensure_boot_config_backup() {
+  if [[ -f "${BOOT_CONFIG_FILE}" && ! -f "${BOOT_CONFIG_FILE}.bak_bascula" ]]; then
+    cp -a "${BOOT_CONFIG_FILE}" "${BOOT_CONFIG_FILE}.bak_bascula"
+    log "Respaldo de config.txt creado en ${BOOT_CONFIG_FILE}.bak_bascula"
+  fi
+}
+
 remove_boot_config_lines_matching() {
   local pattern="$1"
   local file="${BOOT_CONFIG_FILE}"
@@ -568,17 +581,117 @@ remove_boot_config_lines_matching() {
   set_reboot_required "boot-config remove ${pattern}"
 }
 
+apply_pi5_boot_overlays() {
+  if [[ ${IS_PI5} -ne 1 ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "${BOOT_CONFIG_FILE}" ]]; then
+    abort "No se encontró ${BOOT_CONFIG_FILE}; verifique montaje de /boot"
+  fi
+
+  ensure_boot_config_backup
+
+  local result
+  result=$(python3 - "${BOOT_CONFIG_FILE}" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+lines = path.read_text().splitlines()
+changed = False
+
+def comment_exact(value: str) -> None:
+    global changed
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == value and not stripped.startswith('#'):
+            prefix = line[: len(line) - len(line.lstrip())]
+            lines[idx] = f"{prefix}# {value}"
+            changed = True
+
+def comment_prefixed(value: str) -> None:
+    global changed
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(value) and not stripped.startswith('#'):
+            prefix = line[: len(line) - len(line.lstrip())]
+            lines[idx] = f"{prefix}# {stripped}"
+            changed = True
+
+comment_exact('dtoverlay=vc4-kms-v3d')
+comment_prefixed('dtoverlay=vc4-fkms-v3d')
+
+has_pi5 = False
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('dtoverlay=vc4-kms-v3d-pi5') and not stripped.startswith('#'):
+        has_pi5 = True
+        break
+
+if not has_pi5:
+    lines.append('dtoverlay=vc4-kms-v3d-pi5')
+    changed = True
+
+if changed:
+    path.write_text("\n".join(lines) + "\n")
+    print('changed')
+else:
+    print('unchanged')
+PY
+  )
+
+  if [[ "${result}" == "changed" ]]; then
+    log "Aplicando overlay vc4-kms-v3d-pi5 y deshabilitando fkms/fbdev en ${BOOT_CONFIG_FILE}"
+    set_reboot_required "boot-config: vc4-kms-v3d-pi5"
+  else
+    log "Overlay vc4-kms-v3d-pi5 ya presente"
+  fi
+}
+
+purgar_fbdev_driver() {
+  if [[ ${IS_PI5} -ne 1 ]]; then
+    return 0
+  fi
+  log "Purgando xserver-xorg-video-fbdev"
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y xserver-xorg-video-fbdev || true
+}
+
+disable_fbdev_xorg_configs() {
+  if [[ ${IS_PI5} -ne 1 ]]; then
+    return 0
+  fi
+  local path
+  for path in /etc/X11/xorg.conf /etc/X11/xorg.conf.d/99-fbdev.conf; do
+    if [[ -e "${path}" ]]; then
+      local backup="${path}.bak_bascula"
+      if [[ -e "${backup}" ]]; then
+        rm -f "${path}"
+        log "Eliminada configuración fbdev residual ${path} (backup existente)"
+      else
+        mv "${path}" "${backup}"
+        log "Configuración fbdev movida a ${backup}"
+      fi
+    fi
+  done
+}
+
 ensure_boot_overlays() {
   if [[ ! -d "${BOOT_FIRMWARE_DIR}" ]]; then
     log_warn "${BOOT_FIRMWARE_DIR} no encontrado; omitiendo configuración de overlays"
     return
   fi
-  remove_boot_config_lines_matching '^dtoverlay=vc4.*'
   remove_boot_config_lines_matching '^disable_fw_kms_setup=.*'
-  ensure_boot_config_line "dtoverlay=vc4-kms-v3d-pi5"
+  ensure_boot_config_backup
+  if [[ ${IS_PI5} -eq 1 ]]; then
+    apply_pi5_boot_overlays
+  fi
   ensure_boot_config_line "dtoverlay=disable-bt"
   ensure_boot_config_line "dtoverlay=hifiberry-dac"
   ensure_boot_config_line "enable_uart=1"
+  if [[ ${IS_PI5} -ne 1 ]]; then
+    ensure_boot_config_line "dtoverlay=vc4-kms-v3d"
+  fi
 }
 
 current_commit() {
@@ -925,31 +1038,68 @@ configure_nginx_site() {
   fi
 }
 
+ensure_kiosk_packages() {
+  ensure_packages xserver-xorg xinit x11-xserver-utils openbox unclutter curl jq upower fonts-dejavu-core
+}
+
 ensure_chromium_browser() {
-  if [[ -x /usr/bin/chromium-browser ]]; then
-    return 0
+  ensure_kiosk_packages
+
+  local chromium_bin
+  chromium_bin="$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || true)"
+
+  if [[ -z "${chromium_bin}" ]]; then
+    log "[step] Instalando Chromium para el modo quiosco"
+    ensure_package_alternative "chromium" chromium-browser chromium
+
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ttf-mscorefonts-installer || \
+      log_warn "No se pudo instalar ttf-mscorefonts-installer"
+
+    chromium_bin="$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || true)"
+  else
+    log "Chromium ya disponible en ${chromium_bin}"
   fi
-
-  log "[step] Instalando Chromium para el modo quiosco"
-  ensure_packages xserver-xorg xinit openbox unclutter x11-xserver-utils upower fonts-dejavu-core
-
-  ensure_package_alternative "chromium" chromium-browser chromium
-
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ttf-mscorefonts-installer || \
-    log_warn "No se pudo instalar ttf-mscorefonts-installer"
 
   if [[ -x /usr/bin/chromium ]] && [[ ! -e /usr/bin/chromium-browser ]]; then
     ln -sfn /usr/bin/chromium /usr/bin/chromium-browser
+    chromium_bin="/usr/bin/chromium"
   fi
 
-  if [[ ! -x /usr/bin/chromium-browser ]]; then
-    abort "No se encontró /usr/bin/chromium-browser tras instalar Chromium"
+  if [[ -z "${chromium_bin}" || ! -x "${chromium_bin}" ]]; then
+    abort "No se encontró un binario de Chromium tras la instalación"
   fi
 }
 
 configure_bascula_ui_service() {
   log "[step] Configurando bascula-ui.service"
   ensure_chromium_browser
+
+  local xinit_src=""
+  if [[ -n "${REPO_DIR:-}" && -f "${REPO_DIR}/.xinitrc" ]]; then
+    xinit_src="${REPO_DIR}/.xinitrc"
+  elif [[ -f "${REPO_ROOT}/.xinitrc" ]]; then
+    xinit_src="${REPO_ROOT}/.xinitrc"
+  fi
+
+  if [[ -n "${xinit_src}" ]]; then
+    local xinit_dest="/home/${DEFAULT_USER}/.xinitrc"
+    local tmp
+    tmp="$(mktemp)"
+    install -m0755 "${xinit_src}" "${tmp}"
+    local needs_update=0
+    if [[ ! -f "${xinit_dest}" ]]; then
+      needs_update=1
+    elif ! cmp -s "${tmp}" "${xinit_dest}"; then
+      needs_update=1
+    fi
+    if [[ ${needs_update} -eq 1 ]]; then
+      install -D -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" -m0755 "${tmp}" "${xinit_dest}"
+      log "Actualizado ${xinit_dest}"
+    fi
+    rm -f "${tmp}" || true
+  else
+    log_warn "No se encontró plantilla .xinitrc en el release"
+  fi
 
   local dropin_dir="/etc/systemd/system/bascula-ui.service.d"
   local dropin_file="${dropin_dir}/30-chrome-cache.conf"
@@ -974,7 +1124,7 @@ EOF
   if [[ ${need_reload} -eq 1 ]]; then
     systemctl daemon-reload
   fi
-  systemctl enable --now bascula-ui.service
+  systemctl enable bascula-ui.service
 }
 
 ensure_services_started() {
@@ -986,7 +1136,18 @@ ensure_services_started() {
   fi
 
   if systemctl list-unit-files | grep -q '^bascula-ui.service'; then
-    systemctl enable --now bascula-ui.service
+    systemctl enable bascula-ui.service
+    if ! systemctl start bascula-ui.service; then
+      log_err "Fallo al iniciar bascula-ui.service"
+      journalctl -u bascula-ui.service -n 50 --no-pager || true
+      exit 1
+    fi
+    sleep 1
+    if ! systemctl is-active --quiet bascula-ui.service; then
+      log_err "bascula-ui.service no está activo tras el arranque"
+      journalctl -u bascula-ui.service -n 50 --no-pager || true
+      exit 1
+    fi
   fi
 }
 
@@ -1047,6 +1208,8 @@ main() {
   install_system_dependencies
 
   ensure_boot_overlays || true
+  purgar_fbdev_driver || true
+  disable_fbdev_xorg_configs || true
 
   mkdir -p "${RELEASES_DIR}"
   COMMIT=$(current_commit)
@@ -1097,6 +1260,21 @@ main() {
   fi
 
   ensure_services_started
+
+  if [[ ${IS_PI5} -eq 1 ]]; then
+    local verify_script="${REPO_DIR}/scripts/verify-xorg.sh"
+    if [[ ! -x "${verify_script}" && -x "${REPO_ROOT}/scripts/verify-xorg.sh" ]]; then
+      verify_script="${REPO_ROOT}/scripts/verify-xorg.sh"
+    fi
+    if [[ -x "${verify_script}" ]]; then
+      if ! "${verify_script}"; then
+        log_err "Pi 5 requiere vc4-kms-v3d-pi5; hemos desactivado fbdev. Revisa /boot/firmware/config.txt y reinicia."
+        exit 1
+      fi
+    else
+      log_warn "No se encontró verify-xorg.sh para validar la sesión X"
+    fi
+  fi
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
     log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Continuando con verificaciones esenciales."

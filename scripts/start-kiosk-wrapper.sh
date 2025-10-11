@@ -42,4 +42,4 @@ if x_running; then
 fi
 
 log "Servidor X no detectado; lanzando startx"
-exec /usr/bin/startx /opt/bascula/current/.xinitrc -- :0 vt1 -nocursor
+exec /usr/bin/startx /home/pi/.xinitrc -- :0 vt1 -nocursor
