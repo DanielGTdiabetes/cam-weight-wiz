@@ -1241,7 +1241,7 @@ ensure_python_venv() {
   pip install \
     "uvicorn>=0.30,<1.0" \
     "fastapi==0.115.6" \
-    "starlette>=0.38,<0.39" \
+    "starlette>=0.40,<0.41" \
     "pydantic==2.7.4" \
     "pydantic-core==2.18.4" \
     "typing_extensions==4.12.2" \
@@ -1593,12 +1593,14 @@ get_capture_hw() {
   fi
 
   if [[ -n "${capture_list}" ]]; then
-    preferred=$(printf '%s\n' "${capture_list}" | awk '/^(default|plughw|hw):CARD=/ {print}' | grep -Ei 'usb|mic|seeed|input|record' | head -n1)
+    local candidates
+    candidates="$(printf '%s\n' "${capture_list}" | awk '/^(default|plughw|hw):CARD=/ {print}' || true)"
+    preferred="$(printf '%s\n' "${candidates}" | grep -Ei 'usb|mic|seeed|input|record' | head -n1 || true)"
     if [[ -z "${preferred}" ]]; then
-      preferred=$(printf '%s\n' "${capture_list}" | awk '/^(default|plughw):CARD=/ {print; exit}')
+      preferred="$(printf '%s\n' "${candidates}" | awk '/^(default|plughw):CARD=/ {print; exit}' || true)"
     fi
     if [[ -z "${preferred}" ]]; then
-      preferred=$(printf '%s\n' "${capture_list}" | awk '/^hw:CARD=/ {print; exit}')
+      preferred="$(printf '%s\n' "${candidates}" | awk '/^hw:CARD=/ {print; exit}' || true)"
     fi
     if [[ -n "${preferred}" ]]; then
       CAPTURE_HW_RECOMMENDATION="${preferred}"
