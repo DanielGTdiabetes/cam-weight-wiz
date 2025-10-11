@@ -267,7 +267,9 @@ check_http_endpoint() {
 check_sse_headers() {
   local url="$1"
   local headers
-  headers=$(curl -sS -I "${url}" || true)
+  # HEAD requests against FastAPI StreamingResponse endpoints return 405.
+  # Use a short-lived GET to capture headers without failing the generator.
+  headers=$(curl -sS -X GET --max-time 5 -D - -o /dev/null "${url}" || true)
   if [[ -z "${headers}" ]]; then
     CHECK_FAIL_MSG="Sin respuesta de ${url}"
     return 1
@@ -341,7 +343,7 @@ import sys
 log_prefix = "${LOG_PREFIX}"
 venv_dir = os.path.realpath("${CURRENT_LINK}/.venv")
 env_venv = os.environ.get("VIRTUAL_ENV")
-exe = os.path.realpath(sys.executable)
+exe = os.path.abspath(sys.executable)
 
 if not env_venv:
     print(f"{log_prefix}[err] VIRTUAL_ENV no establecido tras activar el venv")
@@ -351,7 +353,11 @@ if os.path.realpath(env_venv) != venv_dir:
     print(f"{log_prefix}[err] VIRTUAL_ENV apunta a {env_venv}, esperado {venv_dir}")
     raise SystemExit(1)
 
-if not exe.startswith(os.path.join(venv_dir, "")):
+try:
+    if os.path.commonpath([venv_dir, exe]) != venv_dir:
+        print(f"{log_prefix}[err] sys.executable fuera del venv: {exe}")
+        raise SystemExit(1)
+except ValueError:
     print(f"{log_prefix}[err] sys.executable fuera del venv: {exe}")
     raise SystemExit(1)
 
