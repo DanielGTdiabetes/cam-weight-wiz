@@ -1247,6 +1247,8 @@ ensure_python_venv() {
     "typing_extensions==4.12.2" \
     "annotated-types==0.7.0" \
     "h11==0.14.0" \
+    "anyio==4.4.0" \
+    "sniffio==1.3.1" \
     "click>=8.1" \
     "httpx==0.28.1" \
     "httpcore>=1.0.0,<2.0.0"
