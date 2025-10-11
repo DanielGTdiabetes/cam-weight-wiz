@@ -37,7 +37,7 @@ REBOOT_FLAG=0
 
 umask 022
 
-FRONTEND_EXPECTED=1
+FRONTEND_EXPECTED=0
 
 log() {
   printf '%s %s\n' "${LOG_PREFIX}" "$*"
@@ -79,6 +79,11 @@ ensure_node_runtime() {
 detect_frontend_dir() {
   local base_dir
   base_dir="${REPO_DIR:-${REPO_ROOT}}"
+
+  if [[ -f "${base_dir}/package.json" ]]; then
+    echo "${base_dir}"
+    return 0
+  fi
 
   if [[ -n "${FRONTEND_DIR:-}" ]]; then
     local abs
@@ -171,10 +176,11 @@ build_frontend_if_present() {
   local dir
   dir="$(detect_frontend_dir)"
   if [[ -z "${dir}" ]]; then
-    log_warn "No se encontró carpeta de frontend con package.json; se omite compilación"
-    FRONTEND_EXPECTED=0
-    return 0
+    log_err "No se encontró carpeta de frontend con package.json en ${REPO_DIR:-${REPO_ROOT}}"
+    return 1
   fi
+
+  FRONTEND_EXPECTED=1
 
   log_step "Compilando frontend ${dir}"
   ensure_node_runtime
