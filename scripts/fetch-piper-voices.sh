@@ -73,10 +73,10 @@ process_voice() {
 
   log "Preparando ${voice}"
 
+  local meta_downloaded=1
   if ! download_if_needed "${meta_url}" "${meta_path}" "${voice}.json"; then
-    error "${voice}: fallo al descargar metadatos"
-    error "${voice} FAIL"
-    return 1
+    warn "${voice}: metadatos no disponibles; continuando sin verificación de checksum"
+    meta_downloaded=0
   fi
 
   if ! download_if_needed "${voice_url}" "${voice_path}" "${voice}"; then
@@ -92,7 +92,11 @@ process_voice() {
     return 1
   fi
 
-  set_permissions "${voice_path}" "${meta_path}"
+  if [[ ${meta_downloaded} -eq 0 ]]; then
+    set_permissions "${voice_path}"
+  else
+    set_permissions "${voice_path}" "${meta_path}"
+  fi
 
   log "${voice} OK"
   return 0
@@ -147,13 +151,21 @@ verify_checksum() {
 }
 
 set_permissions() {
-  local voice_path="$1"
-  local meta_path="$2"
+  local path
+  local -a existing=()
 
-  chmod 0644 "${voice_path}" "${meta_path}"
+  for path in "$@"; do
+    [[ -n "${path}" && -e "${path}" ]] || continue
+    chmod 0644 "${path}"
+    existing+=("${path}")
+  done
+
+  if [[ ${#existing[@]} -eq 0 ]]; then
+    return
+  fi
 
   if getent passwd pi >/dev/null 2>&1 && getent group pi >/dev/null 2>&1; then
-    chown pi:pi "${voice_path}" "${meta_path}"
+    chown pi:pi "${existing[@]}"
   else
     warn "usuario/grupo pi no existe; omitiendo chown"
   fi
