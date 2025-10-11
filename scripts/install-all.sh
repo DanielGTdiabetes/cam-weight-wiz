@@ -21,15 +21,15 @@ TMPFILES_DEST="/etc/tmpfiles.d"
 SYSTEMD_DEST="/etc/systemd/system"
 NGINX_SITES_AVAILABLE="/etc/nginx/sites-available"
 NGINX_SITES_ENABLED="/etc/nginx/sites-enabled"
-NGINX_SITE_NAME="00-bascula.conf"
+NGINX_SITE_NAME="${NGINX_SITE_NAME:-bascula.conf}"
 ASOUND_CONF="/etc/asound.conf"
 AUDIO_ENV_FILE="/etc/default/bascula-audio"
 BOOT_FIRMWARE_DIR="/boot/firmware"
 BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
 REBOOT_FLAG=0
 
-: "${WWW_ROOT:=/var/www/bascula}"
-: "${FRONTEND_DIR:=}"
+WWW_ROOT="${WWW_ROOT:-/opt/bascula/www}"
+FRONTEND_DIR="${FRONTEND_DIR:-/opt/bascula/current}"
 : "${SKIP_UI_BUILD:=0}"
 
 umask 022
@@ -160,6 +160,28 @@ sync_release_contents() {
   rsync -a --delete --exclude='.git' --exclude='.venv' "${REPO_ROOT}/" "${RELEASE_DIR}/"
   printf '%s\n' "${COMMIT}" > "${RELEASE_DIR}/.release-commit"
   ln -sfn "${RELEASE_DIR}" "${CURRENT_LINK}"
+  ensure_release_ownership
+}
+
+ensure_release_ownership() {
+  if [[ ! -L "${CURRENT_LINK}" ]]; then
+    return 0
+  fi
+
+  local resolved release_basename
+  resolved=$(readlink -f "${CURRENT_LINK}" || true)
+  if [[ -z "${resolved}" || ! -d "${resolved}" ]]; then
+    return 0
+  fi
+
+  release_basename="$(basename "${resolved}")"
+
+  chown -R pi:pi "${CURRENT_LINK}" || true
+  if [[ -d "${RELEASES_DIR}/${release_basename}" ]]; then
+    chown -R pi:pi "${RELEASES_DIR}/${release_basename}"
+  else
+    chown -R pi:pi "${resolved}"
+  fi
 }
 
 ensure_python_venv() {
@@ -383,6 +405,13 @@ ensure_capture_dirs() {
   chmod g+s /run/bascula/captures
 }
 
+ensure_www_root() {
+  if [[ ! -d "${WWW_ROOT}" ]]; then
+    mkdir -p "${WWW_ROOT}"
+  fi
+  chown -R pi:pi "${WWW_ROOT}"
+}
+
 ensure_log_dir() {
   install -d -m 0755 -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" /var/log/bascula
 }
@@ -413,97 +442,37 @@ install_systemd_units() {
   local units=(
     bascula-miniweb.service
     bascula-backend.service
-    bascula-health-wait.service
-    bascula-ui.service
   )
   local unit
   for unit in "${units[@]}"; do
     install_systemd_unit "${unit}"
   done
   systemctl daemon-reload
-  systemctl enable bascula-miniweb.service bascula-backend.service bascula-health-wait.service bascula-ui.service
-  systemctl restart bascula-miniweb.service bascula-backend.service || true
-  systemctl restart bascula-health-wait.service || true
-  systemctl restart bascula-ui.service || true
 }
 
 configure_nginx_site() {
   log "[step] Configurando Nginx para Báscula"
-  local BASCULA_NGINX_SITE="00-bascula.conf"
-  local BASCULA_MANAGED_MARK="# BASCULA_MANAGED: do-not-edit-manually"
-  local SITES_AVAIL="/etc/nginx/sites-available"
-  local SITES_ENABLED="/etc/nginx/sites-enabled"
-  local SITES_DISABLED="/etc/nginx/sites-disabled-by-bascula"
-  local TS
-  TS="$(date +%Y%m%d-%H%M%S)"
+  install -d -m0755 "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}"
 
-  install -d -m0755 "${SITES_AVAIL}" "${SITES_ENABLED}" /var/www
-  mkdir -p "${SITES_DISABLED}"
-
-  rm -f /etc/nginx/conf.d/00-bascula.conf /etc/nginx/conf.d/00-bascula.conf.off
-
-  local site_source="${RELEASE_DIR}/nginx/bascula.conf"
-  local site_path="${SITES_AVAIL}/${BASCULA_NGINX_SITE}"
-  if [[ ! -f "${site_source}" ]]; then
-    abort "No se encontró plantilla Nginx en ${site_source}"
+  local template="${REPO_ROOT}/scripts/nginx/bascula.conf"
+  if [[ ! -f "${template}" ]]; then
+    abort "No se encontró plantilla Nginx en ${template}"
   fi
 
-  install -o root -g root -m0644 "${site_source}" "${site_path}"
-  if ! head -n1 "${site_path}" | grep -Fxq "${BASCULA_MANAGED_MARK}"; then
-    local tmpfile
-    tmpfile=$(mktemp)
-    {
-      printf '%s\n' "${BASCULA_MANAGED_MARK}"
-      cat "${site_path}"
-    } > "${tmpfile}"
-    install -o root -g root -m0644 "${tmpfile}" "${site_path}"
-    rm -f "${tmpfile}"
+  local rendered
+  rendered="$(mktemp)"
+  sed "s#/opt/bascula/www#${WWW_ROOT//\//\/}#g" "${template}" > "${rendered}"
+  install -o root -g root -m0644 "${rendered}" "${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
+  rm -f "${rendered}"
+
+  ln -sfn "${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}" "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
+  rm -f "${NGINX_SITES_ENABLED}/default"
+
+  if ! nginx -t; then
+    echo "[install][err] nginx -t falló" >&2
+    exit 1
   fi
-
-  ln -sfn "${site_path}" "${SITES_ENABLED}/${BASCULA_NGINX_SITE}"
-
-  disable_site_entry() {
-    local entry="$1"
-    local base target
-    base="$(basename "${entry}")"
-    target="${SITES_DISABLED}/${base}.${TS}.disabled-by-bascula"
-    # Solo movemos el symlink/fichero en sites-enabled
-    mv -f "${entry}" "${target}" || true
-  }
-
-  for entry in "${SITES_ENABLED}"/*; do
-    [[ -e "${entry}" ]] || continue
-    local base="$(basename "${entry}")"
-
-    [[ "${base}" == "${BASCULA_NGINX_SITE}" ]] && continue
-    [[ "${base}" == *.disabled-by-bascula ]] && continue
-
-    local target="${entry}"
-    if [[ -L "${entry}" ]]; then
-      local resolved
-      if resolved="$(readlink -f "${entry}" 2>/dev/null)"; then
-        target="${resolved}"
-      fi
-    fi
-
-    if grep -q "${BASCULA_MANAGED_MARK}" "${target}" 2>/dev/null; then
-      if grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?80([[:space:]]|;|$)' "${target}"; then
-        log "Deshabilitando vhost gestionado en puerto 80: ${entry}"
-        disable_site_entry "${entry}"
-        continue
-      fi
-    fi
-
-    if [[ "${base}" == "default" ]] && grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?80([[:space:]]|;|$)' "${target}"; then
-      log "Deshabilitando vhost default en puerto 80: ${entry}"
-      disable_site_entry "${entry}"
-      continue
-    fi
-  done
-
-  echo "[install] Validando configuración de Nginx"
-  nginx -t || { echo "[install][err] nginx -t falló"; exit 1; }
-  systemctl reload nginx || { systemctl restart nginx; }
+  systemctl reload nginx
 }
 
 ensure_node() {
@@ -518,127 +487,67 @@ ensure_node() {
   corepack prepare pnpm@latest --activate 2>/dev/null || true
 }
 
-js_install() {
-  if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
-    pnpm i --frozen-lockfile
-  elif [[ -f package-lock.json ]]; then
-    npm ci
-  elif [[ -f yarn.lock ]] && command -v yarn >/dev/null 2>&1; then
-    yarn install --frozen-lockfile
-  else
-    npm install
-  fi
-}
-
-js_build() {
-  if [[ -f pnpm-lock.yaml ]] && command -v pnpm >/dev/null 2>&1; then
-    pnpm run build
-  elif [[ -f package-lock.json ]]; then
-    npm run build
-  elif [[ -f yarn.lock ]] && command -v yarn >/dev/null 2>&1; then
-    yarn run build
-  else
-    npm run build
-  fi
-}
-
-_find_ui_dir_in() {
-  local base="$1"
-  shift || true
-  local rels=("$@")
-  local d
-  for d in "${rels[@]}"; do
-    [[ -f "${base}/${d}/package.json" ]] || continue
-    if jq -e '.scripts.build' "${base}/${d}/package.json" >/dev/null 2>&1; then
-      echo "${base}/${d}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-detect_frontend_dir() {
-  if [[ -n "${FRONTEND_DIR}" ]]; then
-    if [[ -f "${FRONTEND_DIR}/package.json" ]] \
-      && jq -e '.scripts.build' "${FRONTEND_DIR}/package.json" >/dev/null 2>&1; then
-      echo "${FRONTEND_DIR}"
-      return 0
-    fi
-    log_warn "FRONTEND_DIR=${FRONTEND_DIR} no contiene package.json con scripts.build"
-  fi
-
-  local candidates_rel=(
-    "frontend" "ui" "web" "app" "dash-ui" "bascula-ui"
-    "src/frontend" "src/web" "src/ui"
-  )
-
-  local rel="/opt/bascula/current"
-  if [[ -d "${rel}" ]]; then
-    _find_ui_dir_in "${rel}" "${candidates_rel[@]}" && return 0
-  fi
-
-  local home="${HOME}/bascula-ui"
-  if [[ -d "${home}" ]]; then
-    _find_ui_dir_in "${home}" "" "frontend" "ui" "web" "app" && return 0
-  fi
-
-  local fb="/opt/bascula/ui"
-  if [[ ! -d "${fb}/.git" ]]; then
-    mkdir -p /opt/bascula
-    local repo_url=""
-    if [[ -d "${rel}/.git" ]]; then
-      repo_url="$(git -C "${rel}" remote get-url origin 2>/dev/null || true)"
-    fi
-    if [[ -z "${repo_url}" ]]; then
-      repo_url="https://github.com/DanielGTdiabetes/cam-weight-wiz"
-    fi
-    if [[ -n "${repo_url}" ]]; then
-      log "Clonando UI desde ${repo_url} en ${fb}"
-      git clone --depth=1 "${repo_url}" "${fb}" || log_warn "Clonado de ${repo_url} falló"
-    fi
-  fi
-  if [[ -d "${fb}" ]]; then
-    _find_ui_dir_in "${fb}" "${candidates_rel[@]}" && return 0
-  fi
-
-  return 1
-}
-
 build_frontend() {
   if [[ "${SKIP_UI_BUILD}" == "1" ]]; then
     log_warn "SKIP_UI_BUILD=1, omitiendo build de UI"
     return 0
   fi
 
-  local dir
-  if ! dir="$(detect_frontend_dir)"; then
-    log_err "No se encontró carpeta de frontend (package.json con scripts.build) en: /opt/bascula/current, ~/bascula-ui, ni /opt/bascula/ui"
-    log_err "Revisa que tu UI exista (p.ej. ~/bascula-ui) o añade la UI al repo."
-    exit 1
+  local pkg_json="${FRONTEND_DIR}/package.json"
+  if [[ ! -f "${pkg_json}" ]]; then
+    log_warn "Frontend no encontrado; se servirá miniweb."
+    return 0
   fi
-  log "Frontend detectado: ${dir}"
 
-  pushd "${dir}" >/dev/null
-  [[ -f package.json ]] || { log_err "package.json no encontrado en ${dir}"; exit 1; }
-  command -v npm >/dev/null 2>&1 || { log_err "npm no está instalado"; exit 1; }
-  js_install
-  js_build
+  pushd "${FRONTEND_DIR}" >/dev/null
 
-  local out=""
-  local candidate
-  for candidate in dist build public; do
-    if [[ -f "${candidate}/index.html" ]]; then
-      out="${candidate}"
-      break
+  if ! node -e 'const pkg=require("./package.json"); process.exit(pkg.scripts && pkg.scripts.build ? 0 : 1);' >/dev/null 2>&1; then
+    log_warn "Frontend no encontrado; se servirá miniweb."
+    popd >/dev/null
+    return 0
+  fi
+
+  if [[ -f pnpm-lock.yaml ]]; then
+    if ! command -v pnpm >/dev/null 2>&1; then
+      npm install -g pnpm
     fi
-  done
-  [[ -n "${out}" ]] || { log_err "No se encontró index.html tras el build"; exit 1; }
+    pnpm i --frozen-lockfile
+    pnpm build
+  elif [[ -f yarn.lock ]]; then
+    corepack enable 2>/dev/null || true
+    yarn install --frozen-lockfile
+    yarn build
+  else
+    if [[ -f package-lock.json ]]; then
+      npm ci || npm install
+    else
+      npm install
+    fi
+    npm run build
+  fi
 
-  sudo mkdir -p "${WWW_ROOT}"
-  sudo rsync -a --delete "${out}/" "${WWW_ROOT}/"
+  local build_dir=""
+  if [[ -d "dist" ]]; then
+    build_dir="dist"
+  elif [[ -d "build" ]]; then
+    build_dir="build"
+  else
+    popd >/dev/null
+    abort "No se encontró carpeta dist ni build tras el build del frontend"
+  fi
+
+  ensure_www_root
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  rsync -a --delete "${FRONTEND_DIR}/${build_dir}/" "${tmpdir}/"
+  rsync -a --delete "${tmpdir}/" "${WWW_ROOT}/"
+  rm -rf "${tmpdir}"
+
+  chown -R pi:pi "${WWW_ROOT}"
+
   popd >/dev/null
 
-  [[ -f "${WWW_ROOT}/index.html" ]] || { log_err "Copia a ${WWW_ROOT} incompleta"; exit 1; }
   log "UI publicada en ${WWW_ROOT}"
 }
 
@@ -698,22 +607,30 @@ EOF
   systemctl enable --now bascula-ui.service
 }
 
-ensure_backend_service() {
-  log "[step] Asegurando bascula-backend.service"
-  systemctl enable --now bascula-backend.service
+ensure_services_and_health() {
+  log "[step] Activando servicios bascula-backend y bascula-miniweb"
+  systemctl enable --now bascula-backend.service bascula-miniweb.service
+
+  local health_ok=1
   if ! systemctl is-active --quiet bascula-backend.service; then
-    abort "bascula-backend.service no está activo"
+    health_ok=0
+  fi
+  if ! systemctl is-active --quiet bascula-miniweb.service; then
+    health_ok=0
   fi
 
-  local status attempt
-  for attempt in {1..10}; do
-    status=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/health || true)
-    if [[ "${status}" == "200" ]]; then
-      return 0
-    fi
-    sleep 1
-  done
-  abort "El backend no respondió 200 en /api/health (último código ${status})"
+  if ! curl -fsS http://127.0.0.1:8081/api/health >/dev/null; then
+    health_ok=0
+  fi
+
+  if ! curl -fsS http://127.0.0.1/api/health >/dev/null; then
+    health_ok=0
+  fi
+
+  if [[ ${health_ok} -ne 1 ]]; then
+    echo "[install][err] Health check falló" >&2
+    exit 1
+  fi
 }
 
 verify_ui_served() {
@@ -759,11 +676,6 @@ log_nginx_root_and_listing() {
 }
 
 run_final_checks() {
-  echo "[install][step] Verificaciones finales"
-  nginx -t || { echo "[install][err] nginx roto"; exit 1; }
-  curl -fsS http://127.0.0.1/api/health >/dev/null || { echo "[install][err] /api/health no responde"; exit 1; }
-  curl -i -N --max-time 5 http://127.0.0.1/api/scale/events | head -n1 | grep -q "HTTP/1.1 200" || echo "[install][warn] SSE sin 200 inmediato (puede tardar)"
-  curl -fsS http://127.0.0.1/ >/dev/null || { echo "[install][err] UI no sirve index"; exit 1; }
   echo "[install][ok] Instalación completa"
 }
 
@@ -800,6 +712,7 @@ main() {
   else
     ln -sfn "${RELEASE_DIR}" "${CURRENT_LINK}"
     log "Release ya sincronizada"
+    ensure_release_ownership
   fi
 
   REPO_DIR="${CURRENT_LINK}"
@@ -817,8 +730,9 @@ main() {
   configure_bascula_ui_service
   ensure_node
   build_frontend
+  ensure_www_root
   configure_nginx_site
-  ensure_backend_service
+  ensure_services_and_health
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
     log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Continuando con verificaciones esenciales."
