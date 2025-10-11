@@ -150,6 +150,16 @@ publish_frontend() {
   find "${dst}" -type f -exec chmod 0644 {} \;
   chown -R "${DEFAULT_USER}:${WWW_GROUP}" "${dst}"
   log "Frontend publicado en ${dst}"
+
+  local published_files
+  published_files="$(find "${dst}" -maxdepth 2 -type f -name 'index.html' -printf '%p\n' 2>/dev/null || true)"
+  if [[ -n "${published_files}" ]]; then
+    while IFS= read -r line; do
+      log "Artefacto publicado: ${line}"
+    done <<<"${published_files}"
+  else
+    log_warn "No se detectaron index.html publicados en ${dst}"
+  fi
 }
 
 build_frontend_if_present() {
@@ -177,18 +187,29 @@ build_frontend_if_present() {
 
   pushd "${dir}" >/dev/null
   if [[ -f package-lock.json ]]; then
+    log "npm ci (inicio)"
     npm ci
+    log "npm ci (fin)"
   else
     log_warn "package-lock.json no encontrado; usando npm install"
+    log "npm install (inicio)"
     npm install
+    log "npm install (fin)"
   fi
+  log "npm run build (inicio)"
   npm run build
+  log "npm run build (fin)"
   popd >/dev/null
 
   local out_dir
   out_dir="$(detect_build_output_dir "${dir}")"
   if [[ -z "${out_dir}" || ! -d "${out_dir}" ]]; then
     log_err "No se encontró carpeta de salida tras build (dist/build)"
+    return 1
+  fi
+
+  if [[ ! -f "${out_dir}/index.html" ]]; then
+    log_err "No se encontró index.html en ${out_dir}"
     return 1
   fi
 
@@ -780,6 +801,12 @@ install_tmpfiles_config() {
 install_systemd_unit() {
   local name="$1"
   local src="${RELEASE_DIR}/systemd/${name}"
+  if [[ ! -f "${src}" && -n "${REPO_DIR:-}" && -f "${REPO_DIR}/systemd/${name}" ]]; then
+    src="${REPO_DIR}/systemd/${name}"
+  fi
+  if [[ ! -f "${src}" && -f "${REPO_ROOT}/systemd/${name}" ]]; then
+    src="${REPO_ROOT}/systemd/${name}"
+  fi
   local dest="${SYSTEMD_DEST}/${name}"
   local changed=0
   if [[ ! -f "${src}" ]]; then
