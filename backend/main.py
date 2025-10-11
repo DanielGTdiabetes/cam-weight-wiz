@@ -2537,6 +2537,12 @@ async def health_check():
         "timestamp": datetime.now().isoformat()
     }
 
+
+@app.get("/api/health")
+async def api_health_check():
+    """Alias de salud para compatibilidad con Nginx/instalador."""
+    return await health_check()
+
 @app.get("/")
 async def root():
     """Root endpoint"""

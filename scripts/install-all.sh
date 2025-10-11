@@ -425,72 +425,28 @@ install_systemd_units() {
 
 configure_nginx_site() {
   log "[step] Configurando Nginx para Báscula"
-  install -d -m0755 "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}" /var/www/bascula
+  install -d -m0755 "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}" /var/www
 
-  log "[step] Limpiando vhosts antiguos"
-  rm -f /etc/nginx/conf.d/00-bascula.conf /etc/nginx/conf.d/00-bascula.conf.*
-  if [[ -d /etc/nginx/conf.d ]]; then
-    find /etc/nginx/conf.d -maxdepth 1 -type f -print0 \
-      | while IFS= read -r -d '' file; do
-        if grep -Eq '\blisten\s+80' "${file}"; then
-          log_warn "Eliminando definición duplicada en ${file}"
-          rm -f "${file}"
-        fi
-      done
+  rm -f /etc/nginx/conf.d/00-bascula.conf /etc/nginx/conf.d/00-bascula.conf.off
+
+  local site_source="${RELEASE_DIR}/nginx/bascula.conf"
+  local site_path="${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
+  if [[ ! -f "${site_source}" ]]; then
+    abort "No se encontró plantilla Nginx en ${site_source}"
   fi
-  find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type f -o -type l \) -name '*.bak' -print0 \
-    | while IFS= read -r -d '' file; do
-      if grep -Eq '\blisten\s+80' "${file}"; then
-        rm -f "${file}"
-      fi
-    done
+
+  install -o root -g root -m0644 "${site_source}" "${site_path}"
+  ln -sfn "${site_path}" "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
   rm -f "${NGINX_SITES_ENABLED}/default" || true
 
-  local enabled
-  while IFS= read -r -d '' enabled; do
-    local target="${enabled}"
-    if [[ "${target}" != "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}" ]] \
-      && grep -Eq '\blisten\s+80' "${target}" 2>/dev/null; then
-      log_warn "Eliminando vhost duplicado en ${target}"
-      rm -f "${target}"
-    fi
-  done < <(find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type l -o -type f \) -print0)
-
-  local site_path="${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
-  local tmp="${site_path}.tmp"
-  cat <<'EOF' >"${tmp}"
-server {
-    listen 80;
-    server_name _;
-
-    root /var/www/bascula;
-    index index.html;
-
-    # Front (SPA)
-    location / {
-        try_files $uri /index.html;
-    }
-
-    # Backend
-    location /api/ {
-        proxy_pass http://127.0.0.1:8081;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_http_version 1.1;
-        proxy_buffering off;
-    }
-}
-EOF
-  if [[ -f "${site_path}" ]] && cmp -s "${tmp}" "${site_path}"; then
-    log "Configuración de Nginx sin cambios"
-  else
-    install -o root -g root -m0644 "${tmp}" "${site_path}"
-    log "Configuración de Nginx actualizada"
+  if [[ -d "${NGINX_SITES_ENABLED}" ]]; then
+    find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type f -o -type l \) -print0 \
+      | while IFS= read -r -d '' entry; do
+        [[ "${entry}" == "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}" ]] && continue
+        log_warn "Eliminando vhost habilitado adicional: ${entry}"
+        rm -f "${entry}"
+      done
   fi
-  rm -f "${tmp}"
-
-  ln -sfn "${site_path}" "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
 
   if ! nginx -t; then
     abort "nginx -t falló tras configurar el vhost"
@@ -582,12 +538,9 @@ deploy_frontend() {
   [ -z "${out_dir}" ] && return 0
 
   local docroot="/var/www/bascula"
-  mkdir -p "${docroot}"
+  install -d -m0755 -o www-data -g www-data "${docroot}"
   rsync -a --delete "${out_dir}/" "${docroot}/"
-
-  chown -R root:root "${docroot}"
-  find "${docroot}" -type d -print0 | xargs -0 chmod 0755
-  find "${docroot}" -type f -print0 | xargs -0 chmod 0644
+  chown -R www-data:www-data "${docroot}"
 
   if [ ! -f "${docroot}/index.html" ]; then
     log_err "UI: falta ${docroot}/index.html después del despliegue"
@@ -661,13 +614,13 @@ ensure_backend_service() {
 
   local status attempt
   for attempt in {1..10}; do
-    status=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/health || true)
+    status=$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/health || true)
     if [[ "${status}" == "200" ]]; then
       return 0
     fi
     sleep 1
   done
-  abort "El backend no respondió 200 en /health (último código ${status})"
+  abort "El backend no respondió 200 en /api/health (último código ${status})"
 }
 
 verify_ui_served() {
@@ -720,8 +673,28 @@ run_final_checks() {
 
   local api_health
   api_health=$(curl -fsS http://127.0.0.1/api/health || true)
-  if [[ -z "${api_health}" ]] || [[ ! ${api_health} =~ "status"[[:space:]]*:[[:space:]]*"ok" ]]; then
+  if [[ -z "${api_health}" ]] || [[ ${api_health} != *'"status":"ok"'* ]]; then
     abort "API de salud no devolvió status ok"
+  fi
+
+  run_checked "UI raíz responde 200" curl -fsS http://127.0.0.1/ >/dev/null
+  run_checked "API health vía proxy" curl -fsS http://127.0.0.1/api/health >/dev/null
+  run_checked "Miniweb cámara vía proxy" curl -fsS http://127.0.0.1/api/camera/info >/dev/null
+
+  local sse_output=""
+  local sse_status=0
+  set +e
+  sse_output=$(curl -fsS -i --no-buffer -H 'Accept: text/event-stream' http://127.0.0.1/api/scale/events | head -n 20)
+  sse_status=$?
+  set -e
+  if [[ ${sse_status} -eq 0 || ${sse_status} -eq 23 || ${sse_status} -eq 141 ]]; then
+    if [[ ${sse_output} != *'HTTP/1.1 200'* ]]; then
+      abort "SSE /api/scale/events no devolvió 200"
+    fi
+    log "[step] Cabeceras SSE /api/scale/events (primeras líneas):"
+    printf '%s\n' "${sse_output}"
+  else
+    abort "curl -i http://127.0.0.1/api/scale/events falló (código ${sse_status})"
   fi
 
   verify_ui_served
@@ -738,12 +711,6 @@ run_final_checks() {
   curl -fsS http://127.0.0.1/api/health
   log "[step] curl -sS http://127.0.0.1/ | head -n 30"
   curl -fsS http://127.0.0.1/ | head -n 30
-  if [[ -f /var/log/nginx/access.log ]]; then
-    log "[step] Últimas peticiones relevantes en access.log"
-    grep -E '"[A-Z]+ /( |assets/index-.*\.js)' /var/log/nginx/access.log | tail -n 5 || true
-  else
-    log_warn "No existe /var/log/nginx/access.log"
-  fi
 }
 
 main() {
