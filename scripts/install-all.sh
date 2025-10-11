@@ -71,12 +71,7 @@ on_err() {
     journalctl -u bascula-ui -n 60 --no-pager || true
   fi
   # Xorg hints
-  local xlog="${HOME:-/home/pi}/.local/share/xorg/Xorg.0.log"
-  [[ -f "${xlog}" ]] || xlog="/var/log/Xorg.0.log"
-  if [[ -f "${xlog}" ]]; then
-    log_warn "Fragmento Xorg (modeset/vc4/HDMI/EE/WW):"
-    grep -E 'modeset|vc4|DRI|HDMI|EE|WW|no screens found|framebuffer' "${xlog}" | tail -n 80 || true
-  fi
+  print_xorg_tail_relevant "warn"
 
   log_err "Log completo: ${BASCULA_LOG_FILE}"
   return $rc
@@ -354,6 +349,56 @@ build_frontend_if_present() {
 port_listening() {
   local port="$1"
   ss -ltn | awk -v p=":${port}" '$4 ~ p {found=1} END {exit found?0:1}'
+}
+
+get_xorg_log_path() {
+  local log_path
+  log_path="${HOME:-/home/pi}/.local/share/xorg/Xorg.0.log"
+  if [[ ! -f "${log_path}" ]]; then
+    log_path="/var/log/Xorg.0.log"
+  fi
+  printf '%s\n' "${log_path}"
+}
+
+print_xorg_tail_relevant() {
+  local level="${1:-info}" log_path
+  log_path="$(get_xorg_log_path)"
+  if [[ -f "${log_path}" ]]; then
+    if [[ "${level}" == "warn" ]]; then
+      log_warn "Fragmento Xorg (modeset/vc4/HDMI/EE/WW):"
+    else
+      log "Fragmento Xorg (modeset/vc4/HDMI/EE/WW):"
+    fi
+    grep -Eni 'modeset|vc4|DRI|HDMI|EE|WW' "${log_path}" | tail -n 80 || true
+  else
+    if [[ "${level}" == "warn" ]]; then
+      log_warn "No se encontró Xorg.0.log"
+    else
+      log "No se encontró Xorg.0.log"
+    fi
+  fi
+}
+
+dump_service_journal() {
+  local unit="$1"
+  if [[ "${unit}" != *.service ]]; then
+    unit="${unit}.service"
+  fi
+  if command -v journalctl >/dev/null 2>&1; then
+    journalctl -u "${unit}" -n 80 --no-pager || true
+  fi
+}
+
+assert_unit_active() {
+  local unit="$1"
+  if [[ "${unit}" != *.service ]]; then
+    unit="${unit}.service"
+  fi
+  if ! systemctl is-active --quiet "${unit}"; then
+    log_err "${unit} no está activo"
+    dump_service_journal "${unit}"
+    exit 1
+  fi
 }
 
 CHECK_FAIL_MSG=""
@@ -719,6 +764,31 @@ def comment_prefixed(value: str) -> None:
             lines[idx] = f"{prefix}# {stripped}"
             changed = True
 
+def ensure_single_setting(key: str, desired: str) -> None:
+    global changed, lines
+    new_lines = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('#'):
+            stripped_comment = stripped.lstrip('#').strip()
+            if stripped_comment.startswith(f"{key}="):
+                continue
+        if stripped.startswith(f"{key}="):
+            if not found:
+                if stripped != desired:
+                    changed = True
+                new_lines.append(desired)
+                found = True
+            else:
+                changed = True
+        else:
+            new_lines.append(line)
+    if not found:
+        new_lines.append(desired)
+        changed = True
+    lines = new_lines
+
 comment_exact('dtoverlay=vc4-kms-v3d')
 comment_prefixed('dtoverlay=vc4-fkms-v3d')
 
@@ -733,6 +803,11 @@ if not has_pi5:
     lines.append('dtoverlay=vc4-kms-v3d-pi5')
     changed = True
 
+ensure_single_setting('hdmi_force_hotplug', 'hdmi_force_hotplug=1')
+ensure_single_setting('hdmi_group', 'hdmi_group=2')
+ensure_single_setting('hdmi_mode', 'hdmi_mode=87')
+ensure_single_setting('hdmi_cvt', 'hdmi_cvt=1024 600 60 6 0 0 0')
+
 if changed:
     path.write_text("\n".join(lines) + "\n")
     print('changed')
@@ -742,10 +817,10 @@ PY
   )
 
   if [[ "${result}" == "changed" ]]; then
-    log "Aplicando overlay vc4-kms-v3d-pi5 y deshabilitando fkms/fbdev en ${BOOT_CONFIG_FILE}"
+    log "Aplicando overlay vc4-kms-v3d-pi5 y EDID forzado en ${BOOT_CONFIG_FILE}"
     set_reboot_required "boot-config: vc4-kms-v3d-pi5"
   else
-    log "Overlay vc4-kms-v3d-pi5 ya presente"
+    log "Overlay vc4-kms-v3d-pi5 y EDID ya presentes"
   fi
 }
 
@@ -777,19 +852,28 @@ disable_fbdev_xorg_configs() {
 }
 
 detect_drm_card_with_hdmi() {
-  local card symlink status
+  local card connector status first_hdmi=""
   for card in /sys/class/drm/card*; do
     [[ -d "${card}" ]] || continue
-    while IFS= read -r symlink; do
-      [[ -e "${symlink}" ]] || continue
-      status="$(cat "${symlink}/status" 2>/dev/null || echo unknown)"
+    local card_name
+    card_name="$(basename "${card}")"
+    while IFS= read -r connector; do
+      [[ -e "${connector}" ]] || continue
+      status="$(cat "${connector}/status" 2>/dev/null || echo unknown)"
       if [[ "${status}" == "connected" ]]; then
-        basename "${card}"
+        printf '%s\n' "${card_name}"
         return 0
       fi
-    done < <(find "${card}" -maxdepth 1 -type l -name 'card*-HDMI-*' 2>/dev/null)
+      first_hdmi="${first_hdmi:-${card_name}}"
+    done < <(find "${card}" -maxdepth 1 -type l -name 'card*-HDMI-*' 2>/dev/null | sort)
   done
-  echo "card0"
+
+  if [[ -n "${first_hdmi}" ]]; then
+    printf '%s\n' "${first_hdmi}"
+    return 0
+  fi
+
+  printf 'card0\n'
 }
 
 ensure_kms_device_config() {
@@ -1155,7 +1239,7 @@ install_systemd_unit() {
   local dest="${SYSTEMD_DEST}/${name}"
   local changed=0
   if [[ -z "${src}" ]]; then
-    abort "No se encontró unidad systemd ${src}"
+    abort "No se encontró unidad systemd ${name}"
   fi
   if [[ -f "${dest}" ]] && cmp -s "${src}" "${dest}"; then
     log "Unidad ${name} sin cambios"
@@ -1179,18 +1263,49 @@ install_systemd_unit() {
 
 install_systemd_units() {
   SYSTEMD_NEEDS_RELOAD=0
-  local units=(
+  local search_dirs=()
+  if [[ -n "${REPO_DIR:-}" && -d "${REPO_DIR}/scripts/systemd" ]]; then
+    search_dirs+=("${REPO_DIR}/scripts/systemd")
+  fi
+  if [[ -n "${REPO_DIR:-}" && -d "${REPO_DIR}/systemd" ]]; then
+    search_dirs+=("${REPO_DIR}/systemd")
+  fi
+  if [[ -d "${REPO_ROOT}/scripts/systemd" ]]; then
+    search_dirs+=("${REPO_ROOT}/scripts/systemd")
+  fi
+  if [[ -d "${REPO_ROOT}/systemd" ]]; then
+    search_dirs+=("${REPO_ROOT}/systemd")
+  fi
+
+  declare -A seen=()
+  local dir src name
+  for dir in "${search_dirs[@]}"; do
+    [[ -d "${dir}" ]] || continue
+    while IFS= read -r -d '' src; do
+      name="$(basename "${src}")"
+      if [[ -n "${seen[${name}]:-}" ]]; then
+        continue
+      fi
+      seen["${name}"]=1
+      install_systemd_unit "${name}"
+    done < <(find "${dir}" -maxdepth 1 -type f -name 'bascula-*.service' -print0 2>/dev/null)
+  done
+
+  local required=(
     bascula-miniweb.service
     bascula-backend.service
     bascula-health-wait.service
     bascula-ui.service
   )
-  local unit
-  for unit in "${units[@]}"; do
-    install_systemd_unit "${unit}"
+  for name in "${required[@]}"; do
+    if [[ -z "${seen[${name}]:-}" ]]; then
+      install_systemd_unit "${name}"
+    fi
   done
+
   if [[ ${SYSTEMD_NEEDS_RELOAD} -eq 1 ]]; then
     systemctl daemon-reload
+    SYSTEMD_NEEDS_RELOAD=0
   fi
 }
 
@@ -1260,32 +1375,38 @@ configure_bascula_ui_service() {
   log "[step] Configurando bascula-ui.service"
   ensure_chromium_browser
 
-  local xinit_src=""
-  if [[ -n "${REPO_DIR:-}" && -f "${REPO_DIR}/.xinitrc" ]]; then
-    xinit_src="${REPO_DIR}/.xinitrc"
-  elif [[ -f "${REPO_ROOT}/.xinitrc" ]]; then
-    xinit_src="${REPO_ROOT}/.xinitrc"
+  local kiosk_script="${REPO_DIR}/scripts/start-kiosk.sh"
+  if [[ ! -f "${kiosk_script}" ]]; then
+    kiosk_script="${REPO_ROOT}/scripts/start-kiosk.sh"
+  fi
+  if [[ ! -f "${kiosk_script}" ]]; then
+    abort "No se encontró scripts/start-kiosk.sh"
+  fi
+  if ! bash -n "${kiosk_script}"; then
+    log_err "Sintaxis inválida en ${kiosk_script}"
+    exit 1
   fi
 
-  if [[ -n "${xinit_src}" ]]; then
-    local xinit_dest="/home/${DEFAULT_USER}/.xinitrc"
-    local tmp
-    tmp="$(mktemp)"
-    install -m0755 "${xinit_src}" "${tmp}"
-    local needs_update=0
-    if [[ ! -f "${xinit_dest}" ]]; then
-      needs_update=1
-    elif ! cmp -s "${tmp}" "${xinit_dest}"; then
-      needs_update=1
-    fi
-    if [[ ${needs_update} -eq 1 ]]; then
-      install -D -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" -m0755 "${tmp}" "${xinit_dest}"
-      log "Actualizado ${xinit_dest}"
-    fi
-    rm -f "${tmp}" || true
-  else
-    log_warn "No se encontró plantilla .xinitrc en el release"
+  local xinit_dest="/home/${DEFAULT_USER}/.xinitrc"
+  local xinit_tmp
+  xinit_tmp="$(mktemp)"
+  cat >"${xinit_tmp}" <<'EOF'
+# .xinitrc para Bascula UI - delega en start-kiosk.sh
+exec /opt/bascula/current/scripts/start-kiosk.sh
+EOF
+  local needs_update=0
+  if [[ ! -f "${xinit_dest}" ]]; then
+    needs_update=1
+  elif ! cmp -s "${xinit_tmp}" "${xinit_dest}"; then
+    needs_update=1
   fi
+  if [[ ${needs_update} -eq 1 ]]; then
+    install -D -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" -m0755 "${xinit_tmp}" "${xinit_dest}"
+    log "Actualizado ${xinit_dest}"
+  else
+    log "${xinit_dest} sin cambios"
+  fi
+  rm -f "${xinit_tmp}" || true
 
   local dropin_dir="/etc/systemd/system/bascula-ui.service.d"
   local dropin_file="${dropin_dir}/30-chrome-cache.conf"
@@ -1315,24 +1436,85 @@ EOF
 
 ensure_services_started() {
   log_step "Activando servicios básicos"
-  local services=(
-    bascula-backend.service
-    bascula-miniweb.service
-    bascula-health-wait.service
-    bascula-ui.service
-  )
-  local service
-  for service in "${services[@]}"; do
-    if [[ ! -f "${SYSTEMD_DEST}/${service}" ]]; then
-      log_warn "${service} no existe en ${SYSTEMD_DEST}; omitiendo enable/start"
-      continue
+  local service unit_path
+  for service in bascula-backend bascula-miniweb bascula-health-wait bascula-ui; do
+    unit_path="${SYSTEMD_DEST}/${service}.service"
+    if [[ ! -f "${unit_path}" ]]; then
+      log_err "Falta unidad systemd requerida: ${unit_path}"
+      exit 1
     fi
-    if systemctl enable --now "${service}"; then
-      log "Servicio ${service} habilitado y arrancado"
+    if systemctl enable --now "${service}.service"; then
+      log "Servicio ${service}.service habilitado y arrancado"
     else
-      log_warn "Fallo al enable/start ${service}; revisa journalctl -u ${service}"
+      log_err "Fallo al habilitar/arrancar ${service}.service"
+      journalctl -u "${service}.service" -n 80 --no-pager || true
+      exit 1
     fi
   done
+}
+
+verify_xorg_session() {
+  if [[ ${IS_PI5} -ne 1 ]]; then
+    return 0
+  fi
+
+  local verify_script="${REPO_DIR}/scripts/verify-xorg.sh"
+  if [[ ! -x "${verify_script}" && -x "${REPO_ROOT}/scripts/verify-xorg.sh" ]]; then
+    verify_script="${REPO_ROOT}/scripts/verify-xorg.sh"
+  fi
+  if [[ ! -x "${verify_script}" ]]; then
+    log_warn "No se encontró verify-xorg.sh para validar la sesión X"
+    return 0
+  fi
+
+  if ! "${verify_script}"; then
+    log_err "Verificación de Xorg falló"
+    print_xorg_tail_relevant "warn"
+    exit 1
+  fi
+}
+
+smoke_failure_diagnostics() {
+  log_warn "Diagnóstico de servicios bascula-*"
+  local svc
+  for svc in bascula-backend bascula-miniweb bascula-health-wait bascula-ui; do
+    dump_service_journal "${svc}"
+  done
+  print_xorg_tail_relevant "warn"
+}
+
+run_final_smoke_tests() {
+  log_step "Smoke test final"
+  local failure=0
+
+  local svc
+  for svc in bascula-backend bascula-miniweb bascula-ui; do
+    if ! systemctl is-active --quiet "${svc}.service"; then
+      log_err "Smoke test: ${svc}.service no está activo"
+      failure=1
+    fi
+  done
+
+  if ! curl -fsS http://127.0.0.1:8081/api/health >/dev/null; then
+    log_err "Smoke test: backend 8081/api/health no responde"
+    failure=1
+  fi
+  if ! curl -fsS http://127.0.0.1:8080/api/miniweb/status >/dev/null; then
+    log_err "Smoke test: miniweb 8080/api/miniweb/status no responde"
+    failure=1
+  fi
+
+  if [[ ! -e /dev/dri/card0 && ! -e /dev/dri/card1 ]]; then
+    log_err "Smoke test: no se encontró /dev/dri/card0 ni card1"
+    failure=1
+  fi
+
+  if [[ ${failure} -ne 0 ]]; then
+    smoke_failure_diagnostics
+    exit 1
+  fi
+
+  log_ok "Smoke test final superado"
 }
 
 run_final_checks() {
@@ -1344,10 +1526,9 @@ run_final_checks() {
     unit_path="${SYSTEMD_DEST}/${svc}.service"
     if [[ ! -f "${unit_path}" ]]; then
       log_err "Falta unidad systemd requerida: ${unit_path}"
-      FINAL_FAILURES=1
-      continue
+      exit 1
     fi
-    final_check "servicio ${svc} activo" systemctl is-active --quiet "${svc}.service"
+    assert_unit_active "${svc}" && log "[ok] servicio ${svc} activo"
   done
 
   final_check "servicio nginx activo" systemctl is-active --quiet nginx
@@ -1371,10 +1552,14 @@ run_final_checks() {
   final_check "permisos /opt/bascula/current" check_owner "${CURRENT_LINK}" "${DEFAULT_USER}:${DEFAULT_USER}"
   final_check "imports críticos en venv" check_python_imports
 
+  verify_xorg_session
+
   if [[ ${FINAL_FAILURES} -ne 0 ]]; then
     log_err "Validaciones finales con errores"
     exit 1
   fi
+
+  run_final_smoke_tests
 
   log_ok "Instalación completa"
 }
@@ -1450,21 +1635,6 @@ main() {
 
   log_step "Activando servicios de la Báscula"
   ensure_services_started
-
-  if [[ ${IS_PI5} -eq 1 ]]; then
-    local verify_script="${REPO_DIR}/scripts/verify-xorg.sh"
-    if [[ ! -x "${verify_script}" && -x "${REPO_ROOT}/scripts/verify-xorg.sh" ]]; then
-      verify_script="${REPO_ROOT}/scripts/verify-xorg.sh"
-    fi
-    if [[ -x "${verify_script}" ]]; then
-      if ! "${verify_script}"; then
-        log_err "Pi 5 requiere vc4-kms-v3d-pi5; hemos desactivado fbdev. Revisa /boot/firmware/config.txt y reinicia."
-        exit 1
-      fi
-    else
-      log_warn "No se encontró verify-xorg.sh para validar la sesión X"
-    fi
-  fi
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
     log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Continuando con verificaciones esenciales."

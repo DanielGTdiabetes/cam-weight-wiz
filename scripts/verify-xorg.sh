@@ -14,27 +14,27 @@ fi
 echo "[verify-xorg] Analizando ${LOG_PATH}" >&2
 
 relevant() {
-  grep -nEi 'modeset|vc4|HDMI|DRI|no screens found|Cannot run in framebuffer mode|open /dev/dri/card.*-HDMI-A-1' "$LOG_PATH" | tail -n 80
+  grep -nEi 'modeset|vc4|DRI|HDMI|EE|WW|no screens found|Cannot run in framebuffer mode|open /dev/dri/card.*-HDMI.*: No such file' "${LOG_PATH}" | tail -n 80
 }
 
 errors=0
-if grep -qi 'no screens found' "$LOG_PATH"; then
+if grep -qi 'no screens found' "${LOG_PATH}"; then
   echo "[verify-xorg] Error: 'no screens found' detectado" >&2
   errors=1
 fi
 
-if grep -qi 'Cannot run in framebuffer mode' "$LOG_PATH"; then
-  echo "[verify-xorg] Error: framebuffer mode detectado" >&2
+if grep -qi 'Cannot run in framebuffer mode' "${LOG_PATH}"; then
+  echo "[verify-xorg] Error: 'Cannot run in framebuffer mode' detectado" >&2
   errors=1
 fi
 
-if grep -qi 'open /dev/dri/card.*-HDMI-A-1: No such file or directory' "$LOG_PATH"; then
+if grep -qi 'open /dev/dri/card.*-HDMI.*: No such file' "${LOG_PATH}"; then
   echo "[verify-xorg] Error: dispositivo HDMI no disponible" >&2
   errors=1
 fi
 
-if ! grep -qiE 'modeset|vc4|HDMI|DRI' "$LOG_PATH"; then
-  echo "[verify-xorg] Error: no aparecen tokens modeset/vc4/HDMI/DRI" >&2
+if ! grep -qiE 'modeset|DRI2.*vc4|Output HDMI-1 using initial mode' "${LOG_PATH}"; then
+  echo "[verify-xorg] Error: no se encontró un token de éxito (modeset/DRI2 vc4/Output HDMI-1)" >&2
   errors=1
 fi
 
@@ -42,7 +42,7 @@ if [[ ${errors} -ne 0 ]]; then
   echo "[verify-xorg] Últimas líneas relevantes:" >&2
   relevant >&2 || true
 else
-  echo "[verify-xorg] Tokens modeset/vc4/HDMI/DRI presentes" >&2
+  echo "[verify-xorg] Validación OK" >&2
   relevant >&2 || true
 fi
 
