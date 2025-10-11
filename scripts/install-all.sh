@@ -1243,6 +1243,7 @@ ensure_python_venv() {
     "fastapi==0.115.6" \
     "starlette>=0.38,<0.39" \
     "pydantic==2.7.4" \
+    "typing_extensions==4.12.2" \
     "click>=8.1" \
     "httpx==0.28.1" \
     "httpcore>=1.0.0,<2.0.0"
@@ -1326,13 +1327,58 @@ ensure_piper_cli() {
     log_warn "Comando piper existente pero inválido (${existing}); se reinstalará"
   fi
 
-  local tmpdir archive rc=0
+  local tmpdir archive
   tmpdir="$(mktemp -d)"
   archive="${tmpdir}/piper.tar.gz"
-  if ! curl --retry 5 --retry-delay 2 --fail --location -o "${archive}" "${PIPER_RELEASE_URL}"; then
-    rc=$?
+
+  local version="${PIPER_RELEASE_VERSION}"
+  local base="https://github.com/rhasspy/piper/releases/download/v${version}"
+  local -a candidates=()
+  local -A seen=()
+
+  if [[ -n "${PIPER_RELEASE_URL:-}" ]]; then
+    candidates+=("${PIPER_RELEASE_URL}")
+    seen["${PIPER_RELEASE_URL}"]=1
+  fi
+
+  local fallback
+  for fallback in \
+    "piper_${version}_linux_aarch64.tar.gz" \
+    "piper_${version}_linux-arm64.tar.gz" \
+    "piper_${version}_linux_arm64.tar.gz" \
+    "piper_linux_aarch64.tar.gz" \
+    "piper_linux-arm64.tar.gz" \
+    "piper_linux_arm64.tar.gz"
+  do
+    local url="${base}/${fallback}"
+    if [[ -z "${seen["${url}"]:-}" ]]; then
+      candidates+=("${url}")
+      seen["${url}"]=1
+    fi
+  done
+
+  local downloaded=0 last_rc=0
+  local -a tried=()
+  local url
+  for url in "${candidates[@]}"; do
+    tried+=("${url}")
+    log "Descargando Piper CLI desde ${url}"
+    if curl --retry 5 --retry-delay 2 --fail --location -o "${archive}" "${url}"; then
+      downloaded=1
+      PIPER_RELEASE_URL="${url}"
+      break
+    fi
+    last_rc=$?
+    rm -f "${archive}"
+    log_warn "Descarga de Piper CLI falló (rc=${last_rc})"
+  done
+
+  if [[ ${downloaded} -eq 0 ]]; then
     rm -rf "${tmpdir}"
-    log_err "No se pudo descargar Piper CLI desde ${PIPER_RELEASE_URL} (rc=${rc})"
+    log_err "No se pudo descargar Piper CLI tras probar las siguientes URLs:"
+    for url in "${tried[@]}"; do
+      log_err "  - ${url}"
+    done
     exit 1
   fi
 
