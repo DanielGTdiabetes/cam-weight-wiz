@@ -50,6 +50,7 @@ from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
 from backend.routers import food as food_router
 from backend.app.services.settings_service import get_settings_service
+from backend.voice import list_voices as list_piper_voices
 
 
 CHATGPT_MODELS = [
@@ -1079,6 +1080,12 @@ app.add_middleware(
 )
 
 app.include_router(food_router.router, prefix="/api/food", tags=["food"])
+
+
+@app.get("/api/voices", include_in_schema=False)
+def list_voices_legacy() -> Dict[str, object]:
+    """Compatibilidad para clientes que aún consultan /api/voices."""
+    return list_piper_voices()
 
 # ============= SCALE ENDPOINTS =============
 
