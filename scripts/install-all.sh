@@ -31,6 +31,7 @@ ASOUND_CONF="/etc/asound.conf"
 AUDIO_ENV_FILE="/etc/default/bascula-audio"
 BOOT_FIRMWARE_DIR="/boot/firmware"
 BOOT_CONFIG_FILE="${BOOT_FIRMWARE_DIR}/config.txt"
+PIPER_VOICES_DIR="/opt/bascula/voices"
 REBOOT_FLAG=0
 
 : "${SKIP_UI_BUILD:=0}"
@@ -53,6 +54,28 @@ log_warn() {
 
 log_err() {
   printf '%s[err] %s\n' "${LOG_PREFIX}" "$*" >&2
+}
+
+ensure_remote_file() {
+  local url="$1"
+  local dest="$2"
+  local label="${3:-$(basename "$dest")}"
+
+  if [[ -s "${dest}" ]]; then
+    log "[ok] ${label} ya presente (${dest})"
+    return 0
+  fi
+
+  log "Descargando ${label} (${url})"
+  local tmp
+  tmp="$(mktemp)"
+  if ! curl -fsSL --retry 3 --retry-delay 2 -o "${tmp}" "${url}"; then
+    rm -f "${tmp}"
+    abort "No se pudo descargar ${label} desde ${url}"
+  fi
+  install -m 0644 "${tmp}" "${dest}"
+  rm -f "${tmp}"
+  log "[ok] ${label} instalado en ${dest}"
 }
 
 ensure_node_runtime() {
@@ -308,6 +331,25 @@ check_owner() {
     return 0
   fi
   CHECK_FAIL_MSG="Propietario actual: ${owner:-desconocido}"
+  return 1
+}
+
+check_piper_voices_installed() {
+  local dir="$1"
+  if [[ ! -d "${dir}" ]]; then
+    CHECK_FAIL_MSG="Directorio ${dir} no existe"
+    return 1
+  fi
+
+  local -a voices
+  shopt -s nullglob
+  voices=("${dir}"/*.onnx)
+  shopt -u nullglob
+  if (( ${#voices[@]} > 0 )); then
+    return 0
+  fi
+
+  CHECK_FAIL_MSG="No se encontraron modelos Piper (.onnx) en ${dir}"
   return 1
 }
 
@@ -640,6 +682,50 @@ EOF
   chown "${DEFAULT_USER}:${DEFAULT_USER}" /opt/rapidocr/models/README.txt
 }
 
+ensure_piper_voices() {
+  log_step "Preparando voces Piper"
+
+  install -d -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" -m 0755 "${PIPER_VOICES_DIR}"
+
+  local configured_models="${BASCULA_PIPER_MODELS:-}"
+  if [[ -n "${configured_models}" ]]; then
+    configured_models="${configured_models//,/ }"
+  fi
+
+  local -a models
+  if [[ -n "${configured_models}" ]]; then
+    read -r -a models <<<"${configured_models}"
+  else
+    models=(
+      "es_ES-mls_10246-medium"
+      "es_ES-mls_10246-high"
+    )
+  fi
+
+  local model lang_prefix base_url
+  for model in "${models[@]}"; do
+    model="$(printf '%s' "${model}" | xargs 2>/dev/null || printf '%s' "${model}")"
+    if [[ -z "${model}" ]]; then
+      continue
+    fi
+
+    lang_prefix="${model%%_*}"
+    if [[ -z "${lang_prefix}" || "${lang_prefix}" == "${model}" ]]; then
+      lang_prefix="${model%%-*}"
+    fi
+    if [[ -z "${lang_prefix}" ]]; then
+      lang_prefix="es"
+    fi
+
+    base_url="https://huggingface.co/rhasspy/piper-voices/resolve/main/${lang_prefix}/${model}"
+
+    ensure_remote_file "${base_url}.onnx?download=1" "${PIPER_VOICES_DIR}/${model}.onnx" "${model}.onnx"
+    ensure_remote_file "${base_url}.onnx.json?download=1" "${PIPER_VOICES_DIR}/${model}.onnx.json" "${model}.onnx.json"
+  done
+
+  chown -R "${DEFAULT_USER}:${DEFAULT_USER}" "${PIPER_VOICES_DIR}"
+}
+
 ensure_audio_env_file() {
   cat <<'EOF' > "${AUDIO_ENV_FILE}.tmp"
 BASCULA_AUDIO_DEVICE=bascula_out
@@ -938,6 +1024,7 @@ run_final_checks() {
   final_check "health backend directo" check_http_endpoint "http://127.0.0.1:8081/api/health" '{"status":"ok"}'
   final_check "health vía nginx" check_http_endpoint "http://127.0.0.1/api/health" '{"status":"ok"}'
   final_check "cabeceras SSE en proxy" check_sse_headers "http://127.0.0.1/api/scale/events"
+  final_check "voces Piper instaladas" check_piper_voices_installed "${PIPER_VOICES_DIR}"
   if [[ ${FRONTEND_EXPECTED} -eq 1 ]]; then
     final_check "frontend publicado en ${WWW_ROOT}/index.html" check_file_exists "${WWW_ROOT}/index.html"
   else
@@ -991,6 +1078,7 @@ main() {
 
   ensure_python_venv
   prepare_ocr_models_dir
+  ensure_piper_voices
   ensure_audio_env_file
   install_asound_conf
   install_tmpfiles_config
