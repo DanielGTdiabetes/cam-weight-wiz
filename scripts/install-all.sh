@@ -709,6 +709,10 @@ ensure_piper_voices() {
       continue
     fi
 
+    if [[ ! "${model}" =~ ^[A-Za-z0-9._-]+$ ]]; then
+      abort "Nombre de modelo Piper inválido: ${model}"
+    fi
+
     lang_prefix="${model%%_*}"
     if [[ -z "${lang_prefix}" || "${lang_prefix}" == "${model}" ]]; then
       lang_prefix="${model%%-*}"
