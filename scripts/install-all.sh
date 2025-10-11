@@ -425,28 +425,70 @@ install_systemd_units() {
 
 configure_nginx_site() {
   log "[step] Configurando Nginx para Báscula"
-  install -d -m0755 "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}" /var/www
+  local BASCULA_NGINX_SITE="00-bascula.conf"
+  local BASCULA_MANAGED_MARK="# BASCULA_MANAGED: do-not-edit-manually"
+  local SITES_AVAIL="/etc/nginx/sites-available"
+  local SITES_ENABLED="/etc/nginx/sites-enabled"
+
+  install -d -m0755 "${SITES_AVAIL}" "${SITES_ENABLED}" /var/www
 
   rm -f /etc/nginx/conf.d/00-bascula.conf /etc/nginx/conf.d/00-bascula.conf.off
 
   local site_source="${RELEASE_DIR}/nginx/bascula.conf"
-  local site_path="${NGINX_SITES_AVAILABLE}/${NGINX_SITE_NAME}"
+  local site_path="${SITES_AVAIL}/${BASCULA_NGINX_SITE}"
   if [[ ! -f "${site_source}" ]]; then
     abort "No se encontró plantilla Nginx en ${site_source}"
   fi
 
   install -o root -g root -m0644 "${site_source}" "${site_path}"
-  ln -sfn "${site_path}" "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}"
-  rm -f "${NGINX_SITES_ENABLED}/default" || true
-
-  if [[ -d "${NGINX_SITES_ENABLED}" ]]; then
-    find "${NGINX_SITES_ENABLED}" -maxdepth 1 \( -type f -o -type l \) -print0 \
-      | while IFS= read -r -d '' entry; do
-        [[ "${entry}" == "${NGINX_SITES_ENABLED}/${NGINX_SITE_NAME}" ]] && continue
-        log_warn "Eliminando vhost habilitado adicional: ${entry}"
-        rm -f "${entry}"
-      done
+  if ! head -n1 "${site_path}" | grep -Fxq "${BASCULA_MANAGED_MARK}"; then
+    local tmpfile
+    tmpfile=$(mktemp)
+    {
+      printf '%s\n' "${BASCULA_MANAGED_MARK}"
+      cat "${site_path}"
+    } > "${tmpfile}"
+    install -o root -g root -m0644 "${tmpfile}" "${site_path}"
+    rm -f "${tmpfile}"
   fi
+
+  ln -sfn "${site_path}" "${SITES_ENABLED}/${BASCULA_NGINX_SITE}"
+
+  for entry in "${SITES_ENABLED}"/*; do
+    [[ -e "${entry}" ]] || continue
+    local base
+    base="$(basename "${entry}")"
+    if [[ "${base}" == "${BASCULA_NGINX_SITE}" ]]; then
+      continue
+    fi
+    case "${base}" in
+      *.disabled-by-bascula)
+        continue
+        ;;
+    esac
+
+    local target="${entry}"
+    if [[ -L "${entry}" ]]; then
+      local resolved
+      if resolved="$(readlink -f "${entry}" 2>/dev/null)"; then
+        target="${resolved}"
+      fi
+    fi
+
+    if grep -q "${BASCULA_MANAGED_MARK}" "${target}" 2>/dev/null; then
+      if grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?80([[:space:]]|;|$)' "${target}"; then
+        log "Deshabilitando vhost gestionado en puerto 80: ${entry}"
+        mv -f "${entry}" "${entry}.disabled-by-bascula" || true
+        continue
+      fi
+    fi
+
+    if [[ "${base}" == "default" ]] && grep -Eq '^[[:space:]]*listen[[:space:]]+(\[::\]:)?80([[:space:]]|;|$)' "${target}"; then
+      log "Deshabilitando vhost default en puerto 80: ${entry}"
+      mv -f "${entry}" "${entry}.disabled-by-bascula" || true
+      continue
+    fi
+  done
 
   if ! nginx -t; then
     abort "nginx -t falló tras configurar el vhost"
