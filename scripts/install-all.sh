@@ -306,7 +306,7 @@ if [[ ! -x "\${venv_python}" ]]; then
 fi
 
 # Activa el venv y lanza el bloque Python en la misma shell (fail-fast)
-source "\${venv_activate}" && python - <<'PY'
+source "\${venv_activate}" && "\${venv_python}" - <<'PY'
 import importlib
 import os
 import sys
@@ -397,6 +397,7 @@ set_reboot_required() {
 }
 
 APT_UPDATED=0
+SYSTEMD_NEEDS_RELOAD=0
 
 ensure_apt_cache() {
   if [[ ${APT_UPDATED} -eq 0 ]]; then
@@ -780,6 +781,7 @@ install_systemd_unit() {
   local name="$1"
   local src="${RELEASE_DIR}/systemd/${name}"
   local dest="${SYSTEMD_DEST}/${name}"
+  local changed=0
   if [[ ! -f "${src}" ]]; then
     abort "No se encontró unidad systemd ${src}"
   fi
@@ -788,29 +790,47 @@ install_systemd_unit() {
   else
     install -D -m 0644 "${src}" "${dest}"
     log "Unidad ${name} instalada"
+    changed=1
   fi
   if [[ -d "${src}.d" ]]; then
-    rsync -a --delete "${src}.d/" "${dest}.d/"
+    local rsync_output
+    rsync_output="$(rsync -a --delete --out-format='%i %n%L' "${src}.d/" "${dest}.d/" 2>&1)"
+    if [[ -n "${rsync_output}" ]]; then
+      log "Drop-ins actualizados para ${name}"
+      changed=1
+    fi
+  fi
+  if [[ ${changed} -eq 1 ]]; then
+    SYSTEMD_NEEDS_RELOAD=1
   fi
 }
 
 install_systemd_units() {
+  SYSTEMD_NEEDS_RELOAD=0
   local units=(
     bascula-miniweb.service
     bascula-backend.service
+    bascula-ui.service
   )
   local unit
   for unit in "${units[@]}"; do
     install_systemd_unit "${unit}"
   done
-  systemctl daemon-reload
+  if [[ ${SYSTEMD_NEEDS_RELOAD} -eq 1 ]]; then
+    systemctl daemon-reload
+  fi
 }
 
 configure_nginx_site() {
   log_step "Configurando Nginx para Báscula"
   install -d -m0755 "${NGINX_SITES_AVAILABLE}" "${NGINX_SITES_ENABLED}"
 
-  local template="${REPO_ROOT}/deploy/nginx/bascula.conf"
+  local template
+  if [[ -n "${REPO_DIR:-}" && -f "${REPO_DIR}/deploy/nginx/bascula.conf" ]]; then
+    template="${REPO_DIR}/deploy/nginx/bascula.conf"
+  else
+    template="${REPO_ROOT}/deploy/nginx/bascula.conf"
+  fi
   if [[ ! -f "${template}" ]]; then
     abort "No se encontró plantilla Nginx en ${template}"
   fi
