@@ -12,6 +12,8 @@ piper-tts
 pillow
 # pydantic 2.7.4 sigue teniendo wheel para aarch64 en PiWheels.
 pydantic==2.7.4
+# pydantic-core 2.18.4 (wheel en piwheels y en PyPI aarch64) requerido por pydantic.
+pydantic-core==2.18.4
 # typing_extensions requerido por pydantic; se fija a versión con wheel en PiWheels.
 typing_extensions==4.12.2
 python-multipart

@@ -1243,6 +1243,7 @@ ensure_python_venv() {
     "fastapi==0.115.6" \
     "starlette>=0.38,<0.39" \
     "pydantic==2.7.4" \
+    "pydantic-core==2.18.4" \
     "typing_extensions==4.12.2" \
     "click>=8.1" \
     "httpx==0.28.1" \
@@ -1344,11 +1345,17 @@ ensure_piper_cli() {
   local fallback
   for fallback in \
     "piper_${version}_linux_aarch64.tar.gz" \
+    "piper_${version}_linux-aarch64.tar.gz" \
     "piper_${version}_linux-arm64.tar.gz" \
     "piper_${version}_linux_arm64.tar.gz" \
+    "piper_${version}_aarch64.tar.gz" \
+    "piper_${version}_arm64.tar.gz" \
     "piper_linux_aarch64.tar.gz" \
+    "piper_linux-aarch64.tar.gz" \
     "piper_linux-arm64.tar.gz" \
-    "piper_linux_arm64.tar.gz"
+    "piper_linux_arm64.tar.gz" \
+    "piper_aarch64.tar.gz" \
+    "piper_arm64.tar.gz"
   do
     local url="${base}/${fallback}"
     if [[ -z "${seen["${url}"]:-}" ]]; then
