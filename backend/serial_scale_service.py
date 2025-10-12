@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import sys
 import threading
@@ -18,6 +19,31 @@ except ImportError as exc:  # pragma: no cover - handled at runtime
 
 
 _LOGGER: Optional[logging.Logger] = None
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+ZERO_ACK_TIMEOUT = _env_float("ZERO_ACK_TIMEOUT", 1.0)
+ZERO_ACK_RETRIES = max(0, _env_int("ZERO_ACK_RETRIES", 1))
+ZERO_ACK_SETTLE = _env_float("ZERO_ACK_SETTLE", 0.05)
 
 
 def get_logger() -> logging.Logger:
@@ -135,7 +161,13 @@ class SerialScaleService:
         if not self._connected:
             return {"ok": False, "reason": "serial_disconnected"}
         try:
-            self._send_command("T\n", expected_prefix="ACK:T")
+            self._send_and_wait_ack(
+                b"T\r\n",
+                ack_tokens=(b"ACK:T", b"CK:T"),
+                timeout=ZERO_ACK_TIMEOUT,
+                retries=ZERO_ACK_RETRIES,
+                settle=ZERO_ACK_SETTLE,
+            )
         except TimeoutError:
             return {"ok": False, "reason": "ack_timeout"}
         except RuntimeError as exc:
@@ -239,7 +271,9 @@ class SerialScaleService:
         if not line:
             return
 
-        if line.startswith("ACK:"):
+        upper_line = line.upper()
+
+        if upper_line.startswith("ACK:") or upper_line.endswith("CK:T"):
             self._ack_queue.put(line)
             return
 
@@ -271,32 +305,86 @@ class SerialScaleService:
         self._last_timestamp = time.time()
         self._last_stable = stable
 
-    def _send_command(self, command: str, *, expected_prefix: str, timeout: float = 1.0) -> Optional[str]:
+    def _send_and_wait_ack(
+        self,
+        payload: bytes,
+        *,
+        ack_tokens: tuple[bytes, ...],
+        timeout: float,
+        retries: int,
+        settle: float = ZERO_ACK_SETTLE,
+    ) -> str:
+        if not payload:
+            raise ValueError("payload must not be empty")
+        tokens_upper = tuple(token.decode("utf-8", errors="ignore").upper() for token in ack_tokens if token)
+        if not tokens_upper:
+            raise ValueError("ack_tokens must contain at least one token")
+
+        for attempt in range(retries + 1):
+            with self._serial_lock:
+                serial_conn = self._serial
+                if serial_conn is None or not serial_conn.is_open:
+                    raise RuntimeError("serial_disconnected")
+                self._drain_ack_queue()
+                try:
+                    serial_conn.reset_input_buffer()
+                    serial_conn.reset_output_buffer()
+                except (SerialException, OSError) as exc:
+                    self._handle_serial_error(exc)
+                    raise RuntimeError("serial_flush_failed") from exc
+
+                if settle > 0:
+                    time.sleep(settle)
+
+                try:
+                    serial_conn.write(payload)
+                    serial_conn.flush()
+                except (SerialException, OSError) as exc:
+                    self._handle_serial_error(exc)
+                    raise RuntimeError("serial_write_failed") from exc
+
+            deadline = time.monotonic() + max(timeout, 0.01)
+            aggregated = ""
+            while time.monotonic() < deadline:
+                try:
+                    ack_line = self._ack_queue.get(timeout=0.05)
+                except queue.Empty:
+                    if self._stop_event.is_set():
+                        break
+                    continue
+
+                if not isinstance(ack_line, str):
+                    ack_line = str(ack_line)
+
+                aggregated += ack_line
+                upper_line = ack_line.upper()
+                if any(token in upper_line for token in tokens_upper):
+                    return ack_line
+                if any(token in aggregated.upper() for token in tokens_upper):
+                    return aggregated
+
+            self._log.debug(
+                "Serial scale ACK not received on attempt %d/%d for payload %s",
+                attempt + 1,
+                retries + 1,
+                payload,
+            )
+
+        raise TimeoutError("ack_timeout")
+
+    def _send_command(self, command: str, *, expected_prefix: str, timeout: float = 1.0) -> str:
         if not command.endswith("\n"):
             command += "\n"
 
-        with self._serial_lock:
-            if self._serial is None or not self._serial.is_open:
-                raise RuntimeError("serial_disconnected")
-            self._drain_ack_queue()
-            try:
-                self._serial.write(command.encode("utf-8"))
-                self._serial.flush()
-            except (SerialException, OSError) as exc:
-                self._handle_serial_error(exc)
-                raise RuntimeError("serial_write_failed") from exc
-
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                ack = self._ack_queue.get(timeout=0.05)
-            except queue.Empty:
-                if self._stop_event.is_set():
-                    break
-                continue
-            if ack.startswith(expected_prefix):
-                return ack
-        raise TimeoutError("ack_timeout")
+        payload = command.encode("utf-8")
+        ack = self._send_and_wait_ack(
+            payload,
+            ack_tokens=(expected_prefix.encode("utf-8"),),
+            timeout=timeout,
+            retries=0,
+            settle=ZERO_ACK_SETTLE,
+        )
+        return ack
 
     def _drain_ack_queue(self) -> None:
         try:
