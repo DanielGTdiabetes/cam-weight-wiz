@@ -10,6 +10,9 @@ trap cleanup EXIT
 
 log "Iniciando sesión de kiosk (replace=${BASCULA_KIOSK_REPLACE_WM:-0})"
 
+export XDG_RUNTIME_DIR="/run/user/1000"
+export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
+
 if command -v xset >/dev/null; then
   xset s off || true
   xset -dpms || true
@@ -52,8 +55,6 @@ fi
 
 CHROME_BIN="$(command -v chromium-browser 2>/dev/null || command -v chromium 2>/dev/null || echo chromium)"
 log "CHROME=${CHROME_BIN} URL=${TARGET_URL}"
-export XDG_RUNTIME_DIR="/run/user/1000"
-export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
 
 exec "${CHROME_BIN}" \
   --kiosk --noerrdialogs --disable-infobars --no-first-run \

@@ -1933,6 +1933,7 @@ install_systemd_units() {
 
   if [[ ${SYSTEMD_NEEDS_RELOAD} -eq 1 ]]; then
     systemctl daemon-reload
+    systemctl restart bascula-ui.service || true
     SYSTEMD_NEEDS_RELOAD=0
   fi
 }
@@ -2058,7 +2059,15 @@ EOF
 
   if [[ ${need_reload} -eq 1 ]]; then
     systemctl daemon-reload
+    systemctl restart bascula-ui.service || true
   fi
+
+  # Comprobar bus de sesión
+  if ! sudo -u "${DEFAULT_USER}" test -S /run/user/1000/bus; then
+    echo "[install][warn] /run/user/1000/bus aún no disponible; creando XDG_RUNTIME_DIR"
+    install -d -m0700 -o pi -g pi /run/user/1000 || true
+  fi
+
   systemctl enable bascula-ui.service
 }
 
@@ -2286,6 +2295,8 @@ main() {
   install_systemd_units
   log_step "Configurando servicio bascula-ui"
   configure_bascula_ui_service
+  log "Habilitando linger para ${DEFAULT_USER}"
+  loginctl enable-linger "${DEFAULT_USER}" || true
   log_step "Construyendo frontend si aplica"
   if ! build_frontend_if_present; then
     exit 1
@@ -2307,6 +2318,14 @@ main() {
 
   log_step "Activando servicios de la Báscula"
   ensure_services_started
+  log_step "Sanity check sesión systemd --user"
+  loginctl show-user "${DEFAULT_USER}" | grep -i Linger
+  ls -ld /run/user/1000 || true
+  if test -S /run/user/1000/bus; then
+    echo "[ok] user bus OK"
+  else
+    echo "[warn] user bus ausente"
+  fi
 
   if [[ ${REBOOT_FLAG} -eq 1 ]]; then
     log_warn "Se requiere reinicio para aplicar configuraciones de arranque. Continuando con verificaciones esenciales."
