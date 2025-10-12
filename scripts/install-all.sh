@@ -1180,16 +1180,20 @@ ensure_serial_console_disabled() {
     apt-get install -y raspi-config >/dev/null 2>&1 || log_warn "No se pudo instalar raspi-config"
   fi
 
-  if command -v raspi-config >/dev/null 2>&1; then
+  if command -v raspi-config >/dev/null 2>&1 && [[ -z "${BASCULA_AUTOMATED:-}" ]]; then
     local serial_state
     serial_state="$(raspi-config nonint get_serial 2>/dev/null || echo unknown)"
     if [[ "${serial_state}" != "1" ]]; then
-      if raspi-config nonint do_serial 1 >/dev/null 2>&1; then
-        log "raspi-config: login serie deshabilitado y UART habilitado"
-        changed=1
-      else
-        log_warn "raspi-config no pudo ajustar la consola serie; se aplicarán cambios manuales"
-      fi
+      echo
+      echo "=================================================================="
+      echo "  raspi-config se abrirá para que deshabilites la consola serie"
+      echo "  Selecciona: Interface Options → Serial Port"
+      echo "  ¿Login shell por serial? -> No"
+      echo "  ¿Habilitar hardware serial? -> Sí"
+      echo "=================================================================="
+      read -rp "Pulsa ENTER para continuar y volver aquí..." _
+      sudo raspi-config
+      changed=1
     else
       log "Login serie ya deshabilitado (estado=${serial_state})"
     fi
