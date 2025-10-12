@@ -59,7 +59,7 @@ import { useSettingsSync } from "@/hooks/useSettingsSync";
 import { useAudioPref } from "@/state/useAudio";
 import { cn } from "@/lib/utils";
 import { api, setApiBaseUrl, type BackendSettingsUpdate, type OtaJobState, type WakeStatus } from "@/services/api";
-import { ApiError } from "@/services/apiWrapper";
+import { ApiError, resolveApiBaseUrl } from "@/services/apiWrapper";
 import { isLocalClient } from "@/lib/network";
 
 type VoiceBackend = "piper" | "espeak" | "custom";
@@ -260,8 +260,22 @@ export const SettingsView = () => {
 
   const buildApiUrl = useCallback(
     (path: string) => {
+      const normalizedBase = resolveApiBaseUrl(apiUrl);
+      const candidates = [
+        normalizedBase && normalizedBase.trim() ? normalizedBase : null,
+        typeof window !== "undefined" && window.location?.origin ? window.location.origin : null,
+      ].filter((value): value is string => Boolean(value));
+
+      for (const base of candidates) {
+        try {
+          return new URL(path, base).toString();
+        } catch {
+          // Try next candidate
+        }
+      }
+
       try {
-        return new URL(path, apiUrl).toString();
+        return new URL(path).toString();
       } catch (error) {
         console.error("Invalid API URL", error);
         return path;

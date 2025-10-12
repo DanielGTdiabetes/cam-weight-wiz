@@ -23,41 +23,40 @@ interface RequestConfig {
   timeout?: number;
 }
 
+const LOOPBACK_REGEX = /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?$/i;
+
+export const resolveApiBaseUrl = (url: string): string => {
+  try {
+    if (typeof window !== 'undefined' && window.location?.origin) {
+      const origin = window.location.origin.replace(/\/$/, '');
+      if (!url || LOOPBACK_REGEX.test(url)) {
+        return origin;
+      }
+      try {
+        // eslint-disable-next-line no-new
+        new URL(url);
+        return url.replace(/\/$/, '');
+      } catch {
+        return origin;
+      }
+    }
+    return url;
+  } catch {
+    return url;
+  }
+};
+
 class ApiWrapper {
   private baseUrl: string;
   private defaultTimeout = 30000; // 30 seconds
 
   constructor() {
     const settings = storage.getSettings();
-    this.baseUrl = this.normalizeBaseUrl(settings.apiUrl);
-  }
-
-  private normalizeBaseUrl(url: string): string {
-    try {
-      // Prefer current origin when running in a browser and url is empty/localhost
-      if (typeof window !== 'undefined' && window.location?.origin) {
-        const origin = window.location.origin.replace(/\/$/, '');
-        if (!url || /^(https?:\/\/)?(localhost|127\.0\.0\.1)(:\d+)?$/i.test(url)) {
-          return origin;
-        }
-        // Validate URL; fallback to origin if invalid
-        try {
-          // Throws if invalid
-          // eslint-disable-next-line no-new
-          new URL(url);
-          return url.replace(/\/$/, '');
-        } catch {
-          return origin;
-        }
-      }
-      return url;
-    } catch {
-      return url;
-    }
+    this.baseUrl = resolveApiBaseUrl(settings.apiUrl);
   }
 
   updateBaseUrl(url: string) {
-    this.baseUrl = this.normalizeBaseUrl(url);
+    this.baseUrl = resolveApiBaseUrl(url);
   }
 
   getBaseUrl(): string {
