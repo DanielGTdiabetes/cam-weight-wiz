@@ -186,9 +186,17 @@ ensure_default_link() {
   fi
 
   ln -sfn "${first_available}" "${default_link}"
+  local default_json_link="${VOICES_DIR}/default.onnx.json"
+  local first_meta="${first_available}.json"
+  if [[ -f "${VOICES_DIR}/${first_meta}" ]]; then
+    ln -sfn "${first_meta}" "${default_json_link}"
+  fi
 
   if getent passwd pi >/dev/null 2>&1 && getent group pi >/dev/null 2>&1; then
     chown -h pi:pi "${default_link}"
+    if [[ -L "${default_json_link}" ]]; then
+      chown -h pi:pi "${default_json_link}"
+    fi
   fi
 
   log "Enlace default.onnx -> ${first_available}"

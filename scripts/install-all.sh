@@ -1170,6 +1170,58 @@ ensure_boot_overlays() {
   fi
 }
 
+ensure_serial_console_disabled() {
+  log_step "Ajustando UART (sin consola interactiva)"
+
+  local changed=0
+  if command -v raspi-config >/dev/null 2>&1; then
+    local serial_state
+    serial_state="$(raspi-config nonint get_serial 2>/dev/null || echo unknown)"
+    if [[ "${serial_state}" == "0" ]]; then
+      if raspi-config nonint do_serial 1 >/dev/null 2>&1; then
+        log "raspi-config: deshabilitado login en serie"
+        changed=1
+      else
+        log_warn "raspi-config no pudo deshabilitar el login en serie"
+      fi
+    else
+      log "Login serie ya deshabilitado (estado=${serial_state})"
+    fi
+  else
+    log_warn "raspi-config no disponible; se deshabilitará la consola serie vía systemd"
+  fi
+
+  local svc
+  for svc in serial-getty@serial0.service serial-getty@ttyAMA0.service; do
+    if systemctl list-unit-files "${svc}" >/dev/null 2>&1; then
+      if systemctl is-enabled --quiet "${svc}"; then
+        systemctl disable --now "${svc}" >/dev/null 2>&1 || true
+        log "Deshabilitado ${svc}"
+        changed=1
+      else
+        systemctl stop "${svc}" >/dev/null 2>&1 || true
+      fi
+    fi
+  done
+
+  # Refrescar permisos de dispositivos serie si existen
+  local dev
+  for dev in /dev/serial0 /dev/ttyAMA0 /dev/ttyS0; do
+    if [[ -e "${dev}" ]]; then
+      chgrp dialout "${dev}" 2>/dev/null || true
+      chmod g+rw "${dev}" 2>/dev/null || true
+    fi
+  done
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm trigger --subsystem-match=tty --action=change >/dev/null 2>&1 || true
+  fi
+
+  if [[ ${changed} -eq 1 ]]; then
+    log "Requiere reinicio para aplicar totalmente la configuración de UART"
+    REBOOT_FLAG=1
+  fi
+}
+
 current_commit() {
   if command -v git >/dev/null 2>&1 && git -C "${REPO_ROOT}" rev-parse HEAD >/dev/null 2>&1; then
     git -C "${REPO_ROOT}" rev-parse HEAD
@@ -1458,6 +1510,9 @@ ensure_voice_symlinks() {
 
   if [[ -e "${PIPER_VOICES_DIR}/default.onnx" ]]; then
     ln -sfn "piper/default.onnx" "${VOICE_SYMLINK_ROOT}/default.onnx"
+    if [[ -f "${PIPER_VOICES_DIR}/default.onnx.json" ]]; then
+      ln -sfn "piper/default.onnx.json" "${VOICE_SYMLINK_ROOT}/default.onnx.json"
+    fi
   fi
 
   if getent passwd "${DEFAULT_USER}" >/dev/null 2>&1; then
@@ -2098,6 +2153,7 @@ main() {
 
   log_step "Configurando overlays de arranque"
   ensure_boot_overlays || true
+  ensure_serial_console_disabled || true
   purgar_fbdev_driver || true
   disable_fbdev_xorg_configs || true
   ensure_kms_device_config || true
