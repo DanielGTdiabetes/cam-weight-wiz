@@ -51,7 +51,8 @@ from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
 from backend.routers import food as food_router
 from backend.app.services.settings_service import get_settings_service
-from backend.voice import list_voices as list_piper_voices
+from backend.voice import list_voices as list_piper_voices, router as voice_router
+from backend.wake import router as wake_router, init_wake_if_enabled
 
 
 CHATGPT_MODELS = [
@@ -1178,6 +1179,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+init_wake_if_enabled(app)
+
+app.include_router(voice_router)
+app.include_router(wake_router)
 app.include_router(audio_router)
 app.include_router(food_router.router, prefix="/api/food", tags=["food"])
 
