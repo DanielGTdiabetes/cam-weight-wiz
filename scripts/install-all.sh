@@ -1428,6 +1428,14 @@ PY
   deactivate || true
 }
 
+ensure_vosk_model() {
+  log_step "Preparando modelo Vosk (wake word)"
+  if ! bash "$(dirname "$0")/fetch-vosk-model.sh"; then
+    log_err "No se pudo preparar el modelo Vosk español"
+    exit 1
+  fi
+}
+
 prepare_ocr_models_dir() {
   install -d -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" -m 0755 /opt/rapidocr/models
   cat >/opt/rapidocr/models/README.txt <<'EOF'
@@ -2284,6 +2292,7 @@ main() {
   prepare_ocr_models_dir
   ensure_piper_cli
   ensure_piper_voices
+  ensure_vosk_model
   ensure_voice_symlinks
   ensure_audio_env_file
   ensure_backend_env_file
