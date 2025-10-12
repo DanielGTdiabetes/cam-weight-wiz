@@ -157,7 +157,8 @@ export interface WakeIntent {
     | "tare"
     | "recipe_start"
     | "calibrate"
-    | "smalltalk";
+    | "smalltalk"
+    | "no_input";
   seconds?: number;
   name?: string;
 }

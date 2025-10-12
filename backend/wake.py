@@ -60,6 +60,7 @@ COOLDOWN_SECONDS = 2.0
 CONVERSATION_WINDOW_SECONDS = 12.0
 WAKE_WORD = "basculin"
 FUZZY_THRESHOLD = 85
+FOLLOWUP_SIMILARITY_THRESHOLD = 92
 
 BUFFER_FRAMES = int(BUFFER_SECONDS / FRAME_DURATION)
 PRE_WAKE_FRAMES = int(PRE_WAKE_SECONDS / FRAME_DURATION)
@@ -605,7 +606,19 @@ class WakeListener:
 
         if now < self._conversation_until:
             cleaned = normalized.strip()
-            if cleaned and cleaned != WAKE_WORD and cleaned != self._last_followup_text:
+            if not cleaned or cleaned == WAKE_WORD:
+                return
+            last_follow = self._last_followup_text
+            if last_follow:
+                similarity = fuzz.ratio(cleaned, last_follow)
+                if similarity >= FOLLOWUP_SIMILARITY_THRESHOLD:
+                    LOG_WAKE.debug(
+                        "[wake] Ignorando texto similar al anterior (score=%s, texto=%s)",
+                        similarity,
+                        cleaned,
+                    )
+                    return
+            if cleaned != last_follow:
                 self._conversation_until = now + CONVERSATION_WINDOW_SECONDS
                 self._last_followup_text = cleaned
                 event = {
@@ -920,7 +933,7 @@ def _extract_timer_seconds(normalized: str) -> Optional[int]:
 def _parse_intent(text: str) -> Dict[str, Any]:
     normalized = _normalize_text(text)
     if not normalized:
-        return {"kind": "smalltalk"}
+        return {"kind": "no_input"}
 
     if "temporizador" in normalized or "timer" in normalized:
         seconds = _extract_timer_seconds(normalized)

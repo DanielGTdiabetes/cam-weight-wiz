@@ -25,6 +25,24 @@ import { useAudioPref } from "@/state/useAudio";
 
 type BasculinMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
 
+const normalizeWakeText = (value: string | undefined | null): string => {
+  if (!value) {
+    return "";
+  }
+  let normalized = value;
+  try {
+    normalized = normalized.normalize("NFD");
+  } catch {
+    normalized = value;
+  }
+  return normalized
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+};
+
 const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
   const [showTimerDialog, setShowTimerDialog] = useState(false);
@@ -247,6 +265,7 @@ const Index = () => {
       }));
 
       const intent = event.intent;
+      const normalizedIncoming = normalizeWakeText(event.text);
       setWakeListening(false);
       if (wakeOverlayTimeoutRef.current) {
         window.clearTimeout(wakeOverlayTimeoutRef.current);
@@ -254,6 +273,13 @@ const Index = () => {
       }
 
       switch (intent.kind) {
+        case "no_input": {
+          setMascoMsg("No te escuché bien. ¿Puedes repetirlo?");
+          setBasculinMood("worried");
+          setConversationHistory([]);
+          lastSpokenRef.current = "";
+          return;
+        }
         case "timer": {
           const seconds = intent.seconds ?? 0;
           if (seconds <= 0) {
@@ -342,6 +368,17 @@ const Index = () => {
         }
         case "smalltalk": {
           try {
+            const normalizedLastSpoken = normalizeWakeText(lastSpokenRef.current);
+            if (!normalizedIncoming) {
+              setMascoMsg("No te escuché bien. ¿Puedes repetirlo?");
+              setBasculinMood("worried");
+              setConversationHistory([]);
+              lastSpokenRef.current = "";
+              return;
+            }
+            if (normalizedLastSpoken && normalizedIncoming === normalizedLastSpoken) {
+              return;
+            }
             setBasculinMood("alert");
             const userText = (event.text ?? "").trim();
             const historySnapshot = [...conversationHistory];
