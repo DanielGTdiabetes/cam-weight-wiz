@@ -1192,7 +1192,11 @@ ensure_serial_console_disabled() {
       echo "  ¿Habilitar hardware serial? -> Sí"
       echo "=================================================================="
       sleep 1
-      sudo raspi-config
+      if [[ -c "$(tty 2>/dev/null)" ]]; then
+        raspi-config <"$(tty)" >"$(tty)" 2>&1
+      else
+        raspi-config </dev/tty >/dev/tty 2>&1
+      fi
       serial_state="$(raspi-config nonint get_serial 2>/dev/null || echo unknown)"
       if [[ "${serial_state}" != "1" ]]; then
         log_warn "El ajuste vía raspi-config no se completó; se aplicarán cambios manuales"
