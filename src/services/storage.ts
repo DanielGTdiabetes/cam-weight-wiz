@@ -300,16 +300,16 @@ const MAX_HISTORY_ITEMS = 100;
 
 // Default settings
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
-  navSafeExit: false,
-  voiceSelector: false,
-  timerAlarms: false,
-  calibrationV2: false,
-  networkModal: false,
-  miniEbStable: false,
-  otaCheck: false,
-  otaApply: false,
+  navSafeExit: true,
+  voiceSelector: true,
+  timerAlarms: true,
+  calibrationV2: true,
+  networkModal: true,
+  miniEbStable: true,
+  otaCheck: true,
+  otaApply: true,
   debugLogs: false,
-  mascotMotion: false,
+  mascotMotion: true,
 };
 
 const DEFAULT_SCALE_DECIMALS: 0 | 1 = 1;
@@ -363,7 +363,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   chatGptKey: '',
   // Dispositivo: usar loopback 127.0.0.1 por defecto
   apiUrl: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8081',
-  wsUrl: import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8080',
+  wsUrl: import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8081',
   nightscoutUrl: '',
   nightscoutToken: '',
   diabetesMode: false,

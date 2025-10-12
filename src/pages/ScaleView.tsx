@@ -5,6 +5,7 @@ import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { api } from "@/services/api";
+import { ApiError } from "@/services/apiWrapper";
 import { useToast } from "@/hooks/use-toast";
 import { storage } from "@/services/storage";
 import { isLocalClient } from "@/lib/network";
@@ -27,6 +28,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
     }
   });
   const { toast } = useToast();
+  const [isTaring, setIsTaring] = useState(false);
   const localClient = isLocalClient();
 
   const statusLabelMap = {
@@ -73,15 +75,24 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   }, [error, toast]);
 
   const handleTare = async () => {
+    if (isTaring || !isConnected) {
+      return;
+    }
+    setIsTaring(true);
     try {
       await api.scaleTare();
       toast({ title: calibrationV2Enabled ? "Tara aplicada" : "Tara realizada" });
     } catch (err) {
+      const description = err instanceof ApiError && err.message ? err.message : calibrationV2Enabled
+        ? "No se pudo aplicar la tara"
+        : "No se pudo realizar la tara";
       toast({
         title: "Error",
-        description: calibrationV2Enabled ? "No se pudo aplicar la tara" : "No se pudo realizar la tara",
+        description,
         variant: "destructive",
       });
+    } finally {
+      setIsTaring(false);
     }
   };
 
@@ -172,7 +183,7 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
           onClick={handleTare}
           size="lg"
           variant="outline"
-          disabled={!isConnected}
+          disabled={!isConnected || isTaring}
           className="h-16 text-xl"
         >
           {calibrationV2Enabled ? "Cero" : "TARA"}

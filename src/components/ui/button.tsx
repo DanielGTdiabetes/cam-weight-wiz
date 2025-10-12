@@ -10,15 +10,15 @@ const buttonVariants = cva(
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90 glow-cyan",
-        destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
-        outline: "border-2 border-border bg-card hover:bg-accent hover:text-accent-foreground",
-        secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80 glow-magenta",
-        ghost: "hover:bg-accent hover:text-accent-foreground",
-        link: "text-primary underline-offset-4 hover:underline",
-        success: "bg-success text-success-foreground hover:bg-success/90 glow-green",
-        warning: "bg-warning text-warning-foreground hover:bg-warning/90",
-        glow: "bg-gradient-to-r from-primary to-primary-glow text-primary-foreground hover:opacity-90 glow-cyan",
+        default: "bg-primary text-primary-foreground supports-[hover:hover]:hover:bg-primary/90 glow-cyan",
+        destructive: "bg-destructive text-destructive-foreground supports-[hover:hover]:hover:bg-destructive/90",
+        outline: "border-2 border-border bg-card supports-[hover:hover]:hover:bg-accent supports-[hover:hover]:hover:text-accent-foreground",
+        secondary: "bg-secondary text-secondary-foreground supports-[hover:hover]:hover:bg-secondary/80 glow-magenta",
+        ghost: "supports-[hover:hover]:hover:bg-accent supports-[hover:hover]:hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 supports-[hover:hover]:hover:underline",
+        success: "bg-success text-success-foreground supports-[hover:hover]:hover:bg-success/90 glow-green",
+        warning: "bg-warning text-warning-foreground supports-[hover:hover]:hover:bg-warning/90",
+        glow: "bg-gradient-to-r from-primary to-primary-glow text-primary-foreground supports-[hover:hover]:hover:opacity-90 glow-cyan",
       },
       size: {
         default: "h-12 px-5 py-3 text-base [&_svg]:size-5",

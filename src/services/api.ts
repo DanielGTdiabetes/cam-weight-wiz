@@ -207,8 +207,17 @@ class ApiService {
   }
 
   // Scale endpoints
-  async scaleTare(): Promise<void> {
-    await apiWrapper.post('/api/scale/tare');
+  async scaleTare(): Promise<{ ok: boolean; tare_offset?: number }> {
+    const response = await apiWrapper.post<{ ok?: boolean; reason?: string; message?: string; tare_offset?: number }>(
+      '/api/scale/tare'
+    );
+
+    if (!response?.ok) {
+      const reason = response?.reason || response?.message || 'No se pudo aplicar la tara.';
+      throw new ApiError(reason);
+    }
+
+    return { ok: true, tare_offset: response.tare_offset };
   }
 
   async scaleZero(): Promise<void> {

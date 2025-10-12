@@ -10,7 +10,6 @@ import {
   Trash2,
   Volume2,
   CheckCircle2,
-  Copy,
   ClipboardPaste,
   MonitorSpeaker,
   Globe,
@@ -20,7 +19,6 @@ import {
   Loader2,
   ExternalLink,
   KeyRound,
-  ShieldCheck,
   Eye,
   EyeOff,
 } from "lucide-react";
@@ -54,7 +52,7 @@ import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
 import { storage } from "@/services/storage";
 import { logger } from "@/services/logger";
-import { FEATURE_FLAG_DEFINITIONS, getFeatureFlags, setFeatureFlag, type FeatureFlagKey, type FeatureFlags } from "@/services/featureFlags";
+import { getFeatureFlags, setFeatureFlag, type FeatureFlags } from "@/services/featureFlags";
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
 import { useSettingsSync } from "@/hooks/useSettingsSync";
@@ -172,7 +170,7 @@ export const SettingsView = () => {
   const [calibrationFactor, setCalibrationFactor] = useState("420.5");
   const [decimals, setDecimals] = useState("1");
   const [apiUrl, setApiUrl] = useState("http://127.0.0.1:8081");
-  const [wsUrl, setWsUrl] = useState("ws://127.0.0.1:8080");
+  const [wsUrl, setWsUrl] = useState("ws://127.0.0.1:8081");
   const [chatGptKey, setChatGptKey] = useState("");
   const [nightscoutUrl, setNightscoutUrl] = useState("");
   const [nightscoutToken, setNightscoutToken] = useState("");
@@ -213,18 +211,45 @@ export const SettingsView = () => {
   const [networkModalPassword, setNetworkModalPassword] = useState("");
   const [networkModalStatus, setNetworkModalStatus] = useState<NetworkModalStatus | null>(null);
   const [isNetworkModalConnecting, setIsNetworkModalConnecting] = useState(false);
-  const [miniwebPin, setMiniwebPin] = useState<string | null>(null);
-  const [miniwebPinStatus, setMiniwebPinStatus] = useState<"idle" | "loading" | "error">("idle");
-  const [securityPinInput, setSecurityPinInput] = useState("");
-  const [pinVerified, setPinVerified] = useState(localClient);
-  const [verifyingPin, setVerifyingPin] = useState(false);
-  const [pinMessage, setPinMessage] = useState<string | null>(null);
-
   const effectiveNetworkIp = networkIP2 && networkIP2 !== "—" ? networkIP2 : networkIP;
+  const browserHost = typeof window !== "undefined" ? window.location.hostname : "";
+  const suggestedApiFromNetwork = effectiveNetworkIp ? `http://${effectiveNetworkIp}:8081` : null;
+  const suggestedWsFromNetwork = effectiveNetworkIp ? `ws://${effectiveNetworkIp}:8081` : null;
+  const suggestedApiFromBrowserHost =
+    browserHost && browserHost !== "localhost" && browserHost !== "127.0.0.1"
+      ? `http://${browserHost}:8081`
+      : null;
+  const suggestedWsFromBrowserHost =
+    browserHost && browserHost !== "localhost" && browserHost !== "127.0.0.1"
+      ? `ws://${browserHost}:8081`
+      : null;
   const configUrlHint = effectiveNetworkIp ? `http://${effectiveNetworkIp}/config` : "http://<IP_de_la_báscula>/config";
-  const remoteLocked = !localClient && !pinVerified;
+  const remoteLocked = false;
   const openAiKeyboardEnabled = internalKeyboardEnabled && localClient;
   const nightscoutKeyboardEnabled = internalKeyboardEnabled && localClient;
+  const showVoiceSelector = true;
+
+  useEffect(() => {
+    const keysToForce: Array<keyof FeatureFlags> = [
+      "navSafeExit",
+      "voiceSelector",
+      "timerAlarms",
+      "calibrationV2",
+      "networkModal",
+      "miniEbStable",
+      "otaCheck",
+      "otaApply",
+    ];
+    const missing = keysToForce.filter((key) => !featureFlags[key]);
+    if (missing.length === 0) {
+      return;
+    }
+    let updated = featureFlags;
+    missing.forEach((key) => {
+      updated = setFeatureFlag(key, true);
+    });
+    setFeatureFlags(updated);
+  }, [featureFlags]);
   
   const eventSourceRef = useRef<EventSource | null>(null);
   const otaPollIntervalRef = useRef<number | null>(null);
@@ -242,32 +267,6 @@ export const SettingsView = () => {
       }
     },
     [apiUrl]
-  );
-
-  const getPinForAction = useCallback(
-    (context: string): { allowed: boolean; pin?: string } => {
-      if (localClient) {
-        return { allowed: true };
-      }
-
-      const trimmed = securityPinInput.trim();
-      if (!trimmed) {
-        const description = `Ingresa el PIN mostrado en la báscula para ${context}.`;
-        setPinMessage(description);
-        toast({ title: 'PIN requerido', description, variant: 'destructive' });
-        return { allowed: false };
-      }
-
-      if (!pinVerified) {
-        const description = `Verifica el PIN antes de ${context}.`;
-        setPinMessage(description);
-        toast({ title: 'PIN no verificado', description, variant: 'destructive' });
-        return { allowed: false };
-      }
-
-      return { allowed: true, pin: trimmed };
-    },
-    [localClient, pinVerified, securityPinInput, toast]
   );
 
   const formatVersion = (value?: string) => {
@@ -554,56 +553,6 @@ export const SettingsView = () => {
   }, [networkModalOpen, networkSSID]);
 
   useEffect(() => {
-    if (!localClient) {
-      setMiniwebPin(null);
-      setMiniwebPinStatus('idle');
-      setPinVerified(false);
-      setPinMessage('Ingresa el PIN mostrado en la pantalla de la báscula para realizar cambios remotos.');
-      return;
-    }
-
-    let cancelled = false;
-    setMiniwebPinStatus('loading');
-    setPinVerified(true);
-    setPinMessage(null);
-
-    const fetchPin = async () => {
-      try {
-        const response = await fetch('/api/miniweb/pin', { cache: 'no-store' });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        const data = (await response.json()) as { pin?: string };
-        if (cancelled) {
-          return;
-        }
-        if (typeof data?.pin === 'string' && data.pin.trim().length > 0) {
-          setMiniwebPin(data.pin.trim());
-          setPinMessage('Este PIN también aparece en la pantalla principal de la báscula.');
-        } else {
-          setMiniwebPin(null);
-          setPinMessage('No se pudo obtener el PIN automáticamente. Revisa la pantalla de la báscula.');
-        }
-        setMiniwebPinStatus('idle');
-      } catch (error) {
-        if (cancelled) {
-          return;
-        }
-        logger.debug('No se pudo obtener el PIN de la mini-web', { error });
-        setMiniwebPin(null);
-        setMiniwebPinStatus('error');
-        setPinMessage('No se pudo obtener el PIN automáticamente. Verifica la conexión de la báscula.');
-      }
-    };
-
-    fetchPin();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [localClient]);
-
-  useEffect(() => {
     if (typeof window === 'undefined') {
       return;
     }
@@ -626,16 +575,6 @@ export const SettingsView = () => {
       return;
     }
 
-    const { allowed, pin } = getPinForAction('cambiar la red Wi-Fi');
-    if (!allowed) {
-      setIsNetworkModalConnecting(false);
-      setNetworkModalStatus({
-        type: 'error',
-        message: 'Verifica el PIN de seguridad antes de modificar la red Wi-Fi.',
-      });
-      return;
-    }
-
     const password = networkModalPassword.trim();
     const isOpenNetwork = password.length === 0;
     const payload: Record<string, unknown> = {
@@ -646,10 +585,6 @@ export const SettingsView = () => {
 
     if (!isOpenNetwork) {
       payload.password = password;
-    }
-
-    if (pin) {
-      payload.pin = pin;
     }
 
     setIsNetworkModalConnecting(true);
@@ -753,23 +688,25 @@ export const SettingsView = () => {
     }
   };
 
+  const handleApplyEndpointTemplate = useCallback(
+    (template: { api: string; ws: string }) => {
+      setApiUrl(template.api);
+      setWsUrl(template.ws);
+      storage.saveSettings({ apiUrl: template.api, wsUrl: template.ws });
+      setApiBaseUrl(template.api);
+      toast({
+        title: "Guardado",
+        description: "Se actualizaron las URLs para integraciones remotas.",
+      });
+    },
+    [setApiBaseUrl, toast]
+  );
+
   const handleLegacyNetworkDialogOpen = () => {
     setLegacyNetworkDialogOpen(true);
   };
 
-  const handleFeatureFlagToggle = (key: FeatureFlagKey, value: boolean, title: string) => {
-    const updated = setFeatureFlag(key, value);
-    setFeatureFlags(updated);
-    toast({
-      title: value ? "Función activada" : "Función desactivada",
-      description: title,
-    });
-  };
-
   const loadVoices = useCallback(async () => {
-    if (!featureFlags.voiceSelector) {
-      return;
-    }
 
     setIsLoadingVoices(true);
     setVoiceError(null);
@@ -858,7 +795,7 @@ export const SettingsView = () => {
     } finally {
       setIsLoadingVoices(false);
     }
-  }, [buildApiUrl, featureFlags.voiceSelector]);
+  }, [buildApiUrl]);
 
   // Save settings when they change
   useEffect(() => {
@@ -886,10 +823,8 @@ export const SettingsView = () => {
   }, [diabetesMode]);
 
   useEffect(() => {
-    if (featureFlags.voiceSelector) {
-      void loadVoices();
-    }
-  }, [featureFlags.voiceSelector, loadVoices]);
+    void loadVoices();
+  }, [loadVoices]);
 
   const openKeyboard = (
     title: string,
@@ -1062,76 +997,6 @@ export const SettingsView = () => {
     }
 
     fallbackToast();
-  };
-
-  const handleCopyMiniwebPin = async () => {
-    if (!miniwebPin) {
-      return;
-    }
-    try {
-      if (!navigator.clipboard || !navigator.clipboard.writeText) {
-        throw new Error('clipboard_unavailable');
-      }
-      await navigator.clipboard.writeText(miniwebPin);
-      toast({ title: 'PIN copiado', description: 'El PIN se copió al portapapeles.' });
-    } catch (error) {
-      toast({
-        title: 'No se pudo copiar',
-        description: 'Autoriza el acceso al portapapeles para copiar el PIN.',
-        variant: 'destructive',
-      });
-    }
-  };
-
-  const handleVerifySecurityPin = async () => {
-    if (localClient) {
-      setPinVerified(true);
-      setPinMessage(null);
-      return;
-    }
-
-    const candidate = securityPinInput.trim();
-    if (!/^[0-9]{4}$/.test(candidate)) {
-      const description = 'Ingresa los 4 dígitos del PIN de la báscula.';
-      setPinMessage(description);
-      toast({ title: 'PIN inválido', description, variant: 'destructive' });
-      return;
-    }
-
-    setVerifyingPin(true);
-    try {
-      const response = await fetch('/api/miniweb/verify-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: candidate }),
-      });
-
-      if (response.ok) {
-        setPinVerified(true);
-        setPinMessage('PIN verificado correctamente.');
-        toast({ title: 'PIN verificado', description: 'Ahora puedes realizar cambios remotos.' });
-        return;
-      }
-
-      if (response.status === 429) {
-        const description = 'Demasiados intentos fallidos. Espera un momento antes de reintentar.';
-        setPinMessage(description);
-        toast({ title: 'PIN bloqueado temporalmente', description, variant: 'destructive' });
-        setPinVerified(false);
-        return;
-      }
-
-      setPinMessage('PIN incorrecto. Verifica el código mostrado en la báscula.');
-      setPinVerified(false);
-      toast({ title: 'PIN incorrecto', description: 'Verifica el código mostrado en la báscula.', variant: 'destructive' });
-    } catch (error) {
-      logger.error('No se pudo verificar el PIN de la mini-web', { error });
-      setPinMessage('No se pudo verificar el PIN. Revisa la conexión.');
-      toast({ title: 'Error de conexión', description: 'No se pudo verificar el PIN.', variant: 'destructive' });
-      setPinVerified(false);
-    } finally {
-      setVerifyingPin(false);
-    }
   };
 
   const handleExportData = () => {
@@ -1399,13 +1264,9 @@ export const SettingsView = () => {
 
   const handleTestOpenAI = async () => {
     const candidateKey = chatGptKey.trim();
-    const { allowed, pin } = getPinForAction('probar la conexión con OpenAI');
-    if (!allowed) {
-      return;
-    }
     setIsTestingOpenAI(true);
     try {
-      const response = await api.testOpenAI(candidateKey || undefined, pin);
+      const response = await api.testOpenAI(candidateKey || undefined, undefined);
       if (response.ok) {
         toast({
           title: "OpenAI listo",
@@ -1436,13 +1297,9 @@ export const SettingsView = () => {
   const handleTestNightscout = async () => {
     const urlCandidate = nightscoutUrl.trim();
     const tokenCandidate = nightscoutToken.trim();
-    const { allowed, pin } = getPinForAction('probar la conexión con Nightscout');
-    if (!allowed) {
-      return;
-    }
     setIsTestingNightscout(true);
     try {
-      const response = await api.testNightscout(urlCandidate || undefined, tokenCandidate || undefined, pin);
+      const response = await api.testNightscout(urlCandidate || undefined, tokenCandidate || undefined, undefined);
       if (response.ok) {
         toast({
           title: "Nightscout listo",
@@ -1472,19 +1329,12 @@ export const SettingsView = () => {
 
   const handleSaveOpenAI = async () => {
     const trimmedKey = chatGptKey.trim();
-    const { allowed, pin } = getPinForAction('guardar la clave de OpenAI');
-    if (!allowed) {
-      return;
-    }
 
     setIsSavingOpenAI(true);
     try {
-      const payload: BackendSettingsUpdate & { pin?: string } = {
+      const payload: BackendSettingsUpdate = {
         network: { openai_api_key: trimmedKey || null },
       };
-      if (pin) {
-        payload.pin = pin;
-      }
       const response = await api.updateBackendSettings(payload);
 
       const persistedKey = Boolean(
@@ -1514,19 +1364,11 @@ export const SettingsView = () => {
     const trimmedUrl = nightscoutUrl.trim();
     const trimmedToken = nightscoutToken.trim();
 
-    const { allowed, pin } = getPinForAction('guardar la configuración de Nightscout');
-    if (!allowed) {
-      return;
-    }
-
     setIsSavingNightscout(true);
     try {
-      const payload: BackendSettingsUpdate & { pin?: string } = {
+      const payload: BackendSettingsUpdate = {
         nightscout: { url: trimmedUrl || null, token: trimmedToken || null },
       };
-      if (pin) {
-        payload.pin = pin;
-      }
       const response = await api.updateBackendSettings(payload);
 
       const responseUrl =
@@ -1934,7 +1776,7 @@ export const SettingsView = () => {
                 />
               </div>
 
-              {featureFlags.voiceSelector ? (
+              {showVoiceSelector ? (
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <Label className="text-lg font-medium">Seleccionar Voz</Label>
@@ -2111,26 +1953,25 @@ export const SettingsView = () => {
           </Card>
 
           <Card className="p-6">
-            <h3 className="text-2xl font-bold">Funciones experimentales</h3>
-            <p className="mb-6 mt-2 text-sm text-muted-foreground">
-              Activa solo las funciones que necesites probar. Todas se pueden desactivar en cualquier momento si generan
-              problemas.
-            </p>
-
-            <div className="space-y-5">
-              {FEATURE_FLAG_DEFINITIONS.map((definition) => (
-                <div key={definition.key} className="flex items-start justify-between gap-4">
-                  <div>
-                    <Label className="text-lg font-medium">{definition.title}</Label>
-                    <p className="text-sm text-muted-foreground">{definition.description}</p>
-                  </div>
-                  <Switch
-                    checked={featureFlags[definition.key]}
-                    onCheckedChange={(value) => handleFeatureFlagToggle(definition.key, value, definition.title)}
-                    className="mt-1 scale-125"
-                  />
-                </div>
-              ))}
+            <h3 className="text-2xl font-bold">Animaciones</h3>
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <Label className="text-lg font-medium">Animación de mascota</Label>
+                <p className="text-sm text-muted-foreground">
+                  Activa movimiento y reacciones animadas de Basculin en la pantalla principal.
+                </p>
+              </div>
+              <Switch
+                checked={featureFlags.mascotMotion}
+                onCheckedChange={(value) => {
+                  setFeatureFlags(setFeatureFlag('mascotMotion', value));
+                  toast({
+                    title: value ? 'Animación activada' : 'Animación desactivada',
+                    description: 'Los cambios se aplican inmediatamente.',
+                  });
+                }}
+                className="scale-150"
+              />
             </div>
           </Card>
         </TabsContent>
@@ -2206,78 +2047,13 @@ export const SettingsView = () => {
             <h3 className="mb-4 text-2xl font-bold">Configuración de Red</h3>
 
             <div className="space-y-6">
-              <div className="space-y-4 rounded-lg border border-border/70 bg-muted/10 p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="space-y-1">
-                    <Label className="flex items-center gap-2 text-lg font-semibold">
-                      <KeyRound className="h-5 w-5 text-primary" /> PIN de seguridad
-                    </Label>
-                    <p className="text-sm text-muted-foreground">
-                      Usa este PIN cuando cambies ajustes sensibles desde otro dispositivo.
-                    </p>
-                  </div>
-                  {localClient ? (
-                    <div className="flex items-center gap-3">
-                      <div className="min-h-[3rem] min-w-[6rem] rounded-md border border-border bg-background px-4 py-2 text-3xl font-mono tracking-widest">
-                        {miniwebPinStatus === 'loading' ? (
-                          <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
-                        ) : (
-                          <span>{miniwebPin ?? '—'}</span>
-                        )}
-                      </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="lg"
-                        onClick={() => void handleCopyMiniwebPin()}
-                        disabled={!miniwebPin}
-                      >
-                        <Copy className="mr-2 h-4 w-4" /> Copiar PIN
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex w-full flex-col gap-2 sm:w-64">
-                      <Input
-                        type="password"
-                        value={securityPinInput}
-                        onChange={(event) => {
-                          const digits = event.target.value.replace(/[^0-9]/g, '');
-                          setSecurityPinInput(digits);
-                          if (!localClient) {
-                            setPinVerified(false);
-                          }
-                        }}
-                        placeholder="PIN de la báscula"
-                        inputMode="numeric"
-                        maxLength={4}
-                        pattern="[0-9]*"
-                        autoComplete="one-time-code"
-                      />
-                      <Button
-                        type="button"
-                        variant="glow"
-                        onClick={() => void handleVerifySecurityPin()}
-                        disabled={verifyingPin || securityPinInput.trim().length !== 4}
-                      >
-                        {verifyingPin ? (
-                          <>
-                            <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Verificando…
-                          </>
-                        ) : (
-                          <>
-                            <ShieldCheck className="mr-2 h-4 w-4" /> Verificar PIN
-                          </>
-                        )}
-                      </Button>
-                    </div>
-                  )}
-                </div>
-                {pinMessage ? <p className="text-sm text-muted-foreground">{pinMessage}</p> : null}
-                {!localClient && pinVerified ? (
-                  <p className="flex items-center gap-2 text-sm font-medium text-success">
-                    <ShieldCheck className="h-4 w-4" /> PIN verificado para esta sesión.
-                  </p>
-                ) : null}
+              <div className="space-y-2 rounded-lg border border-border/70 bg-muted/10 p-4">
+                <Label className="flex items-center gap-2 text-lg font-semibold">
+                  <KeyRound className="h-5 w-5 text-primary" /> Acceso directo
+                </Label>
+                <p className="text-sm text-muted-foreground">
+                  Los cambios remotos ya no requieren PIN. Puedes administrar la red y otros ajustes directamente.
+                </p>
               </div>
 
               <div>
@@ -2330,8 +2106,7 @@ export const SettingsView = () => {
                     handleLegacyNetworkDialogOpen();
                   }
                 }}
-                disabled={!localClient && !pinVerified}
-                title={!localClient && !pinVerified ? 'Verifica el PIN antes de cambiar la Wi-Fi' : undefined}
+                
               >
                 Cambiar Red WiFi
               </Button>
@@ -2406,7 +2181,109 @@ export const SettingsView = () => {
                 </div>
               </div>
             </div>
-        </Card>
+          </Card>
+
+          <Card className="space-y-6 p-6">
+            <div>
+              <h3 className="text-2xl font-bold">Integración remota</h3>
+              <p className="text-sm text-muted-foreground">
+                Configura las URLs que usan otros dispositivos para conectar con la báscula. Verifica el PIN si accedes
+                desde fuera para poder editarlas.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label className="text-lg font-medium">URL API (HTTP)</Label>
+                <Input
+                  type="url"
+                  value={apiUrl}
+                  readOnly
+                  disabled={remoteLocked}
+                  onClick={() => {
+                    if (remoteLocked) {
+                      return;
+                    }
+                    openKeyboard("URL API del backend", "url", "apiUrl", false, undefined, undefined, false, 200);
+                  }}
+                  className={cn(
+                    "text-lg",
+                    remoteLocked ? "cursor-not-allowed opacity-70" : "cursor-pointer"
+                  )}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label className="text-lg font-medium">URL WebSocket</Label>
+                <Input
+                  type="url"
+                  value={wsUrl}
+                  readOnly
+                  disabled={remoteLocked}
+                  onClick={() => {
+                    if (remoteLocked) {
+                      return;
+                    }
+                    openKeyboard("URL WebSocket", "url", "wsUrl", false, undefined, undefined, false, 200);
+                  }}
+                  className={cn(
+                    "text-lg",
+                    remoteLocked ? "cursor-not-allowed opacity-70" : "cursor-pointer"
+                  )}
+                />
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Button
+                  variant="outline"
+                  size="lg"
+                  disabled={!suggestedApiFromNetwork || !suggestedWsFromNetwork || remoteLocked}
+                  onClick={() => {
+                    if (!suggestedApiFromNetwork || !suggestedWsFromNetwork) {
+                      toast({
+                        title: "Sin IP detectada",
+                        description: "Aún no se detectó la IP de la báscula en la red.",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+                    handleApplyEndpointTemplate({
+                      api: suggestedApiFromNetwork,
+                      ws: suggestedWsFromNetwork,
+                    });
+                  }}
+                >
+                  {suggestedApiFromNetwork ? `Usar IP de la báscula (${effectiveNetworkIp})` : "Detectando IP…"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="lg"
+                  disabled={!suggestedApiFromBrowserHost || !suggestedWsFromBrowserHost || remoteLocked}
+                  onClick={() => {
+                    if (!suggestedApiFromBrowserHost || !suggestedWsFromBrowserHost) {
+                      toast({
+                        title: "Sin host del navegador",
+                        description: "Recarga la página desde el navegador conectado a la báscula.",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+                    handleApplyEndpointTemplate({
+                      api: suggestedApiFromBrowserHost,
+                      ws: suggestedWsFromBrowserHost,
+                    });
+                  }}
+                >
+                  Usar host del navegador ({browserHost || "—"})
+                </Button>
+              </div>
+
+              <p className="text-xs text-muted-foreground">
+                El campo API debe apuntar al puerto 8081 de la báscula y WebSocket al mismo host con protocolo <code>ws://</code>.
+                Si accedes desde otra red, asegúrate de exponer esos puertos en tu router o VPN.
+              </p>
+            </div>
+          </Card>
 
         <Card className="p-6 space-y-6">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -2422,8 +2299,7 @@ export const SettingsView = () => {
               size="lg"
               className="w-full justify-center sm:w-auto"
               onClick={() => void handleSaveOpenAI()}
-              disabled={isSavingOpenAI || (!localClient && !pinVerified)}
-              title={!localClient && !pinVerified ? 'Verifica el PIN antes de guardar' : undefined}
+              disabled={isSavingOpenAI}
             >
               {isSavingOpenAI ? (
                 <>
@@ -2502,9 +2378,8 @@ export const SettingsView = () => {
               className="w-full justify-start"
               onClick={handleTestOpenAI}
               disabled={
-                isTestingOpenAI || (!chatGptKey.trim() && !backendHasOpenAIKey) || (!localClient && !pinVerified)
+                isTestingOpenAI || (!chatGptKey.trim() && !backendHasOpenAIKey)
               }
-              title={!localClient && !pinVerified ? 'Verifica el PIN antes de probar' : undefined}
             >
               {isTestingOpenAI ? (
                 <>
@@ -2640,8 +2515,7 @@ export const SettingsView = () => {
                 size="lg"
                 className="w-full justify-center sm:w-auto"
                 onClick={() => void handleSaveNightscout()}
-                disabled={isSavingNightscout || (!localClient && !pinVerified)}
-                title={!localClient && !pinVerified ? 'Verifica el PIN antes de guardar' : undefined}
+                disabled={isSavingNightscout}
               >
                 {isSavingNightscout ? (
                   <>
@@ -2773,10 +2647,9 @@ export const SettingsView = () => {
                 size="lg"
                 className="w-full justify-start"
                 onClick={handleTestNightscout}
-                disabled={
-                  isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl) || (!localClient && !pinVerified)
-                }
-                title={!localClient && !pinVerified ? 'Verifica el PIN antes de probar' : undefined}
+              disabled={
+                isTestingNightscout || (!nightscoutUrl.trim() && !backendNightscoutUrl)
+              }
               >
                 {isTestingNightscout ? (
                   <>
@@ -3277,4 +3150,3 @@ sudo systemctl restart bascula-miniweb bascula-ui`}
     }
     return parsed >= 1 ? 1 : 0;
   };
-
