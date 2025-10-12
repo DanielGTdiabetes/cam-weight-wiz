@@ -25,9 +25,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
@@ -50,6 +48,7 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
+import AudioVolumeCard from "@/components/AudioVolumeCard";
 import { storage } from "@/services/storage";
 import type { AppSettings } from "@/services/storage";
 import { logger } from "@/services/logger";
@@ -156,7 +155,6 @@ export const SettingsView = () => {
   const [bolusAssistant, setBolusAssistant] = useState(false);
   const [timerAlarmSoundEnabled, setTimerAlarmSoundEnabled] = useState(true);
   const [timerVoiceAnnouncementsEnabled, setTimerVoiceAnnouncementsEnabled] = useState(false);
-  const [uiVolume, setUiVolume] = useState(1);
   
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [keyboardConfig, setKeyboardConfig] = useState<{
@@ -468,7 +466,6 @@ export const SettingsView = () => {
     setHyperAlarm(settings.hyperAlarm.toString());
     setTimerAlarmSoundEnabled(settings.timerAlarmSoundEnabled);
     setTimerVoiceAnnouncementsEnabled(settings.timerVoiceAnnouncementsEnabled);
-    setUiVolume(settings.uiVolume ?? 1);
     setFeatureFlags(getFeatureFlags());
 
     void refreshNetworkStatus();
@@ -974,10 +971,6 @@ export const SettingsView = () => {
   useEffect(() => {
     storage.saveSettings({ timerVoiceAnnouncementsEnabled });
   }, [timerVoiceAnnouncementsEnabled]);
-
-  useEffect(() => {
-    storage.saveSettings({ uiVolume });
-  }, [uiVolume]);
 
   useEffect(() => {
     voiceIdRef.current = voiceId;
@@ -2076,42 +2069,7 @@ export const SettingsView = () => {
                     />
                   </div>
 
-                  <div className="space-y-2">
-                    <Label className="text-lg font-medium">Volumen de interfaz</Label>
-                    <p className="text-sm text-muted-foreground">
-                      Ajusta el volumen de los sonidos (0 = silencio, 1 = máximo).
-                    </p>
-                    <div className="flex items-center gap-4">
-                      <Slider
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={[uiVolume]}
-                        onValueChange={(value) => {
-                          const [first] = value;
-                          const clamped = Math.min(Math.max(first ?? 0, 0), 1);
-                          setUiVolume(Number(clamped.toFixed(2)));
-                        }}
-                        className="max-w-[240px]"
-                      />
-                      <Input
-                        type="number"
-                        step="0.05"
-                        min="0"
-                        max="1"
-                        value={uiVolume}
-                        onChange={(event) => {
-                          const numeric = Number(event.target.value);
-                          if (Number.isNaN(numeric)) {
-                            return;
-                          }
-                          const clamped = Math.min(Math.max(numeric, 0), 1);
-                          setUiVolume(Number(clamped.toFixed(2)));
-                        }}
-                        className="w-24"
-                      />
-                    </div>
-                  </div>
+                  <AudioVolumeCard />
                 </div>
               ) : null}
             </div>

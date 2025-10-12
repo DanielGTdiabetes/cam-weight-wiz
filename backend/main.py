@@ -45,6 +45,7 @@ import pwd
 import grp
 
 from backend.audio_utils import play_audio_file, play_pcm_audio
+from backend.audio import router as audio_router
 from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
@@ -1177,6 +1178,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(audio_router)
 app.include_router(food_router.router, prefix="/api/food", tags=["food"])
 
 
