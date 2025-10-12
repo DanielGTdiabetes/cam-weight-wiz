@@ -16,7 +16,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 
-from backend.audio_utils import is_playback_available, play_audio_file
+from backend.audio_utils import is_playback_available, play_audio_file, play_pcm_audio
 
 VOICE_ROUTER_PREFIX = "/api/voice"
 router = APIRouter(prefix=VOICE_ROUTER_PREFIX, tags=["voice"])
@@ -26,6 +26,8 @@ WHISPER_DIR = Path("/opt/whisper.cpp")
 SUPPORTED_UPLOAD_EXTENSIONS = {".webm", ".ogg", ".wav", ".mp3"}
 
 logger = logging.getLogger(__name__)
+
+_PLAYBACK_LOCK = asyncio.Lock()
 
 
 def _iter_env_dirs() -> Iterable[Path]:
@@ -209,7 +211,8 @@ async def _play_audio_locally(path: Path) -> None:
     if not _is_aplay_available():
         return
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, play_audio_file, path)
+    async with _PLAYBACK_LOCK:
+        await loop.run_in_executor(None, play_audio_file, path)
 
 
 def _synthesize_to_file(text: str, voice: Optional[str]) -> Tuple[Path, str]:
