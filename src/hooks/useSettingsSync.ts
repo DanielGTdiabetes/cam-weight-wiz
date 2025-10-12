@@ -64,21 +64,30 @@ export const useSettingsSync = () => {
     fetch('/api/settings', { cache: 'no-store' })
       .then((response) => response.json())
       .then((data) => {
+        const payload = data as Record<string, unknown>;
         // Actualizar storage local
         const updates: Record<string, unknown> = {};
         
         const networkChanged = message.fields.includes('network') || message.fields.includes('openai');
-        if (networkChanged && data.network?.openai_api_key) {
-          updates.chatGptKey = data.network.openai_api_key === '__stored__' ? '' : data.network.openai_api_key;
+        const networkSection =
+          payload && typeof payload.network === 'object' && payload.network !== null
+            ? (payload.network as { openai_api_key?: string })
+            : null;
+        if (networkChanged && networkSection?.openai_api_key) {
+          updates.chatGptKey =
+            networkSection.openai_api_key === '__stored__' ? '' : networkSection.openai_api_key;
         }
 
         const diabetesChanged = message.fields.includes('diabetes') || message.fields.includes('nightscout');
         if (diabetesChanged) {
           const nightscoutSection =
-            data && typeof data.nightscout === 'object'
-              ? (data.nightscout as { url?: string; token?: string; hasToken?: boolean })
+            payload && typeof payload.nightscout === 'object' && payload.nightscout !== null
+              ? (payload.nightscout as { url?: string; token?: string; hasToken?: boolean })
               : null;
-          const legacyDiabetes = data.diabetes as { nightscout_url?: string; nightscout_token?: string } | undefined;
+          const legacyDiabetes = payload.diabetes as {
+            nightscout_url?: string;
+            nightscout_token?: string;
+          } | undefined;
 
           const rawUrl =
             typeof nightscoutSection?.url === 'string'
@@ -104,10 +113,27 @@ export const useSettingsSync = () => {
           }
         }
         
-        if (message.fields.includes('ui') && data.ui) {
-          if (data.ui.flags) {
-            updates.ui = { flags: data.ui.flags };
+        if (message.fields.includes('ui') && payload.ui) {
+          const uiSection =
+            typeof payload.ui === 'object' && payload.ui !== null
+              ? (payload.ui as { flags?: Record<string, boolean> })
+              : null;
+          if (uiSection?.flags) {
+            updates.ui = { flags: uiSection.flags };
           }
+        }
+
+        if (message.fields.includes('tts')) {
+          const ttsSection =
+            payload && typeof payload.tts === 'object' && payload.tts !== null
+              ? (payload.tts as Record<string, unknown>)
+              : null;
+          const voiceCandidate = ttsSection?.voice_id;
+          const normalizedVoiceId =
+            typeof voiceCandidate === 'string' && voiceCandidate.trim().length > 0
+              ? voiceCandidate.trim()
+              : undefined;
+          updates.voiceId = normalizedVoiceId;
         }
         
         if (Object.keys(updates).length > 0) {

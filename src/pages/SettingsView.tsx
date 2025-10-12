@@ -51,6 +51,7 @@ import { Progress } from "@/components/ui/progress";
 import { KeyboardDialog } from "@/components/KeyboardDialog";
 import { CalibrationWizard } from "@/components/CalibrationWizard";
 import { storage } from "@/services/storage";
+import type { AppSettings } from "@/services/storage";
 import { logger } from "@/services/logger";
 import { getFeatureFlags, setFeatureFlag, type FeatureFlags } from "@/services/featureFlags";
 import { useToast } from "@/hooks/use-toast";
@@ -140,6 +141,7 @@ export const SettingsView = () => {
   const { voiceEnabled, setEnabled: setVoicePreference } = useAudioPref();
   const [voiceId, setVoiceId] = useState<string | undefined>(undefined);
   const voiceIdRef = useRef<string | undefined>(undefined);
+  const voiceOptionsRef = useRef<VoiceOption[]>([]);
   const [wakeWordEnabled, setWakeWordEnabled] = useState(false);
   const [wakeStatus, setWakeStatus] = useState<WakeStatus | null>(null);
   const [isWakeUpdating, setIsWakeUpdating] = useState(false);
@@ -147,6 +149,7 @@ export const SettingsView = () => {
   const [voiceOptions, setVoiceOptions] = useState<VoiceOption[]>([]);
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isSavingVoice, setIsSavingVoice] = useState(false);
   const [isTestingDeviceVoice, setIsTestingDeviceVoice] = useState(false);
   const [isTestingBrowserVoice, setIsTestingBrowserVoice] = useState(false);
   const [diabetesMode, setDiabetesMode] = useState(false);
@@ -480,6 +483,43 @@ export const SettingsView = () => {
   }, [refreshNetworkStatus, refreshWakeStatus]);
 
   useEffect(() => {
+    const handleSettingsUpdated = (event: Event) => {
+      const customEvent = event as CustomEvent<{ settings?: AppSettings }>;
+      const updatedSettings = customEvent.detail?.settings;
+      if (!updatedSettings) {
+        return;
+      }
+      const candidate =
+        typeof updatedSettings.voiceId === "string" && updatedSettings.voiceId.trim().length > 0
+          ? updatedSettings.voiceId.trim()
+          : undefined;
+      if (candidate !== voiceIdRef.current) {
+        voiceIdRef.current = candidate;
+        setVoiceId(candidate);
+      }
+      if (candidate) {
+        const hasOption = voiceOptionsRef.current.some((option) => option.id === candidate);
+        if (!hasOption) {
+          const customOption: VoiceOption = {
+            id: candidate,
+            label: candidate,
+            backend: "custom",
+            description: "Configuración personalizada",
+          };
+          const nextOptions = [customOption, ...voiceOptionsRef.current];
+          voiceOptionsRef.current = nextOptions;
+          setVoiceOptions(nextOptions);
+        }
+      }
+    };
+
+    window.addEventListener("app-settings-updated", handleSettingsUpdated as EventListener);
+    return () => {
+      window.removeEventListener("app-settings-updated", handleSettingsUpdated as EventListener);
+    };
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     const loadBackendSettings = async () => {
@@ -531,6 +571,27 @@ export const SettingsView = () => {
         if (!sanitizedUrl && !hasToken) {
           setBackendNightscoutUrl(null);
           setBackendNightscoutHasToken(false);
+        }
+
+        const ttsSection =
+          payload && typeof payload.tts === "object" && payload.tts !== null
+            ? (payload.tts as Record<string, unknown>)
+            : null;
+        const backendVoiceCandidate = ttsSection?.voice_id;
+        const backendVoiceId =
+          typeof backendVoiceCandidate === "string" && backendVoiceCandidate.trim().length > 0
+            ? backendVoiceCandidate.trim()
+            : undefined;
+        if (backendVoiceId) {
+          if (backendVoiceId !== voiceIdRef.current) {
+            setVoiceId(backendVoiceId);
+            voiceIdRef.current = backendVoiceId;
+            storage.saveSettings({ voiceId: backendVoiceId });
+          }
+        } else if (voiceIdRef.current) {
+          setVoiceId(undefined);
+          voiceIdRef.current = undefined;
+          storage.saveSettings({ voiceId: undefined });
         }
       } catch (error) {
         logger.debug("No se pudo cargar ajustes agregados del backend", { error });
@@ -749,6 +810,67 @@ export const SettingsView = () => {
     setLegacyNetworkDialogOpen(true);
   };
 
+  const handleVoiceSelection = useCallback(
+    async (nextVoiceId: string | undefined) => {
+      const normalized =
+        typeof nextVoiceId === "string" && nextVoiceId.trim().length > 0 ? nextVoiceId.trim() : undefined;
+      const previousVoiceId = voiceIdRef.current;
+
+      if (normalized === previousVoiceId) {
+        return;
+      }
+
+      setVoiceId(normalized);
+      voiceIdRef.current = normalized;
+      setIsSavingVoice(true);
+
+      try {
+        const selectedOption = normalized
+          ? voiceOptionsRef.current.find((option) => option.id === normalized)
+          : undefined;
+
+        const ttsPayload: Record<string, unknown> = {};
+        if (normalized) {
+          ttsPayload.voice_id = normalized;
+        } else {
+          ttsPayload.voice_id = null;
+        }
+        if (selectedOption?.backend) {
+          ttsPayload.voice_backend = selectedOption.backend;
+        }
+
+        const response = await fetch(buildApiUrl("/api/settings"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tts: ttsPayload }),
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        storage.saveSettings({ voiceId: normalized });
+      } catch (error) {
+        console.error("Failed to persist voice selection", error);
+        const restoredVoiceId =
+          typeof previousVoiceId === "string" && previousVoiceId.trim().length > 0
+            ? previousVoiceId.trim()
+            : undefined;
+        voiceIdRef.current = restoredVoiceId;
+        setVoiceId(restoredVoiceId);
+        storage.saveSettings({ voiceId: restoredVoiceId });
+        toast({
+          title: "No se pudo guardar la voz",
+          description: "Revisa la conexión y vuelve a intentarlo.",
+          variant: "destructive",
+        });
+      } finally {
+        setIsSavingVoice(false);
+      }
+    },
+    [buildApiUrl, toast]
+  );
+
   const loadVoices = useCallback(async () => {
 
     setIsLoadingVoices(true);
@@ -819,13 +941,12 @@ export const SettingsView = () => {
         ];
       }
 
+      voiceOptionsRef.current = options;
       setVoiceOptions(options);
 
       if (!currentVoiceId && options.length > 0) {
         const defaultVoice = options[0];
-        setVoiceId(defaultVoice.id);
-        voiceIdRef.current = defaultVoice.id;
-        storage.saveSettings({ voiceId: defaultVoice.id });
+        await handleVoiceSelection(defaultVoice.id);
       }
 
       if (options.length === 0) {
@@ -834,11 +955,12 @@ export const SettingsView = () => {
     } catch (error) {
       console.error('Failed to load voices', error);
       setVoiceError('No se pudieron cargar las voces disponibles');
+      voiceOptionsRef.current = [];
       setVoiceOptions([]);
     } finally {
       setIsLoadingVoices(false);
     }
-  }, [buildApiUrl]);
+  }, [buildApiUrl, handleVoiceSelection]);
 
   // Save settings when they change
   useEffect(() => {
@@ -1828,11 +1950,9 @@ export const SettingsView = () => {
                       value={voiceId ?? ""}
                       onChange={(event) => {
                         const value = event.target.value || undefined;
-                        setVoiceId(value);
-                        voiceIdRef.current = value;
-                        storage.saveSettings({ voiceId: value });
+                        void handleVoiceSelection(value);
                       }}
-                      disabled={isLoadingVoices || !voiceEnabled || voiceOptions.length === 0}
+                      disabled={isLoadingVoices || !voiceEnabled || voiceOptions.length === 0 || isSavingVoice}
                     >
                       <option value="" disabled>
                         {isLoadingVoices ? "Cargando voces..." : "Selecciona una voz"}
@@ -1844,7 +1964,9 @@ export const SettingsView = () => {
                         </option>
                       ))}
                     </select>
-                    {voiceError ? (
+                    {isSavingVoice ? (
+                      <p className="text-sm text-muted-foreground">Guardando voz predeterminada…</p>
+                    ) : voiceError ? (
                       <p className="text-sm text-destructive">{voiceError}</p>
                     ) : isLoadingVoices ? (
                       <p className="text-sm text-muted-foreground">Buscando voces disponibles…</p>
@@ -1857,7 +1979,7 @@ export const SettingsView = () => {
                       size="lg"
                       className="w-full justify-start"
                       onClick={handleDeviceVoiceTest}
-                      disabled={isTestingDeviceVoice || !voiceEnabled || isLoadingVoices}
+                      disabled={isTestingDeviceVoice || !voiceEnabled || isLoadingVoices || isSavingVoice}
                     >
                       <MonitorSpeaker className="mr-2 h-5 w-5" />
                       {isTestingDeviceVoice ? "Enviando..." : "Probar en dispositivo"}
@@ -1867,7 +1989,7 @@ export const SettingsView = () => {
                       size="lg"
                       className="w-full justify-start"
                       onClick={handleBrowserVoiceTest}
-                      disabled={isTestingBrowserVoice || !voiceEnabled || isLoadingVoices}
+                      disabled={isTestingBrowserVoice || !voiceEnabled || isLoadingVoices || isSavingVoice}
                     >
                       <Globe className="mr-2 h-5 w-5" />
                       {isTestingBrowserVoice ? "Sintetizando..." : "Probar en navegador"}
