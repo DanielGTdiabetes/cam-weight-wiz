@@ -100,10 +100,21 @@ NUMBER_WORDS: Dict[str, float] = {
 }
 
 _STOP_WORDS = {"y", "con", "de", "la", "el"}
+HW_DEVICE_HINT_RE = re.compile(r"hw:\d+,\d+")
 
 
 def _compute_frame_samples(sample_rate: int) -> int:
     return max(1, int(sample_rate * FRAME_DURATION))
+
+
+def _extract_hw_hint(messages: Iterable[str]) -> Optional[str]:
+    for message in messages:
+        if not message:
+            continue
+        match = HW_DEVICE_HINT_RE.search(message)
+        if match:
+            return match.group(0)
+    return None
 
 
 def _read_configured_sample_rate() -> int:
@@ -484,6 +495,8 @@ class WakeListener:
             for rate in rates:
                 ok, message = _ARecordSource.preflight_check(device, rate)
                 if ok:
+                    if message:
+                        LOG_WAKE.debug("[wake] preflight ok con advertencia: %s", message)
                     if device != sanitized:
                         LOG_WAKE.warning(
                             "[wake] Fallback a micrófono %s tras fallo con %s",
@@ -499,6 +512,16 @@ class WakeListener:
                     return device, None, rate
                 if message:
                     errors.append(f"{device}@{_format_sample_rate(rate)}: {message}")
+
+        hw_hint = _extract_hw_hint(errors)
+        if hw_hint and hw_hint not in candidates:
+            LOG_WAKE.warning("[wake] Intentando fallback directo a dispositivo %s sugerido por ALSA", hw_hint)
+            for rate in rates:
+                ok, message = _ARecordSource.preflight_check(hw_hint, rate)
+                if ok:
+                    return hw_hint, None, rate
+                if message:
+                    errors.append(f"{hw_hint}@{_format_sample_rate(rate)}: {message}")
 
         combined = "; ".join(errors) if errors else None
         return None, combined, configured_rate
