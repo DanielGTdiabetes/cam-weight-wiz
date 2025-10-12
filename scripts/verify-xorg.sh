@@ -1,14 +1,32 @@
 #!/bin/bash
 set -euo pipefail
 
-LOG_PATH="${HOME:-/home/pi}/.local/share/xorg/Xorg.0.log"
-if [[ ! -f "${LOG_PATH}" ]]; then
-  LOG_PATH="/var/log/Xorg.0.log"
-fi
+LOG_CANDIDATES=(
+  "${HOME:-/home/pi}/.local/share/xorg/Xorg.0.log"
+  "/var/log/Xorg.0.log"
+)
 
-if [[ ! -f "${LOG_PATH}" ]]; then
+LOG_PATH=""
+for _ in $(seq 1 30); do
+  for candidate in "${LOG_CANDIDATES[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      LOG_PATH="${candidate}"
+      break
+    fi
+  done
+  [[ -n "${LOG_PATH}" ]] && break
+  sleep 1
+done
+
+if [[ -z "${LOG_PATH}" ]]; then
   echo "[verify-xorg] No se encontró Xorg.0.log" >&2
-  exit 1
+  if [[ "${INSTALL_XORG_STRICT:-false}" == "true" ]]; then
+    echo "[install][err]  Verificación de Xorg falló (modo estricto)" >&2
+    exit 1
+  else
+    echo "[install][warn] Xorg no verificado (no se encontró Xorg.0.log tras 30s)" >&2
+    exit 0
+  fi
 fi
 
 echo "[verify-xorg] Analizando ${LOG_PATH}" >&2

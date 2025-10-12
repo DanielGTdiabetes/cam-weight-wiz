@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+sleep 3
+
 echo "[test][audio] Listando dispositivos..."
 arecord -l || true
 aplay -l || true
