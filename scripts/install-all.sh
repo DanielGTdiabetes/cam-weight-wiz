@@ -1808,7 +1808,7 @@ pcm.bascula_out_dmix {
     slave {
         pcm "${playback_hw}"
         channels 2
-        rate 44100
+        rate 48000
         format S16_LE
     }
 }

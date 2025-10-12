@@ -22,10 +22,14 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-try:  # Optional dependency handled gracefully
-    import sounddevice as sd  # type: ignore
-except Exception:  # pragma: no cover - optional at runtime
-    sd = None  # type: ignore
+USE_SOUNDDEVICE_ENV = os.getenv("BASCULA_ENABLE_SOUNDDEVICE", "0").strip().lower()
+USE_SOUNDDEVICE = USE_SOUNDDEVICE_ENV in {"1", "true", "yes", "on"}
+sd = None  # type: ignore
+if USE_SOUNDDEVICE:
+    try:  # Optional dependency handled gracefully
+        import sounddevice as sd  # type: ignore
+    except Exception:  # pragma: no cover - optional at runtime
+        sd = None  # type: ignore
 
 try:  # Vosk may be unavailable during development
     from vosk import KaldiRecognizer, Model  # type: ignore
