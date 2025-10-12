@@ -57,6 +57,7 @@ BUFFER_SECONDS = 8.0
 PRE_WAKE_SECONDS = 1.0
 POST_WAKE_SECONDS = 4.0
 COOLDOWN_SECONDS = 2.0
+CONVERSATION_WINDOW_SECONDS = 12.0
 WAKE_WORD = "basculin"
 FUZZY_THRESHOLD = 85
 
@@ -196,6 +197,8 @@ class WakeListener:
         self._set_sample_rate(self._configured_sample_rate)
         self._resolved_mic_device: Optional[str] = None
         self._usb_hw_fallback: Optional[str] = None
+        self._conversation_until = 0.0
+        self._last_followup_text: str = ""
 
     # ------------------------------------------------------------------
     # Public API
@@ -596,6 +599,20 @@ class WakeListener:
             self._cooldown_until = now + COOLDOWN_SECONDS
             LOG_WAKE.info("[wake] Wake-word detectada (score=%s, texto=%s)", score, text)
             self._on_wake_detected(audio_source)
+            return
+
+        if now < self._conversation_until:
+            cleaned = normalized.strip()
+            if cleaned and cleaned != WAKE_WORD and cleaned != self._last_followup_text:
+                self._conversation_until = now + CONVERSATION_WINDOW_SECONDS
+                self._last_followup_text = cleaned
+                event = {
+                    "type": "intent",
+                    "ts": time.time(),
+                    "text": cleaned,
+                    "intent": _parse_intent(cleaned),
+                }
+                self._broadcast(event)
 
     def _on_wake_detected(self, audio_source: _BaseAudioSource) -> None:
         wake_ts = time.time()
@@ -640,6 +657,8 @@ class WakeListener:
             "intent": intent,
         }
         self._broadcast(event)
+        self._conversation_until = time.monotonic() + CONVERSATION_WINDOW_SECONDS
+        self._last_followup_text = ""
 
     def _transcribe_audio(self, pcm_audio: bytes, wav_audio: bytes) -> str:
         transcript: Optional[str] = None

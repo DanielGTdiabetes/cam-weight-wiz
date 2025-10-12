@@ -49,6 +49,8 @@ const Index = () => {
   const wakeReconnectTimeoutRef = useRef<number | null>(null);
   const scaleDecimals = useScaleDecimals();
   const { voiceEnabled: isVoiceActive, setEnabled: setVoiceEnabled } = useAudioPref();
+  const [conversationHistory, setConversationHistory] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
+  const lastSpokenRef = useRef<string>("");
 
   const speakResponse = useCallback(
     async (text: string) => {
@@ -59,10 +61,14 @@ const Index = () => {
       if (!trimmed) {
         return;
       }
+      if (trimmed === lastSpokenRef.current) {
+        return;
+      }
       const settings = storage.getSettings();
       const voiceId = typeof settings.voiceId === "string" && settings.voiceId.trim().length > 0 ? settings.voiceId : undefined;
       try {
         await api.speak(trimmed, voiceId);
+        lastSpokenRef.current = trimmed;
       } catch (error) {
         console.error("Assistant speech playback failed", error);
       }
@@ -212,6 +218,8 @@ const Index = () => {
         }));
         setWakeListening(true);
         setBasculinMood("alert");
+        setConversationHistory([]);
+        lastSpokenRef.current = "";
         if (wakeOverlayTimeoutRef.current) {
           window.clearTimeout(wakeOverlayTimeoutRef.current);
         }
@@ -251,6 +259,8 @@ const Index = () => {
           if (seconds <= 0) {
             setMascoMsg("No entendí el temporizador.");
             setBasculinMood("worried");
+            setConversationHistory([]);
+            lastSpokenRef.current = "";
             return;
           }
           await handleTimerStart(seconds);
@@ -266,6 +276,8 @@ const Index = () => {
           }
           setMascoMsg(message);
           setBasculinMood("happy");
+          setConversationHistory([]);
+          lastSpokenRef.current = "";
           return;
         }
         case "weight_status": {
@@ -286,6 +298,8 @@ const Index = () => {
             setMascoMsg("No pude consultar la báscula.");
             setBasculinMood("worried");
           }
+          setConversationHistory([]);
+          lastSpokenRef.current = "";
           return;
         }
         case "tare": {
@@ -298,6 +312,8 @@ const Index = () => {
             setMascoMsg("No se pudo poner a cero la báscula.");
             setBasculinMood("worried");
           }
+          setConversationHistory([]);
+          lastSpokenRef.current = "";
           return;
         }
         case "recipe_start": {
@@ -309,6 +325,8 @@ const Index = () => {
               : "Abriendo recetario."
           );
           setBasculinMood("happy");
+          setConversationHistory([]);
+          lastSpokenRef.current = "";
           return;
         }
         case "calibrate": {
@@ -318,14 +336,25 @@ const Index = () => {
           if (typeof window !== 'undefined') {
             window.dispatchEvent(new Event('open-calibration-wizard'));
           }
+          setConversationHistory([]);
+          lastSpokenRef.current = "";
           return;
         }
         case "smalltalk": {
           try {
             setBasculinMood("alert");
+            const userText = (event.text ?? "").trim();
+            const historySnapshot = [...conversationHistory];
+            if (userText) {
+              historySnapshot.push({ role: "user", text: userText });
+            }
+            const historyContext = historySnapshot
+              .map((item) => `${item.role === "assistant" ? "Asistente" : "Usuario"}: ${item.text}`)
+              .slice(-12);
             const response = await api.assistantChat(event.text ?? "", {
               view: currentView,
               diabetesMode,
+              history: historyContext,
             });
             const replyText = (response.reply || "").trim() || "Aquí estoy, ¿qué necesitas?";
             const mood = (response.mood || "happy").toLowerCase();
@@ -338,6 +367,8 @@ const Index = () => {
               normal: "normal",
             };
             setBasculinMood(moodMap[mood] ?? "happy");
+            const updatedHistory = [...historySnapshot, { role: "assistant", text: replyText }].slice(-12);
+            setConversationHistory(updatedHistory);
             if (response.speak !== false) {
               await speakResponse(replyText);
             }
@@ -346,6 +377,11 @@ const Index = () => {
             const fallback = "Aquí estoy, ¿qué necesitas?";
             setMascoMsg(fallback);
             setBasculinMood("happy");
+            const userText = (event.text ?? "").trim();
+            const withUser = userText
+              ? [...conversationHistory, { role: "user", text: userText }].slice(-12)
+              : [...conversationHistory];
+            setConversationHistory([...withUser, { role: "assistant", text: fallback }].slice(-12));
           }
           return;
         }
@@ -353,7 +389,7 @@ const Index = () => {
           return;
       }
     },
-    [handleTimerStart, scaleDecimals, currentView, diabetesMode, speakResponse]
+    [handleTimerStart, scaleDecimals, currentView, diabetesMode, speakResponse, conversationHistory]
   );
 
   useEffect(() => {
