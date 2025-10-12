@@ -1253,15 +1253,28 @@ EOF
     udevadm trigger --subsystem-match=tty >/dev/null 2>&1 || true
   fi
 
-  if [[ ! -e /dev/serial0 && -e /dev/ttyS0 ]]; then
-    ln -sfn /dev/ttyS0 /dev/serial0
-    log "Creado enlace /dev/serial0 -> /dev/ttyS0"
-    changed=1
-  fi
-  if [[ ! -e /dev/serial0 && -e /dev/ttyAMA0 ]]; then
-    ln -sfn /dev/ttyAMA0 /dev/serial0
-    log "Creado enlace /dev/serial0 -> /dev/ttyAMA0"
-    changed=1
+  if [[ -L /dev/serial0 || -e /dev/serial0 ]]; then
+    local current_target
+    current_target="$(readlink -f /dev/serial0 2>/dev/null || true)"
+    if [[ "${current_target}" != "/dev/ttyAMA0" && -e /dev/ttyAMA0 ]]; then
+      ln -sfn /dev/ttyAMA0 /dev/serial0
+      log "Actualizado enlace /dev/serial0 -> /dev/ttyAMA0"
+      changed=1
+    elif [[ "${current_target}" != "/dev/ttyS0" && -e /dev/ttyS0 ]]; then
+      ln -sfn /dev/ttyS0 /dev/serial0
+      log "Actualizado enlace /dev/serial0 -> /dev/ttyS0"
+      changed=1
+    fi
+  else
+    if [[ -e /dev/ttyAMA0 ]]; then
+      ln -sfn /dev/ttyAMA0 /dev/serial0
+      log "Creado enlace /dev/serial0 -> /dev/ttyAMA0"
+      changed=1
+    elif [[ -e /dev/ttyS0 ]]; then
+      ln -sfn /dev/ttyS0 /dev/serial0
+      log "Creado enlace /dev/serial0 -> /dev/ttyS0"
+      changed=1
+    fi
   fi
 
   if command -v udevadm >/dev/null 2>&1; then
