@@ -56,7 +56,6 @@ import { logger } from "@/services/logger";
 import { getFeatureFlags, setFeatureFlag, type FeatureFlags } from "@/services/featureFlags";
 import { useToast } from "@/hooks/use-toast";
 import { useScaleWebSocket } from "@/hooks/useScaleWebSocket";
-import { useSettingsSync } from "@/hooks/useSettingsSync";
 import { useAudioPref } from "@/state/useAudio";
 import { cn } from "@/lib/utils";
 import { api, setApiBaseUrl, type BackendSettingsUpdate, type OtaJobState, type WakeStatus } from "@/services/api";
@@ -134,7 +133,6 @@ const trimLogLines = (content: string, maxLines = MAX_OTA_LOG_LINES): string => 
 export const SettingsView = () => {
   const { toast } = useToast();
   const { weight } = useScaleWebSocket();
-  useSettingsSync(); // Enable real-time settings sync
   const localClient = isLocalClient();
   const [showCalibrationWizard, setShowCalibrationWizard] = useState(false);
   const [featureFlags, setFeatureFlags] = useState<FeatureFlags>(() => getFeatureFlags());

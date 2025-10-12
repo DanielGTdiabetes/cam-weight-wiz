@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import type { WeightData } from "@/services/api";
 import { storage } from "@/services/storage";
 import { isLocalClient } from "@/lib/network";
+import { apiWrapper } from "@/services/apiWrapper";
 
 const WS_URL = import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8080";
 const MAX_RECONNECT_ATTEMPTS = 10;
@@ -9,6 +10,8 @@ const INITIAL_RECONNECT_DELAY = 1000; // 1 second
 const MAX_RECONNECT_DELAY = 30000; // 30 seconds
 const HTTP_POLL_MS = 500;
 const ERROR_GRACE_MS = 5000;
+const LOOPBACK_REGEX = /^(https?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+const LOOPBACK_WS_REGEX = /^(wss?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
 
 type ConnectionState = "connected" | "reconnecting" | "no-data";
 
@@ -50,21 +53,43 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
   const remoteSseActiveRef = useRef(false);
 
   const settings = storage.getSettings();
-  const defaultOrigin = typeof window !== "undefined" ? window.location.origin : "";
-  // HTTP base para REST/SSE: prioriza configuración persistida; si no hay, usa el origin actual.
-  const apiBaseUrl = (settings.apiUrl || defaultOrigin || "").replace(/\/$/, "");
-  // WS base para socket: intenta usar wsUrl configurado; si no, deriva del origin (cambiando esquema) o
-  // recurre al valor por defecto.
+  const defaultOrigin = typeof window !== "undefined" ? window.location.origin.replace(/\/$/, "") : "";
+  const resolvedApiBase = (() => {
+    const base = apiWrapper.getBaseUrl();
+    if (base) {
+      return base.replace(/\/$/, "");
+    }
+    if (settings.apiUrl && !LOOPBACK_REGEX.test(settings.apiUrl)) {
+      return settings.apiUrl.replace(/\/$/, "");
+    }
+    return defaultOrigin;
+  })();
+  const apiBaseUrl = resolvedApiBase || "";
+
   const wsBaseUrl = (() => {
-    const configured = (settings.wsUrl || "").replace(/\/$/, "");
-    if (configured) {
-      return configured;
+    const configured = (settings.wsUrl || "").trim();
+    if (configured && !LOOPBACK_WS_REGEX.test(configured)) {
+      return configured.replace(/\/$/, "");
     }
-    if (!defaultOrigin) {
-      return WS_URL.replace(/\/$/, "");
+    if (apiBaseUrl) {
+      try {
+        const url = new URL(apiBaseUrl);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        return url.origin;
+      } catch {
+        // Fallback handled below
+      }
     }
-    const isHttps = defaultOrigin.startsWith("https");
-    return defaultOrigin.replace(/^http/i, isHttps ? "wss" : "ws").replace(/\/$/, "");
+    if (defaultOrigin) {
+      try {
+        const url = new URL(defaultOrigin);
+        url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+        return url.origin;
+      } catch {
+        // Continue to fallback
+      }
+    }
+    return WS_URL.replace(/\/$/, "");
   })();
   const localClient = isLocalClient();
   const hostname = typeof window !== "undefined" ? window.location.hostname : "";

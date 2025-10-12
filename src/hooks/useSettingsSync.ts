@@ -2,9 +2,10 @@
  * Hook para sincronización en tiempo real de configuración
  */
 import { useEffect, useRef, useCallback } from 'react';
-import { storage } from '@/services/storage';
-import type { AppSettingsUpdate } from '@/services/storage';
-import { logger } from '@/services/logger';
+import { storage } from "@/services/storage";
+import type { AppSettingsUpdate } from "@/services/storage";
+import { logger } from "@/services/logger";
+import { buildAppSettingsUpdateFromBackend } from "@/lib/backendSettings";
 
 const WS_BASE_URL = (() => {
   if (typeof window !== 'undefined' && window.location?.origin) {
@@ -61,93 +62,23 @@ export const useSettingsSync = () => {
     });
 
     // Recargar configuración del backend
-    fetch('/api/settings', { cache: 'no-store' })
+    fetch("/api/settings", { cache: "no-store" })
       .then((response) => response.json())
       .then((data) => {
         const payload = data as Record<string, unknown>;
-        // Actualizar storage local
-        const updates: Record<string, unknown> = {};
-        
-        const networkChanged = message.fields.includes('network') || message.fields.includes('openai');
-        const networkSection =
-          payload && typeof payload.network === 'object' && payload.network !== null
-            ? (payload.network as { openai_api_key?: string })
-            : null;
-        if (networkChanged && networkSection?.openai_api_key) {
-          updates.chatGptKey =
-            networkSection.openai_api_key === '__stored__' ? '' : networkSection.openai_api_key;
-        }
-
-        const diabetesChanged = message.fields.includes('diabetes') || message.fields.includes('nightscout');
-        if (diabetesChanged) {
-          const nightscoutSection =
-            payload && typeof payload.nightscout === 'object' && payload.nightscout !== null
-              ? (payload.nightscout as { url?: string; token?: string; hasToken?: boolean })
-              : null;
-          const legacyDiabetes = payload.diabetes as {
-            nightscout_url?: string;
-            nightscout_token?: string;
-          } | undefined;
-
-          const rawUrl =
-            typeof nightscoutSection?.url === 'string'
-              ? nightscoutSection.url.trim()
-              : typeof legacyDiabetes?.nightscout_url === 'string'
-                ? legacyDiabetes.nightscout_url.trim()
-                : '';
-          if (rawUrl && rawUrl !== '__stored__') {
-            updates.nightscoutUrl = rawUrl;
-          }
-
-          const rawToken =
-            typeof nightscoutSection?.token === 'string'
-              ? nightscoutSection.token.trim()
-              : typeof legacyDiabetes?.nightscout_token === 'string'
-                ? legacyDiabetes.nightscout_token.trim()
-                : '';
-
-          if (rawToken === '__stored__' || nightscoutSection?.hasToken) {
-            // Mantener el token actual si está guardado o marcado como presente
-          } else if (rawToken) {
-            updates.nightscoutToken = rawToken;
-          }
-        }
-        
-        if (message.fields.includes('ui') && payload.ui) {
-          const uiSection =
-            typeof payload.ui === 'object' && payload.ui !== null
-              ? (payload.ui as { flags?: Record<string, boolean> })
-              : null;
-          if (uiSection?.flags) {
-            updates.ui = { flags: uiSection.flags };
-          }
-        }
-
-        if (message.fields.includes('tts')) {
-          const ttsSection =
-            payload && typeof payload.tts === 'object' && payload.tts !== null
-              ? (payload.tts as Record<string, unknown>)
-              : null;
-          const voiceCandidate = ttsSection?.voice_id;
-          const normalizedVoiceId =
-            typeof voiceCandidate === 'string' && voiceCandidate.trim().length > 0
-              ? voiceCandidate.trim()
-              : undefined;
-          updates.voiceId = normalizedVoiceId;
-        }
-        
+        const updates = buildAppSettingsUpdateFromBackend(payload);
         if (Object.keys(updates).length > 0) {
           storage.saveSettings(updates as AppSettingsUpdate);
-          
-          // Dispatch event para que componentes reaccionen
-          window.dispatchEvent(new CustomEvent('settings-synced', {
-            detail: { fields: message.fields, updates },
-          }));
+          window.dispatchEvent(
+            new CustomEvent("settings-synced", {
+              detail: { fields: message.fields, updates },
+            }),
+          );
         }
       })
       .catch((err) => {
-        const error = err instanceof Error ? err.message : 'Unknown error';
-        logger.error('[SettingsSync] Failed to reload settings', { error });
+        const error = err instanceof Error ? err.message : "Unknown error";
+        logger.error("[SettingsSync] Failed to reload settings", { error });
       });
   }, []);
 
@@ -155,14 +86,23 @@ export const useSettingsSync = () => {
     try {
       const message: SettingsMessage = JSON.parse(event.data);
       
-      if (message.type === 'settings.initial') {
-        logger.debug('[SettingsSync] Received initial settings');
-      } else if (message.type === 'settings.changed') {
+      if (message.type === "settings.initial") {
+        logger.debug("[SettingsSync] Received initial settings");
+        const updates = buildAppSettingsUpdateFromBackend(message.data);
+        if (Object.keys(updates).length > 0) {
+          storage.saveSettings(updates as AppSettingsUpdate);
+          window.dispatchEvent(
+            new CustomEvent("settings-synced", {
+              detail: { fields: ["initial"], updates },
+            }),
+          );
+        }
+      } else if (message.type === "settings.changed") {
         handleSettingsChanged(message);
       }
     } catch (err) {
-      const error = err instanceof Error ? err.message : 'Unknown error';
-      logger.debug('[SettingsSync] Failed to parse message', { error });
+      const error = err instanceof Error ? err.message : "Unknown error";
+      logger.debug("[SettingsSync] Failed to parse message", { error });
     }
   }, [handleSettingsChanged]);
 
@@ -176,7 +116,7 @@ export const useSettingsSync = () => {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        logger.debug('[SettingsSync] Connected');
+        logger.debug("[SettingsSync] Connected");
         
         // Iniciar ping para mantener conexión
         pingIntervalRef.current = window.setInterval(() => {
@@ -189,11 +129,11 @@ export const useSettingsSync = () => {
       ws.onmessage = handleMessage;
 
       ws.onerror = () => {
-        logger.debug('[SettingsSync] WebSocket error');
+        logger.debug("[SettingsSync] WebSocket error");
       };
 
       ws.onclose = () => {
-        logger.debug('[SettingsSync] Disconnected');
+        logger.debug("[SettingsSync] Disconnected");
         
         if (pingIntervalRef.current) {
           window.clearInterval(pingIntervalRef.current);
@@ -208,8 +148,8 @@ export const useSettingsSync = () => {
         }
       };
     } catch (err) {
-      const error = err instanceof Error ? err.message : 'Unknown error';
-      logger.error('[SettingsSync] Failed to create WebSocket', { error });
+      const error = err instanceof Error ? err.message : "Unknown error";
+      logger.error("[SettingsSync] Failed to create WebSocket", { error });
       
       // Reconectar
       if (mountedRef.current) {
