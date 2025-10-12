@@ -1281,6 +1281,22 @@ EOF
     udevadm trigger --subsystem-match=tty --action=change >/dev/null 2>&1 || true
   fi
 
+  if command -v jq >/dev/null 2>&1; then
+    local pi_cfg="/home/${DEFAULT_USER}/.bascula/config.json"
+    if sudo -u "${DEFAULT_USER}" test -f "${pi_cfg}"; then
+      local current_device
+      current_device="$(sudo -u "${DEFAULT_USER}" jq -r '.serial_device // empty' "${pi_cfg}" 2>/dev/null || true)"
+      if [[ -n "${current_device}" && "${current_device}" != "/dev/serial0" ]]; then
+        log "Actualizando serial_device en ${pi_cfg} -> /dev/serial0"
+        local tmp_cfg
+        tmp_cfg="$(sudo -u "${DEFAULT_USER}" mktemp)"
+        sudo -u "${DEFAULT_USER}" jq '.serial_device = "/dev/serial0"' "${pi_cfg}" >"${tmp_cfg}" && \
+          sudo -u "${DEFAULT_USER}" mv "${tmp_cfg}" "${pi_cfg}"
+        changed=1
+      fi
+    fi
+  fi
+
   if [[ ${changed} -eq 1 ]]; then
     log "Requiere reinicio para aplicar totalmente la configuración de UART"
     REBOOT_FLAG=1
