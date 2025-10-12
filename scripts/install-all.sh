@@ -1685,9 +1685,24 @@ get_capture_hw() {
 install_asound_conf() {
   local playback_hw capture_hw playback_card capture_card
   playback_hw=$(get_playback_hw)
-  capture_hw=$(get_capture_hw)
+  capture_hw=$(get_capture_hw | tail -n1)
   playback_card=$(printf '%s' "${playback_hw}" | sed -E 's#^hw:(CARD=)?([^,]+).*$#\2#')
-  capture_card=$(printf '%s' "${capture_hw}" | sed -E 's#^hw:(CARD=)?([^,]+).*$#\2#')
+  if [[ "${capture_hw}" =~ ^(plughw|hw):CARD=([^,]+),DEV=([0-9]+) ]]; then
+    capture_card="${BASH_REMATCH[2]}"
+  elif [[ "${capture_hw}" =~ ^(plughw|hw):([^,]+),DEV=([0-9]+) ]]; then
+    capture_card="${BASH_REMATCH[2]}"
+  elif [[ "${capture_hw}" =~ ^(plughw|hw):CARD=([^,]+) ]]; then
+    capture_card="${BASH_REMATCH[2]}"
+  elif [[ "${capture_hw}" =~ ^(plughw|hw):([^,]+) ]]; then
+    capture_card="${BASH_REMATCH[2]}"
+  elif [[ "${capture_hw}" =~ ^hw:([0-9]+) ]]; then
+    capture_card="${BASH_REMATCH[1]}"
+  else
+    capture_card="${capture_hw}"
+  fi
+  if [[ -z "${capture_card}" ]]; then
+    capture_card="0"
+  fi
   cat <<EOF > "${ASOUND_CONF}.tmp"
 pcm.bascula_out {
     type plug
@@ -1711,14 +1726,8 @@ ctl.bascula_out {
 }
 
 pcm.bascula_mix_in {
-    type dsnoop
-    ipc_key 8675310
-    slave {
-        pcm "${capture_hw}"
-        channels 1
-        rate 16000
-        format S16_LE
-    }
+    type plug
+    slave.pcm "${capture_hw}"
 }
 
 ctl.bascula_mix_in {

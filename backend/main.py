@@ -431,7 +431,7 @@ DEFAULT_FILTER_WINDOW = 12
 DEFAULT_CALIBRATION_FACTOR = 1.0
 DEFAULT_SERIAL_DEVICE = "/dev/serial0"
 DEFAULT_SERIAL_BAUD = 115200
-_SERIAL_AUTO_TOKENS = {"auto", "detect", "auto_serial", "auto_uart", "auto_usb"}
+_SERIAL_AUTO_TOKENS = {"auto", "detect", "auto_serial", "auto_uart", "auto_usb", "/dev/serial0"}
 _SERIAL_FALLBACKS = [
     "/dev/serial0",
     "/dev/ttyAMA0",
@@ -587,7 +587,13 @@ def _create_scale_service() -> ScaleServiceType:
             LOG_SCALE.info("Dispositivo serie auto-detectado: %s (configurado: %s)", resolved, configured_device)
             config["serial_device"] = resolved
             try:
-                _settings_service.save({"serial_device": resolved})
+                existing_serial = _settings_service.load().serial_device  # type: ignore[attr-defined]
+            except Exception:
+                existing_serial = None
+            try:
+                # No machacar el valor si el usuario ya lo tenía guardado
+                if not existing_serial or str(existing_serial).strip() in _SERIAL_AUTO_TOKENS:
+                    _settings_service.save({"serial_device": resolved})
             except Exception as exc:
                 LOG_SCALE.warning("No se pudo persistir el dispositivo serie auto-detectado (%s): %s", resolved, exc)
         if permission_notes:
