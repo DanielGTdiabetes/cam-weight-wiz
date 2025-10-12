@@ -1174,21 +1174,35 @@ ensure_serial_console_disabled() {
   log_step "Ajustando UART (sin consola interactiva)"
 
   local changed=0
+  if ! command -v raspi-config >/dev/null 2>&1; then
+    log "Instalando raspi-config para gestionar UART"
+    apt-get update >/dev/null 2>&1 || true
+    apt-get install -y raspi-config >/dev/null 2>&1 || log_warn "No se pudo instalar raspi-config"
+  fi
+
   if command -v raspi-config >/dev/null 2>&1; then
     local serial_state
     serial_state="$(raspi-config nonint get_serial 2>/dev/null || echo unknown)"
-    if [[ "${serial_state}" == "0" ]]; then
+    if [[ "${serial_state}" != "1" ]]; then
       if raspi-config nonint do_serial 1 >/dev/null 2>&1; then
-        log "raspi-config: deshabilitado login en serie"
+        log "raspi-config: login serie deshabilitado y UART habilitado"
         changed=1
       else
-        log_warn "raspi-config no pudo deshabilitar el login en serie"
+        log_warn "raspi-config no pudo ajustar la consola serie; se aplicarán cambios manuales"
       fi
     else
       log "Login serie ya deshabilitado (estado=${serial_state})"
     fi
-  else
-    log_warn "raspi-config no disponible; se deshabilitará la consola serie vía systemd"
+  fi
+
+  local cmdline="${BOOT_FIRMWARE_DIR}/cmdline.txt"
+  if [[ -f "${cmdline}" ]]; then
+    if grep -Eq 'console=(serial0|ttyAMA0|ttyS0)' "${cmdline}"; then
+      log "Eliminando consola serie de ${cmdline}"
+      sudo sed -i 's/console=\(serial0\|ttyAMA0\|ttyS0\)\(,[^ ]*\)\? //g' "${cmdline}"
+      sudo sed -i 's/console=\(serial0\|ttyAMA0\|ttyS0\)\(,[^ ]*\)\?//' "${cmdline}"
+      changed=1
+    fi
   fi
 
   local svc
@@ -1212,6 +1226,29 @@ ensure_serial_console_disabled() {
       chmod g+rw "${dev}" 2>/dev/null || true
     fi
   done
+
+  local udev_rules="/etc/udev/rules.d/99-bascula-serial.rules"
+  cat <<'EOF' | tee "${udev_rules}" >/dev/null
+KERNEL=="ttyAMA[0-9]",SYMLINK+="serial0",GROUP="dialout",MODE="0660"
+KERNEL=="ttyS[0-9]",ATTRS{serial}=="?*",SYMLINK+="serial0",GROUP="dialout",MODE="0660"
+EOF
+  chmod 0644 "${udev_rules}"
+  if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+    udevadm trigger --subsystem-match=tty >/dev/null 2>&1 || true
+  fi
+
+  if [[ ! -e /dev/serial0 && -e /dev/ttyS0 ]]; then
+    ln -sfn /dev/ttyS0 /dev/serial0
+    log "Creado enlace /dev/serial0 -> /dev/ttyS0"
+    changed=1
+  fi
+  if [[ ! -e /dev/serial0 && -e /dev/ttyAMA0 ]]; then
+    ln -sfn /dev/ttyAMA0 /dev/serial0
+    log "Creado enlace /dev/serial0 -> /dev/ttyAMA0"
+    changed=1
+  fi
+
   if command -v udevadm >/dev/null 2>&1; then
     udevadm trigger --subsystem-match=tty --action=change >/dev/null 2>&1 || true
   fi
