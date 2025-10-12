@@ -431,6 +431,74 @@ DEFAULT_FILTER_WINDOW = 12
 DEFAULT_CALIBRATION_FACTOR = 1.0
 DEFAULT_SERIAL_DEVICE = "/dev/serial0"
 DEFAULT_SERIAL_BAUD = 115200
+_SERIAL_AUTO_TOKENS = {"auto", "detect", "auto_serial", "auto_uart", "auto_usb"}
+_SERIAL_FALLBACKS = [
+    "/dev/serial0",
+    "/dev/ttyAMA0",
+    "/dev/ttyS0",
+    "/dev/ttyUSB0",
+    "/dev/ttyUSB1",
+    "/dev/ttyUSB2",
+    "/dev/ttyACM0",
+    "/dev/ttyACM1",
+    "/dev/ttyACM2",
+]
+
+
+def _serial_env_override() -> Optional[str]:
+    for key in ("BASCULA_SERIAL_DEVICE", "BASCULA_SCALE_SERIAL_DEVICE"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _serial_candidate_paths(preferred: str) -> List[str]:
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _register(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = str(path).strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    if preferred and preferred.strip().lower() not in _SERIAL_AUTO_TOKENS:
+        _register(preferred)
+    for fallback in _SERIAL_FALLBACKS:
+        _register(fallback)
+
+    for usb_path in sorted(Path("/dev").glob("ttyUSB*")):
+        _register(str(usb_path))
+    for acm_path in sorted(Path("/dev").glob("ttyACM*")):
+        _register(str(acm_path))
+    serial_by_id = Path("/dev/serial/by-id")
+    if serial_by_id.exists():
+        for by_id in sorted(serial_by_id.glob("*")):
+            try:
+                resolved = by_id.resolve(strict=False)
+                _register(str(resolved))
+            except OSError:
+                _register(str(by_id))
+    return candidates
+
+
+def _resolve_serial_device(preferred: str) -> tuple[str, List[str]]:
+    permission_issues: List[str] = []
+    for candidate in _serial_candidate_paths(preferred):
+        path = Path(candidate)
+        if not path.exists():
+            continue
+        if os.access(path, os.R_OK | os.W_OK):
+            return str(path), permission_issues
+        if os.access(path, os.R_OK):
+            permission_issues.append(f"{candidate} (sin permiso de escritura)")
+        else:
+            permission_issues.append(f"{candidate} (sin permisos de lectura/escritura)")
+    return preferred, permission_issues
 
 LOG_SCALE = logging.getLogger("bascula.scale")
 LOG_VOICE = logging.getLogger("bascula.voice")
@@ -508,7 +576,31 @@ def _create_scale_service() -> ScaleServiceType:
         service.start()
         return service
 
-    device = str(config.get("serial_device", DEFAULT_SERIAL_DEVICE) or DEFAULT_SERIAL_DEVICE)
+    device_env = _serial_env_override()
+    if device_env:
+        LOG_SCALE.info("Usando dispositivo serie desde entorno (%s)", device_env)
+        resolved = device_env
+    else:
+        configured_device = str(config.get("serial_device", DEFAULT_SERIAL_DEVICE) or DEFAULT_SERIAL_DEVICE)
+        resolved, permission_notes = _resolve_serial_device(configured_device)
+        if resolved != configured_device:
+            LOG_SCALE.info("Dispositivo serie auto-detectado: %s (configurado: %s)", resolved, configured_device)
+            config["serial_device"] = resolved
+            try:
+                _settings_service.save({"serial_device": resolved})
+            except Exception as exc:
+                LOG_SCALE.warning("No se pudo persistir el dispositivo serie auto-detectado (%s): %s", resolved, exc)
+        if permission_notes:
+            LOG_SCALE.warning(
+                "Permisos insuficientes para dispositivos serie: %s. Asegura que el usuario esté en dialout/gpio.",
+                "; ".join(permission_notes),
+            )
+    device = resolved
+    if not Path(device).exists():
+        LOG_SCALE.warning(
+            "El dispositivo serie %s no existe actualmente. Verifica el cableado o ajusta la configuración.",
+            device,
+        )
     baud_value = config.get("serial_baud", DEFAULT_SERIAL_BAUD)
     baud = _coerce_int(baud_value, DEFAULT_SERIAL_BAUD, "serial_baud")
 

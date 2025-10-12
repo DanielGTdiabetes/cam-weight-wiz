@@ -21,6 +21,7 @@ Environment=BACKEND_BASE_URL=http://127.0.0.1:8081
 Environment=BASCULA_MINIWEB_HOST=127.0.0.1
 Environment=BASCULA_MINIWEB_PORT=8080
 Environment=MINIWEB_BASE_URL=http://127.0.0.1:8080
+SupplementaryGroups=audio video render dialout gpio
 ExecStartPre=-/usr/bin/nm-online -s -q -t 25
 ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 02770 /run/bascula
 ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 02770 /run/bascula/captures

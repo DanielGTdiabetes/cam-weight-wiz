@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -28,34 +28,80 @@ SUPPORTED_UPLOAD_EXTENSIONS = {".webm", ".ogg", ".wav", ".mp3"}
 logger = logging.getLogger(__name__)
 
 
+def _iter_env_dirs() -> Iterable[Path]:
+    raw_single = os.getenv("BASCULA_VOICES_DIR") or os.getenv("BASCULA_VOICE_DIR")
+    if raw_single:
+        candidate = Path(raw_single).expanduser()
+        yield candidate
+
+    raw_list = (
+        os.getenv("BASCULA_VOICE_DIRS")
+        or os.getenv("BASCULA_VOICES_DIRS")
+        or os.getenv("PIPER_VOICE_DIRS")
+    )
+    if raw_list:
+        separators = [":", ";"]
+        tokens = [raw_list]
+        for sep in separators:
+            next_tokens: list[str] = []
+            for token in tokens:
+                next_tokens.extend(token.split(sep))
+            tokens = next_tokens
+        for token in tokens:
+            trimmed = token.strip()
+            if trimmed:
+                yield Path(trimmed).expanduser()
+
+
 def _discover_piper() -> list[dict]:
+    home = Path.home()
     bases = [
         Path("/opt/bascula/voices"),
         Path("/opt/bascula/voices/piper"),
+        Path("/opt/bascula/current/voices"),
+        Path("/opt/bascula/current/voices/piper"),
         Path("/opt/piper/models"),
         Path("/usr/local/share/piper/models"),
         Path("/usr/share/piper/models"),
+        home / "voices",
+        home / "voices/piper",
+        home / ".local/share/piper",
+        home / ".local/share/piper/models",
     ]
+    bases.extend(_iter_env_dirs())
     out: list[dict] = []
     seen: set[Path] = set()
     for base in bases:
         if base.is_dir():
-            for model_path in sorted(base.glob("*.onnx")):
+            try:
+                models = sorted(base.glob("*.onnx"))
+            except PermissionError as exc:
+                logger.warning("Sin permisos para leer voces Piper en %s: %s", base, exc)
+                continue
+            for model_path in models:
                 try:
                     resolved = model_path.resolve()
                 except (FileNotFoundError, OSError):
-                    continue
+                    resolved = model_path
                 if resolved in seen:
+                    continue
+                if not resolved.exists():
                     continue
                 seen.add(resolved)
                 json_path = model_path.with_suffix(model_path.suffix + ".json")
                 out.append(
                     {
                         "id": model_path.stem,
+                        "name": model_path.name,
                         "path": str(model_path),
                         "json": str(json_path) if json_path.exists() else None,
                     }
                 )
+    if not out:
+        logger.warning(
+            "No se encontraron modelos Piper. Revisa que las voces estén bajo /opt/bascula/voices/piper "
+            "o exporta BASCULA_VOICES_DIRS."
+        )
     return out
 
 
@@ -73,7 +119,7 @@ def list_voices() -> dict[str, object]:
     response_models = [
         {
             "id": model["id"],
-            "name": Path(model["path"]).name,
+            "name": model.get("name") or Path(model["path"]).name,
             "path": model["path"],
             "json": model["json"],
         }

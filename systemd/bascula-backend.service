@@ -13,6 +13,7 @@ Environment=BASCULA_BACKEND_PORT=8081
 Environment=BASCULA_OCR_ENABLED=true
 Environment=BASCULA_OCR_MODELS_DIR=/opt/rapidocr/models
 EnvironmentFile=-/etc/default/bascula-backend
+SupplementaryGroups=dialout gpio video render
 ExecStart=/opt/bascula/current/.venv/bin/python -m backend.main --host ${BASCULA_BACKEND_HOST} --port ${BASCULA_BACKEND_PORT}
 Restart=always
 RestartSec=1

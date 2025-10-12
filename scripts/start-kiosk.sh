@@ -57,10 +57,12 @@ export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus"
 
 exec "${CHROME_BIN}" \
   --kiosk --noerrdialogs --disable-infobars --no-first-run \
-  --enable-features=OverlayScrollbar,ClipboardUnsanitizedContent \
+  --enable-features=OverlayScrollbar,ClipboardUnsanitizedContent,MediaSessionService \
   --disable-translate --disable-features=TranslateUI \
   --disable-pinch --overscroll-history-navigation=0 \
   --start-fullscreen --window-size=1024,600 --window-position=0,0 \
+  --autoplay-policy=no-user-gesture-required \
+  --use-fake-ui-for-media-stream \
   --user-data-dir=/run/bascula/chrome-profile --disk-cache-dir=/run/bascula/chrome-cache \
   --check-for-update-interval=31536000 \
   "${TARGET_URL}"

@@ -8,11 +8,15 @@ Type=simple
 User=pi
 Group=www-data
 WorkingDirectory=/opt/bascula/current
+Environment=BASCULA_AUDIO_DEVICE=bascula_out
+Environment=BASCULA_MIC_DEVICE=bascula_mix_in
+Environment=BASCULA_SAMPLE_RATE=16000
 EnvironmentFile=-/etc/default/bascula-audio
 Environment=BACKEND_BASE_URL=http://127.0.0.1:8081
 Environment=BASCULA_MINIWEB_HOST=127.0.0.1
 Environment=BASCULA_MINIWEB_PORT=8080
 Environment=MINIWEB_BASE_URL=http://127.0.0.1:8080
+SupplementaryGroups=audio video render dialout gpio
 ExecStart=/opt/bascula/current/.venv/bin/uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
 Restart=always
 RestartSec=1
