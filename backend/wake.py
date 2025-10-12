@@ -545,13 +545,15 @@ class WakeListener:
             return
         reason = self._last_audio_failure_reason or "captura de audio no disponible"
         LOG_WAKE.warning(
-            "[wake] Audio capture unavailable (%s); disabling wake-word",
+            "[wake] Audio capture unavailable (%s); retrying automatically",
             reason,
         )
         with self._state_lock:
             self._errors.append(f"Audio input unavailable: {reason}")
+            self.running = False
         self._audio_failure_reported = True
-        self.set_enabled(False)
+        # Mantener habilitado el listener permite reintentos automáticos cuando
+        # el dispositivo de audio vuelva a estar disponible.
 
     def _process_audio_chunk(self, chunk: bytes, audio_source: _BaseAudioSource) -> None:
         if self._recognizer is None:
