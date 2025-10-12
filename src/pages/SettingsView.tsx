@@ -228,6 +228,7 @@ export const SettingsView = () => {
   const openAiKeyboardEnabled = internalKeyboardEnabled && localClient;
   const nightscoutKeyboardEnabled = internalKeyboardEnabled && localClient;
   const showVoiceSelector = true;
+  const autoAppliedEndpointsRef = useRef(false);
 
   useEffect(() => {
     const keysToForce: Array<keyof FeatureFlags> = [
@@ -701,6 +702,34 @@ export const SettingsView = () => {
     },
     [setApiBaseUrl, toast]
   );
+
+  useEffect(() => {
+    if (autoAppliedEndpointsRef.current || remoteLocked) {
+      return;
+    }
+
+    const looksLocal = (value: string | undefined) =>
+      !value || /^https?:\/\/(localhost|127\.0\.0\.1)/i.test(value);
+
+    const apiIsLocal = looksLocal(apiUrl);
+    const wsIsLocal = !wsUrl || /^wss?:\/\/(localhost|127\.0\.0\.1)/i.test(wsUrl);
+
+    let targetApi = "";
+    let targetWs = "";
+    if (suggestedApiFromBrowserHost && apiIsLocal) {
+      targetApi = suggestedApiFromBrowserHost;
+      targetWs = suggestedWsFromBrowserHost || suggestedWsFromNetwork || wsUrl;
+    } else if (suggestedApiFromNetwork && apiIsLocal) {
+      targetApi = suggestedApiFromNetwork;
+      targetWs = suggestedWsFromNetwork || wsUrl;
+    }
+
+    if (targetApi && (apiIsLocal || wsIsLocal)) {
+      const resolvedWs = targetWs || (targetApi.startsWith("https") ? targetApi.replace(/^https/, "wss") : targetApi.replace(/^http/, "ws"));
+      handleApplyEndpointTemplate({ api: targetApi, ws: resolvedWs });
+      autoAppliedEndpointsRef.current = true;
+    }
+  }, [apiUrl, wsUrl, suggestedApiFromBrowserHost, suggestedWsFromBrowserHost, suggestedApiFromNetwork, suggestedWsFromNetwork, handleApplyEndpointTemplate, remoteLocked]);
 
   const handleLegacyNetworkDialogOpen = () => {
     setLegacyNetworkDialogOpen(true);
