@@ -1808,7 +1808,7 @@ pcm.bascula_out_dmix {
     slave {
         pcm "${playback_hw}"
         channels 2
-        rate 48000
+        rate 44100
         format S16_LE
     }
 }
@@ -1820,7 +1820,18 @@ ctl.bascula_out {
 
 pcm.bascula_mix_in {
     type plug
-    slave.pcm "${capture_hw}"
+    slave.pcm "bascula_mix_in_raw"
+}
+
+pcm.bascula_mix_in_raw {
+    type dsnoop
+    ipc_key 8675310
+    slave {
+        pcm "${capture_hw}"
+        channels 1
+        rate 16000
+        format S16_LE
+    }
 }
 
 ctl.bascula_mix_in {

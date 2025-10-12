@@ -43,7 +43,7 @@ from rapidfuzz import fuzz
 
 LOG_WAKE = logging.getLogger("bascula.wake")
 
-DEFAULT_MIC_DEVICE = "hw:0,0"
+DEFAULT_MIC_DEVICE = os.getenv("BASCULA_MIC_DEFAULT", "bascula_mix_in")
 MIC_DEVICE_ENV = "BASCULA_MIC_DEVICE"
 SAMPLE_RATE_ENV = "BASCULA_SAMPLE_RATE"
 
@@ -1013,4 +1013,3 @@ async def wake_events(request: Request) -> StreamingResponse:
 async def wake_simulate(payload: WakeSimulatePayload) -> Dict[str, Any]:
     listener = _get_listener()
     return listener.simulate(payload.text)
-
