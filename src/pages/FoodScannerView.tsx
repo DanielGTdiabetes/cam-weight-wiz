@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Trash2, Check, X, Barcode, Syringe, Loader2, Image as ImageIcon } from "lucide-react";
+import { Camera, Trash2, Check, X, Barcode, Syringe, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,7 @@ export const FoodScannerView = () => {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState(false);
   const [prefilledBarcode, setPrefilledBarcode] = useState<string | undefined>(undefined);
+  const [isRemoteCapturing, setIsRemoteCapturing] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -183,7 +184,7 @@ export const FoodScannerView = () => {
 
   const startCamera = useCallback(async () => {
     if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setCameraError("Este dispositivo no permite acceso a la cámara desde el navegador");
+      setCameraError("Este dispositivo no permite acceso directo a la cámara. Se utilizará la cámara integrada al analizar.");
       return;
     }
 
@@ -200,7 +201,7 @@ export const FoodScannerView = () => {
       setIsCameraActive(true);
     } catch (error) {
       logger.error("Failed to start camera", { error });
-      setCameraError("No se pudo iniciar la cámara. Revisa permisos o intenta con otro navegador.");
+      setCameraError("No se pudo iniciar la cámara del navegador. Revisa permisos o continúa usando la cámara integrada al analizar.");
     }
   }, []);
 
@@ -234,6 +235,43 @@ export const FoodScannerView = () => {
     return await new Promise<Blob | null>((resolve) => {
       canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.92);
     });
+  }, []);
+
+  const captureRemotePhoto = useCallback(async (): Promise<{ blob: Blob; previewUrl: string } | null> => {
+    try {
+      setIsRemoteCapturing(true);
+      const response = await fetch("/api/camera/capture-to-file", { method: "POST" });
+      if (!response.ok) {
+        throw new Error(`capture_failed_${response.status}`);
+      }
+      const payload = (await response.json()) as { path?: string | null };
+      const capturePath = payload?.path;
+      if (typeof capturePath !== "string" || capturePath.trim().length === 0) {
+        throw new Error("capture_missing_path");
+      }
+      const trimmedPath = capturePath.trim();
+      const origin =
+        typeof window !== "undefined" && window.location?.origin
+          ? window.location.origin
+          : "";
+      const absoluteUrl =
+        trimmedPath.startsWith("http://") || trimmedPath.startsWith("https://")
+          ? trimmedPath
+          : `${origin}${trimmedPath.startsWith("/") ? "" : "/"}${trimmedPath}`;
+      const bustUrl = `${absoluteUrl}${absoluteUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      const imageResponse = await fetch(bustUrl, { cache: "no-store" });
+      if (!imageResponse.ok) {
+        throw new Error(`image_fetch_failed_${imageResponse.status}`);
+      }
+      const blob = await imageResponse.blob();
+      setPreviewUrl(bustUrl);
+      return { blob, previewUrl: bustUrl };
+    } catch (error) {
+      logger.error("Remote camera capture failed", { error });
+      return null;
+    } finally {
+      setIsRemoteCapturing(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -309,9 +347,16 @@ export const FoodScannerView = () => {
     }
 
     if (!blob) {
+      const remoteCapture = await captureRemotePhoto();
+      if (remoteCapture) {
+        blob = remoteCapture.blob;
+      }
+    }
+
+    if (!blob) {
       toast({
         title: "Sin imagen",
-        description: "Activa la cámara o sube una foto del alimento para analizarlo",
+        description: "No se pudo obtener una foto. Revisa la cámara integrada o vuelve a intentarlo.",
         variant: "destructive",
       });
       return;
@@ -461,12 +506,13 @@ export const FoodScannerView = () => {
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 onClick={handleAnalyze}
-                disabled={isScanning}
+                disabled={isScanning || isRemoteCapturing}
                 className="min-w-[180px]"
               >
-                {isScanning ? (
+                {isScanning || isRemoteCapturing ? (
                   <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Analizando…
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    {isRemoteCapturing ? "Capturando..." : "Analizando…"}
                   </>
                 ) : (
                   <>
