@@ -63,6 +63,37 @@ CHATGPT_MODELS = [
 ]
 
 
+ASSISTANT_SYSTEM_PROMPT = (
+    "Eres Basculin, la mascota conversacional de la Báscula Digital Pro. "
+    "Hablas con cariño, guías paso a paso la preparación de platos y propones ideas nuevas. "
+    "Además actúas como nutricionista experta: ayudas a contar hidratos, grasas y proteínas y sugieres ajustes equilibrados, "
+    "siempre recordando que la persona debe consultar a profesionales sanitarios antes de cambios importantes. "
+    "Responde SIEMPRE con un JSON con esta forma exacta: {\"reply\": \"texto corto en español\", \"mood\": \"happy|normal|worried|alert|sleeping\", \"speak\": true/false}. "
+    "Nunca añadas texto fuera del JSON ni otras claves. El campo reply debe ser claro, amable y de máximo 220 caracteres."
+)
+
+ALLOWED_ASSISTANT_MOODS = {"normal", "happy", "worried", "alert", "sleeping"}
+
+
+def _format_assistant_context(context: Optional[Dict[str, Any]]) -> str:
+    if not context:
+        return ""
+    lines: List[str] = []
+    for key, value in context.items():
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            try:
+                value_str = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value_str = str(value)
+        else:
+            value_str = str(value)
+        if value_str.strip():
+            lines.append(f"{key}: {value_str}")
+    return "\n".join(lines)
+
+
 def get_chatgpt_api_key() -> Optional[str]:
     """Return the first available ChatGPT/OpenAI API key."""
     potential_keys = [
@@ -940,6 +971,11 @@ class RecipeNext(BaseModel):
     currentStep: int
     userResponse: Optional[str] = None
 
+
+class AssistantChatRequest(BaseModel):
+    text: str
+    context: Optional[Dict[str, Any]] = None
+
 # ============= CONFIG HELPERS =============
 
 
@@ -1708,6 +1744,51 @@ async def speak_text(data: SpeakRequest):
         return {"success": True, "fallback": "espeak"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(payload: AssistantChatRequest) -> Dict[str, Any]:
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text_required")
+
+    if not get_chatgpt_api_key():
+        raise HTTPException(status_code=503, detail="chatgpt_not_configured")
+
+    context_text = _format_assistant_context(payload.context)
+    user_parts = [f"Usuario: {text}"]
+    if context_text:
+        user_parts.append("Contexto adicional:")
+        user_parts.append(context_text)
+
+    messages = [
+        {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n".join(user_parts)},
+    ]
+
+    raw_response = await invoke_chatgpt(messages, temperature=0.55)
+    if not raw_response:
+        raise HTTPException(status_code=503, detail="assistant_unavailable")
+
+    parsed = parse_chatgpt_json(raw_response)
+
+    if parsed and isinstance(parsed, dict):
+        reply_text = str(parsed.get("reply", "")).strip()
+        mood = str(parsed.get("mood", "normal")).lower()
+        speak_flag = bool(parsed.get("speak", True))
+    else:
+        reply_text = raw_response.strip()
+        mood = "normal"
+        speak_flag = True
+
+    if not reply_text:
+        reply_text = "Lo siento, no entendí la petición."
+
+    if mood not in ALLOWED_ASSISTANT_MOODS:
+        mood = "normal"
+
+    return {"ok": True, "reply": reply_text, "mood": mood, "speak": speak_flag}
+
 
 # ============= RECIPES (AI) =============
 

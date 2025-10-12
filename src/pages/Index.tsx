@@ -23,6 +23,8 @@ import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useAudioPref } from "@/state/useAudio";
 
+type BasculinMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
+
 const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
   const [showTimerDialog, setShowTimerDialog] = useState(false);
@@ -37,7 +39,7 @@ const Index = () => {
     { message: string; type: "info" | "warning" | "success" | "error" } | null
   >(null);
   const [mascoMsg, setMascoMsg] = useState<string | undefined>();
-  const [basculinMood, setBasculinMood] = useState<"normal" | "happy" | "worried" | "alert" | "sleeping">("normal");
+  const [basculinMood, setBasculinMood] = useState<BasculinMood>("normal");
   const [wakeWordEnabled, setWakeWordEnabled] = useState(() => storage.getSettings().wakeWordEnabled ?? false);
   const [wakeStatus, setWakeStatus] = useState<WakeStatus | null>(null);
   const [wakeListening, setWakeListening] = useState(false);
@@ -47,6 +49,26 @@ const Index = () => {
   const wakeReconnectTimeoutRef = useRef<number | null>(null);
   const scaleDecimals = useScaleDecimals();
   const { voiceEnabled: isVoiceActive, setEnabled: setVoiceEnabled } = useAudioPref();
+
+  const speakResponse = useCallback(
+    async (text: string) => {
+      if (!isVoiceActive) {
+        return;
+      }
+      const trimmed = text.trim();
+      if (!trimmed) {
+        return;
+      }
+      const settings = storage.getSettings();
+      const voiceId = typeof settings.voiceId === "string" && settings.voiceId.trim().length > 0 ? settings.voiceId : undefined;
+      try {
+        await api.speak(trimmed, voiceId);
+      } catch (error) {
+        console.error("Assistant speech playback failed", error);
+      }
+    },
+    [isVoiceActive]
+  );
 
   // Monitor glucose if diabetes mode is enabled
   const glucoseData = useGlucoseMonitor(diabetesMode);
@@ -299,21 +321,39 @@ const Index = () => {
           return;
         }
         case "smalltalk": {
-          const responses = [
-            "Aquí estoy, ¿qué necesitas?",
-            "Te escucho.",
-            "Hola, ¿en qué te ayudo?",
-          ];
-          const message = responses[Math.floor(Math.random() * responses.length)];
-          setMascoMsg(message);
-          setBasculinMood("happy");
+          try {
+            setBasculinMood("alert");
+            const response = await api.assistantChat(event.text ?? "", {
+              view: currentView,
+              diabetesMode,
+            });
+            const replyText = (response.reply || "").trim() || "Aquí estoy, ¿qué necesitas?";
+            const mood = (response.mood || "happy").toLowerCase();
+            setMascoMsg(replyText);
+            const moodMap: Record<string, BasculinMood> = {
+              happy: "happy",
+              worried: "worried",
+              alert: "alert",
+              sleeping: "sleeping",
+              normal: "normal",
+            };
+            setBasculinMood(moodMap[mood] ?? "happy");
+            if (response.speak !== false) {
+              await speakResponse(replyText);
+            }
+          } catch (error) {
+            console.error("Assistant chat failed", error);
+            const fallback = "Aquí estoy, ¿qué necesitas?";
+            setMascoMsg(fallback);
+            setBasculinMood("happy");
+          }
           return;
         }
         default:
           return;
       }
     },
-    [handleTimerStart, scaleDecimals]
+    [handleTimerStart, scaleDecimals, currentView, diabetesMode, speakResponse]
   );
 
   useEffect(() => {

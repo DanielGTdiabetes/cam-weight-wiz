@@ -180,6 +180,15 @@ export interface WakeEvent {
   simulated?: boolean;
 }
 
+export type AssistantMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
+
+export interface AssistantChatResponse {
+  ok: boolean;
+  reply: string;
+  mood?: AssistantMood;
+  speak?: boolean;
+}
+
 export type MiniwebStatus = {
   ok: boolean;
   mode: "ap" | "kiosk" | "offline";
@@ -356,6 +365,13 @@ class ApiService {
 
   async simulateWake(text: string): Promise<WakeEvent> {
     return apiWrapper.post<WakeEvent>('/api/voice/wake/simulate', { text });
+  }
+
+  async assistantChat(text: string, context?: Record<string, unknown>): Promise<AssistantChatResponse> {
+    return apiWrapper.post<AssistantChatResponse>('/api/assistant/chat', {
+      text,
+      context,
+    });
   }
 
   // Recipe endpoints
