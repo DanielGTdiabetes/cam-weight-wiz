@@ -16,6 +16,7 @@ from fastapi import (
     Form,
 )
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
@@ -46,6 +47,7 @@ import grp
 
 from backend.audio_utils import play_audio_file, play_pcm_audio
 from backend.audio import router as audio_router
+from backend.camera import router as camera_router
 from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
@@ -53,6 +55,8 @@ from backend.routers import food as food_router
 from backend.app.services.settings_service import get_settings_service
 from backend.voice import list_voices as list_piper_voices, router as voice_router
 from backend.wake import router as wake_router, init_wake_if_enabled
+
+CAPTURES_DIR = Path(os.getenv("BASCULA_CAPTURES_DIR", "/run/bascula/captures"))
 
 
 CHATGPT_MODELS = [
@@ -1207,6 +1211,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Bascula Backend API", version="1.0", lifespan=lifespan)
 
+try:
+    CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+app.mount("/captures", StaticFiles(directory=str(CAPTURES_DIR)), name="captures")
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -1220,6 +1230,7 @@ init_wake_if_enabled(app)
 
 app.include_router(voice_router)
 app.include_router(wake_router)
+app.include_router(camera_router)
 app.include_router(audio_router)
 app.include_router(food_router.router, prefix="/api/food", tags=["food"])
 

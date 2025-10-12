@@ -36,12 +36,18 @@ def _camera_error_response(status_code: int, reason: str, message: str):
 
 
 def _capture_payload(size: int, full: bool) -> Dict[str, object]:
-    return {"ok": True, "url": CAPTURE_URL, "size": size, "full": bool(full)}
+    return {
+        "ok": True,
+        "url": CAPTURE_URL,
+        "path": CAPTURE_URL,
+        "size": size,
+        "full": bool(full),
+    }
 
 
 def _last_capture_metadata() -> Dict[str, object]:
     size = _capture_size()
-    return {"ok": size > 0, "url": CAPTURE_URL, "size": size}
+    return {"ok": size > 0, "url": CAPTURE_URL, "path": CAPTURE_URL, "size": size}
 
 
 def _capture_size() -> int:
@@ -67,6 +73,31 @@ def camera_info():
         "PixelArraySize": properties.get("PixelArraySize"),
     }
     response["lastCapture"] = _last_capture_metadata()
+    return response
+
+
+@router.get("/status")
+def camera_status():
+    metadata = _last_capture_metadata()
+    try:
+        service = get_camera_service()
+        properties = service.get_camera_info()
+    except CameraUnavailableError as exc:
+        payload = {
+            "ok": False,
+            "error": "camera_unavailable",
+            "detail": str(exc),
+            "lastCapture": metadata,
+        }
+        return JSONResponse(payload, status_code=200)
+
+    response = {
+        "ok": True,
+        "model": properties.get("Model"),
+        "rotation": properties.get("Rotation"),
+        "pixelArraySize": properties.get("PixelArraySize"),
+        "lastCapture": metadata,
+    }
     return response
 
 
