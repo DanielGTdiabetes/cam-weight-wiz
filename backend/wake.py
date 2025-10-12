@@ -617,7 +617,8 @@ class WakeListener:
             return
 
         now = time.monotonic()
-        if now < self._cooldown_until:
+        in_conversation = now < self._conversation_until
+        if not in_conversation and now < self._cooldown_until:
             return
 
         score = fuzz.partial_ratio(WAKE_WORD, normalized)
