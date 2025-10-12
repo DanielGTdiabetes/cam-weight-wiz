@@ -1829,8 +1829,6 @@ pcm.bascula_mix_in_raw {
     slave {
         pcm "${capture_hw}"
         channels 1
-        rate 16000
-        format S16_LE
     }
 }
 

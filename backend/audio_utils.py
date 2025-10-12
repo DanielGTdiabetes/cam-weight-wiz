@@ -10,15 +10,18 @@ from typing import Optional
 
 LOG_AUDIO = logging.getLogger("bascula.audio")
 
-DEFAULT_AUDIO_DEVICE = "hw:1,0"
+DEFAULT_AUDIO_DEVICE = os.getenv("BASCULA_AUDIO_DEVICE_DEFAULT", "bascula_out")
 AUDIO_DEVICE_ENV = "BASCULA_AUDIO_DEVICE"
-PLAYBACK_SAMPLE_RATE = 44_100
-PLAYBACK_CHANNELS = 2
-PLAYBACK_FORMAT = "S16_LE"
+PLAYBACK_SAMPLE_RATE = int(os.getenv("BASCULA_PLAYBACK_RATE", "48000"))
+PLAYBACK_CHANNELS = int(os.getenv("BASCULA_PLAYBACK_CHANNELS", "2"))
+PLAYBACK_FORMAT = os.getenv("BASCULA_PLAYBACK_FORMAT", "S16_LE")
 
 
 def _get_audio_device() -> str:
-    return os.getenv(AUDIO_DEVICE_ENV, DEFAULT_AUDIO_DEVICE)
+    device = os.getenv(AUDIO_DEVICE_ENV)
+    if device:
+        return device
+    return DEFAULT_AUDIO_DEVICE
 
 
 def is_playback_available() -> bool:
