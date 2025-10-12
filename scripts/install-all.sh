@@ -916,7 +916,7 @@ install_system_dependencies() {
     python3 python3-venv python3-pip python3-dev \
     python3-libcamera python3-picamera2 python3-numpy python3-simplejpeg \
     libgomp1 libzbar0 libcap-dev libatlas-base-dev libopenjp2-7 \
-    ffmpeg git rsync curl jq unzip nginx alsa-utils libcamera-apps espeak-ng iproute2 \
+    ffmpeg git rsync curl jq unzip nginx alsa-utils libcamera-apps espeak-ng iproute2 libportaudio2 \
     xserver-xorg xinit openbox unclutter x11-xserver-utils upower fonts-dejavu-core
 
   ensure_package_alternative "chromium" chromium-browser chromium
@@ -1396,6 +1396,10 @@ ensure_python_venv() {
     "shapely!=2.0.4,>=1.7.1"
   if [[ -f "${CURRENT_LINK}/requirements-voice.txt" ]]; then
     pip install -r "${CURRENT_LINK}/requirements-voice.txt" --no-deps
+  fi
+  if ! python -c "import vosk" >/dev/null 2>&1; then
+    log_warn "vosk no disponible tras requirements-voice; instalando wheel vosk==0.3.45"
+    pip install --no-cache-dir "vosk==0.3.45"
   fi
   if ! python -c "import pyzbar" >/dev/null 2>&1; then
     echo '[WARN] pyzbar no disponible'
