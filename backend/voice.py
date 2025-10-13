@@ -11,6 +11,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
+import threading
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
@@ -27,7 +28,19 @@ SUPPORTED_UPLOAD_EXTENSIONS = {".webm", ".ogg", ".wav", ".mp3"}
 
 logger = logging.getLogger(__name__)
 
-_PLAYBACK_LOCK = asyncio.Lock()
+_PLAYBACK_LOCKS: dict[int, asyncio.Lock] = {}
+_PLAYBACK_LOCKS_GUARD = threading.Lock()
+
+
+def _get_playback_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    with _PLAYBACK_LOCKS_GUARD:
+        lock = _PLAYBACK_LOCKS.get(loop_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _PLAYBACK_LOCKS[loop_id] = lock
+    return lock
 
 
 def _iter_env_dirs() -> Iterable[Path]:
@@ -211,7 +224,8 @@ async def _play_audio_locally(path: Path) -> None:
     if not _is_aplay_available():
         return
     loop = asyncio.get_running_loop()
-    async with _PLAYBACK_LOCK:
+    lock = _get_playback_lock()
+    async with lock:
         await loop.run_in_executor(None, play_audio_file, path)
 
 
