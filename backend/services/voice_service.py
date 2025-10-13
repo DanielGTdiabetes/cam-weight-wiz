@@ -129,7 +129,8 @@ class VoiceService:
         """Finalize push-to-talk capture and return the transcript."""
         with self._state_lock:
             if not self.listen_enabled:
-                return PttResult(ok=False, reason="not-listening")
+                logger.info("VOICE[PTT] stop requested but already idle")
+                return PttResult(ok=True, transcript=self._last_transcript or "")
             logger.info("VOICE[PTT] stop requested")
             self.listen_enabled = False
             self._capture_stop.set()
@@ -322,15 +323,6 @@ class VoiceService:
     def reload_settings(self, settings_provider: SettingsProvider) -> None:
         self._settings_provider = settings_provider
 
-    def get_last_transcript(self) -> Optional[str]:
-        return self._last_transcript
-
-
-# Shared singleton ----------------------------------------------------
-voice_service = VoiceService()
-
-
-__all__ = ["voice_service", "VoiceService", "PttResult"]
     def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self._loop = loop
 
@@ -342,3 +334,13 @@ __all__ = ["voice_service", "VoiceService", "PttResult"]
             asyncio.run_coroutine_threadsafe(self.say(text, voice=voice), self._loop)
         except Exception:
             logger.exception("VOICE failed to enqueue speech task")
+
+    def get_last_transcript(self) -> Optional[str]:
+        return self._last_transcript
+
+
+# Shared singleton ----------------------------------------------------
+voice_service = VoiceService()
+
+
+__all__ = ["voice_service", "VoiceService", "PttResult"]
