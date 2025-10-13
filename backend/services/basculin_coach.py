@@ -187,9 +187,16 @@ class BasculinCoach:
             return
         logger.info("COACH[speak] %s", text)
         try:
-            voice_service.enqueue_say(text)
+            asyncio.run(voice_service.say(text))
+        except RuntimeError:
+            # Fallback if event loop already running in this thread
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(voice_service.say(text))
+            finally:
+                loop.close()
         except Exception:  # pragma: no cover - defensive
-            logger.exception("COACH failed to enqueue speech text")
+            logger.exception("COACH failed to speak text")
 
 
 basculin_coach = BasculinCoach()

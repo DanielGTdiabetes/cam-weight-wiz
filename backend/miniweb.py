@@ -3605,8 +3605,6 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         LOG_SCALE.warning("No se pudo activar AP en arranque: %s", exc)
 
-    loop = asyncio.get_running_loop()
-    voice_service.set_loop(loop)
     basculin_coach.start()
     try:
         await init_scale()
@@ -3728,12 +3726,11 @@ async def api_scale_events(request: Request) -> StreamingResponse:
     async def event_stream() -> AsyncGenerator[str, None]:
         LOG_SCALE.info("[sse] client connected: %s", client_host)
         last_sent_value: Optional[float] = None
-        last_stable: Optional[bool] = None
         has_sent_initial = False
         last_emit = 0.0
         last_keepalive = time.monotonic()
-        hysteresis = 2.0  # gramos de variación mínima
-        min_interval = 0.08
+        hysteresis = 10.0  # 10 g ≈ 0.01 kg
+        min_interval = 0.15
 
         try:
             while True:
@@ -3743,7 +3740,6 @@ async def api_scale_events(request: Request) -> StreamingResponse:
                 _, value, ts_value = _read_scale_snapshot()
                 ts_str = ts_value.isoformat() if ts_value else None
                 now = time.monotonic()
-                stable_flag = data.get("stable") if isinstance(data, dict) else None
 
                 should_emit = False
                 if not has_sent_initial:
@@ -3754,32 +3750,12 @@ async def api_scale_events(request: Request) -> StreamingResponse:
                     should_emit = True
                 else:
                     should_emit = abs(value - last_sent_value) >= hysteresis
-                if stable_flag is not None and stable_flag != last_stable:
-                    should_emit = True
 
                 if should_emit and now - last_emit >= min_interval:
-                    serialized_value: Optional[float]
-                    if value is None:
-                        serialized_value = None
-                    elif isinstance(value, (int, float)):
-                        serialized_value = float(value)
-                    else:
-                        try:
-                            serialized_value = float(value)
-                        except (TypeError, ValueError):
-                            serialized_value = None
-
-                    payload = json.dumps(
-                        {
-                            "value": serialized_value,
-                            "ts": ts_str,
-                            "stable": stable_flag if isinstance(stable_flag, bool) else None,
-                        }
-                    )
+                    payload = json.dumps({"value": value, "ts": ts_str})
                     yield "event: weight\n"
                     yield f"data: {payload}\n\n"
                     last_sent_value = value
-                    last_stable = stable_flag if isinstance(stable_flag, bool) else last_stable
                     has_sent_initial = True
                     last_emit = now
                     last_keepalive = now
