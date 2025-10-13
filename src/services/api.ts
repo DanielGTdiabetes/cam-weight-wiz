@@ -150,37 +150,6 @@ export interface IntegrationTestResponse {
   status?: number;
 }
 
-export interface WakeIntent {
-  kind:
-    | "timer"
-    | "weight_status"
-    | "tare"
-    | "recipe_start"
-    | "calibrate"
-    | "smalltalk"
-    | "no_input";
-  seconds?: number;
-  name?: string;
-}
-
-export interface WakeStatus {
-  enabled: boolean;
-  running: boolean;
-  last_wake_ts?: string | null;
-  wake_count?: number;
-  intent_count?: number;
-  errors?: string[];
-  backend?: string | null;
-}
-
-export interface WakeEvent {
-  type: "wake" | "intent";
-  ts: number;
-  text?: string;
-  intent?: WakeIntent;
-  simulated?: boolean;
-}
-
 export type AssistantMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
 
 export interface AssistantChatResponse {
@@ -352,20 +321,13 @@ class ApiService {
     }
   }
 
-  async getWakeStatus(): Promise<WakeStatus> {
-    return apiWrapper.get<WakeStatus>('/api/voice/wake/status');
+  async startVoicePtt(): Promise<void> {
+    await apiWrapper.post('/api/voice/ptt/start');
   }
 
-  async enableWake(): Promise<void> {
-    await apiWrapper.post('/api/voice/wake/enable');
-  }
-
-  async disableWake(): Promise<void> {
-    await apiWrapper.post('/api/voice/wake/disable');
-  }
-
-  async simulateWake(text: string): Promise<WakeEvent> {
-    return apiWrapper.post<WakeEvent>('/api/voice/wake/simulate', { text });
+  async stopVoicePtt(): Promise<{ transcript?: string }> {
+    const response = await apiWrapper.post<{ ok: boolean; transcript?: string }>('/api/voice/ptt/stop');
+    return { transcript: response.transcript };
   }
 
   async assistantChat(text: string, context?: Record<string, unknown>): Promise<AssistantChatResponse> {

@@ -67,7 +67,6 @@ export interface AppSettings {
   // UI settings
   isVoiceActive: boolean;
   voiceId?: string;
-  wakeWordEnabled: boolean;
   theme: 'dark' | 'light';
   timerAlarmSoundEnabled: boolean;
   timerVoiceAnnouncementsEnabled: boolean;
@@ -374,7 +373,6 @@ const DEFAULT_SETTINGS: AppSettings = {
   hyperAlarm: 180,
   isVoiceActive: true,
   voiceId: undefined,
-  wakeWordEnabled: false,
   theme: 'dark',
   timerAlarmSoundEnabled: true,
   timerVoiceAnnouncementsEnabled: false,

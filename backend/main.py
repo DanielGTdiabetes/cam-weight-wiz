@@ -55,6 +55,7 @@ from backend.routers import food as food_router
 from backend.app.services.settings_service import get_settings_service
 from backend.voice import list_voices as list_piper_voices, router as voice_router
 from backend.wake import router as wake_router, init_wake_if_enabled
+from backend.core.events import coach_event_bus, GlucoseUpdateEvent
 
 CAPTURES_DIR = Path(os.getenv("BASCULA_CAPTURES_DIR", "/run/bascula/captures"))
 
@@ -1642,9 +1643,22 @@ async def get_glucose():
             
             if data and len(data) > 0:
                 entry = data[0]
+                raw_glucose = entry.get("sgv", 0)
+                try:
+                    glucose_value = float(raw_glucose)
+                except (TypeError, ValueError):
+                    glucose_value = 0.0
+                trend_value = entry.get("direction")
+                normalized_trend = trend_value.lower() if isinstance(trend_value, str) else None
+                coach_event_bus.publish(
+                    GlucoseUpdateEvent(
+                        mgdl=glucose_value,
+                        trend=normalized_trend,
+                    )
+                )
                 return {
-                    "glucose": entry.get("sgv", 0),
-                    "trend": entry.get("direction", "Flat").lower(),
+                    "glucose": glucose_value,
+                    "trend": normalized_trend or "flat",
                     "timestamp": entry.get("dateString", "")
                 }
             else:

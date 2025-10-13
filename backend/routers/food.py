@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import math
 import re
 import time
 from dataclasses import dataclass
@@ -45,13 +44,13 @@ from backend.ocr_service import (
 )
 
 from backend.utils_urls import get_backend_base_url, get_miniweb_base_url
+from backend.core.events import coach_event_bus, FoodScannedEvent, NutritionUpdatedEvent
 
 SCAN_DIR = Path("/var/lib/bascula/scans")
 BACKEND_BASE_URL = get_backend_base_url()
 MINIWEB_BASE_URL = get_miniweb_base_url()
 CAMERA_CAPTURE_ENDPOINT = f"{MINIWEB_BASE_URL}/api/camera/capture-to-file"
 SCALE_WEIGHT_ENDPOINT = f"{MINIWEB_BASE_URL}/api/scale/weight"
-TTS_ENDPOINT = f"{MINIWEB_BASE_URL}/api/voice/tts/say"
 OPENFOODFACTS_URL = "https://world.openfoodfacts.org/api/v2/product/{barcode}.json"
 
 router = APIRouter()
@@ -337,22 +336,18 @@ def _save_results(image: Image.Image, metadata: Dict[str, Any], timestamp: str) 
     return saved
 
 
-def _maybe_speak(product: Dict[str, Any], estimates: Optional[Dict[str, Optional[float]]]) -> None:
-    name = product.get("name") or "producto"
-    brand = product.get("brand")
-    kcal = estimates.get("kcal") if isinstance(estimates, dict) else None
-
-    message = f"Producto detectado: {name}"
-    if brand:
-        message += f" ({brand})"
-    if isinstance(kcal, (int, float)) and not math.isnan(kcal):
-        message += f". {kcal:.0f} kilocalorías estimadas."
-
-    try:
-        requests.post(TTS_ENDPOINT, params={"text": message}, timeout=2)
-    except Exception:
-        # TTS is optional; ignore failures.
-        pass
+def _notify_coach(product: Dict[str, Any], nutrients: Dict[str, Optional[float]]) -> None:
+    name = product.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return
+    normalized = name.strip()
+    filtered_nutrients = {key: float(value) for key, value in nutrients.items() if isinstance(value, (int, float))}
+    coach_event_bus.publish(
+        FoodScannedEvent(
+            name=normalized,
+            nutrients=filtered_nutrients,
+        )
+    )
 
 
 @router.post("/scan")
@@ -412,7 +407,23 @@ def scan(request: ScanRequest) -> Dict[str, Any]:
     response_payload["saved"] = saved_paths
 
     if nutrition and nutrition.product and nutrition.product.get("name"):
-        _maybe_speak(nutrition.product, estimates)
+        _notify_coach(nutrition.product, nutrients)
+        if estimates:
+            totals_payload: Dict[str, float] = {}
+            kcal_estimate = estimates.get("kcal")
+            if isinstance(kcal_estimate, (int, float)):
+                totals_payload["kcal"] = float(kcal_estimate)
+            protein_estimate = estimates.get("protein_g")
+            if isinstance(protein_estimate, (int, float)):
+                totals_payload["protein"] = float(protein_estimate)
+            fat_estimate = estimates.get("fat_g")
+            if isinstance(fat_estimate, (int, float)):
+                totals_payload["fat"] = float(fat_estimate)
+            carbs_estimate = estimates.get("carbs_g")
+            if isinstance(carbs_estimate, (int, float)):
+                totals_payload["carbs"] = float(carbs_estimate)
+            if totals_payload:
+                coach_event_bus.publish(NutritionUpdatedEvent(total=totals_payload))
 
     return response_payload
 

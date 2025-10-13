@@ -7,6 +7,12 @@ Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 - UI kiosk en Chromium que se muestra al arrancar (`bascula-ui.service`).
 - Scripts de instalación idempotentes y unidades systemd listos para Raspberry Pi OS Bookworm Lite (64-bit).
 
+## Voz contextual y Push-to-Talk
+
+- Basculín comenta automáticamente eventos relevantes (escaneos, nutrición, glucosa, pesadas o tara) sin escuchar de fondo ni requerir “Hey Basculín”.
+- En el asistente de recetas el micrófono funciona en modo push‑to‑talk: mantén pulsado el botón para hablar y suelta para enviar la transcripción.
+- La preferencia **Comentarios hablados** en Ajustes activa o silencia la locución; aunque esté desactivada, los textos que Basculín diría se muestran en pantalla.
+
 ## Puertos y variables de entorno por defecto
 
 - **Miniweb**: expone la API local en `http://127.0.0.1:8080`.

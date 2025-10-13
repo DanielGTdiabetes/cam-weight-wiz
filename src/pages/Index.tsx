@@ -16,32 +16,14 @@ import { Clock, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
 import { networkDetector, NetworkStatus } from "@/services/networkDetector";
-import { api, type WakeEvent, type WakeStatus } from "@/services/api";
+import { api } from "@/services/api";
 import { apiWrapper } from "@/services/apiWrapper";
-import { storage, type AppSettings } from "@/services/storage";
+import { storage } from "@/services/storage";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useAudioPref } from "@/state/useAudio";
 
 type BasculinMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
-
-const normalizeWakeText = (value: string | undefined | null): string => {
-  if (!value) {
-    return "";
-  }
-  let normalized = value;
-  try {
-    normalized = normalized.normalize("NFD");
-  } catch {
-    normalized = value;
-  }
-  return normalized
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-};
 
 const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
@@ -58,13 +40,7 @@ const Index = () => {
   >(null);
   const [mascoMsg, setMascoMsg] = useState<string | undefined>();
   const [basculinMood, setBasculinMood] = useState<BasculinMood>("normal");
-  const [wakeWordEnabled, setWakeWordEnabled] = useState(() => storage.getSettings().wakeWordEnabled ?? false);
-  const [wakeStatus, setWakeStatus] = useState<WakeStatus | null>(null);
-  const [wakeListening, setWakeListening] = useState(false);
   const previousNetworkStatus = useRef<NetworkStatus | null>(null);
-  const wakeOverlayTimeoutRef = useRef<number | null>(null);
-  const wakeEventSourceRef = useRef<EventSource | null>(null);
-  const wakeReconnectTimeoutRef = useRef<number | null>(null);
   const scaleDecimals = useScaleDecimals();
   const { voiceEnabled: isVoiceActive, setEnabled: setVoiceEnabled } = useAudioPref();
   const [conversationHistory, setConversationHistory] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
@@ -194,6 +170,50 @@ const Index = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const baseUrl = apiWrapper.getBaseUrl() || storage.getSettings().apiUrl;
+    let eventsUrl: string;
+    try {
+      eventsUrl = new URL("/api/voice/coach/events", baseUrl).toString();
+    } catch {
+      eventsUrl = `${baseUrl.replace(/\/$/, "")}/api/voice/coach/events`;
+    }
+
+    const source = new EventSource(eventsUrl);
+
+    const handleSpeechEvent = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as { text?: string; spoken?: boolean; mode?: string };
+        const text = typeof payload.text === "string" ? payload.text.trim() : "";
+        if (!text) {
+          return;
+        }
+        setMascoMsg(text);
+        if (payload.mode === "recetas") {
+          setBasculinMood("happy");
+        } else {
+          setBasculinMood((current) => (current === "sleeping" ? "normal" : current));
+        }
+      } catch (error) {
+        console.error("Failed to parse coach speech event", error);
+      }
+    };
+
+    source.addEventListener("speech", handleSpeechEvent as EventListener);
+    source.onerror = () => {
+      console.warn("Coach speech stream interrupted");
+    };
+
+    return () => {
+      source.removeEventListener("speech", handleSpeechEvent as EventListener);
+      source.close();
+    };
+  }, []);
+
   const handleTimerStart = useCallback(async (seconds: number) => {
     setTimerSeconds(seconds);
     setShowTimerDialog(false);
@@ -220,367 +240,6 @@ const Index = () => {
     console.log("Index: Changing view from", currentView, "to", view);
     setCurrentView(view);
   };
-
-  const handleWakeEvent = useCallback(
-    async (event: WakeEvent) => {
-      if (event.type === "wake") {
-        const isoTs = new Date(event.ts * 1000).toISOString();
-        setWakeStatus((prev) => ({
-          enabled: true,
-          running: true,
-          last_wake_ts: isoTs,
-          wake_count: (prev?.wake_count ?? 0) + 1,
-          intent_count: prev?.intent_count ?? 0,
-          errors: prev?.errors,
-          backend: prev?.backend ?? null,
-        }));
-        setWakeListening(true);
-        setBasculinMood("alert");
-        setConversationHistory([]);
-        lastSpokenRef.current = "";
-        if (wakeOverlayTimeoutRef.current) {
-          window.clearTimeout(wakeOverlayTimeoutRef.current);
-        }
-        wakeOverlayTimeoutRef.current = window.setTimeout(() => {
-          setWakeListening(false);
-          setBasculinMood((currentMood) => (currentMood === "alert" ? "normal" : currentMood));
-          wakeOverlayTimeoutRef.current = null;
-        }, 3500);
-        return;
-      }
-
-      if (event.type !== "intent" || !event.intent) {
-        return;
-      }
-
-      const isoTs = new Date(event.ts * 1000).toISOString();
-      setWakeStatus((prev) => ({
-        enabled: prev?.enabled ?? true,
-        running: prev?.running ?? true,
-        last_wake_ts: isoTs,
-        wake_count: prev?.wake_count ?? 0,
-        intent_count: (prev?.intent_count ?? 0) + 1,
-        errors: prev?.errors,
-        backend: prev?.backend ?? null,
-      }));
-
-      const intent = event.intent;
-      const normalizedIncoming = normalizeWakeText(event.text);
-      setWakeListening(false);
-      if (wakeOverlayTimeoutRef.current) {
-        window.clearTimeout(wakeOverlayTimeoutRef.current);
-        wakeOverlayTimeoutRef.current = null;
-      }
-
-      switch (intent.kind) {
-        case "no_input": {
-          setMascoMsg("No te escuché bien. ¿Puedes repetirlo?");
-          setBasculinMood("worried");
-          setConversationHistory([]);
-          lastSpokenRef.current = "";
-          return;
-        }
-        case "timer": {
-          const seconds = intent.seconds ?? 0;
-          if (seconds <= 0) {
-            setMascoMsg("No entendí el temporizador.");
-            setBasculinMood("worried");
-            setConversationHistory([]);
-            lastSpokenRef.current = "";
-            return;
-          }
-          await handleTimerStart(seconds);
-          const minutes = Math.floor(seconds / 60);
-          const remainder = seconds % 60;
-          let message: string;
-          if (minutes > 0 && remainder > 0) {
-            message = `Temporizador de ${minutes} minuto${minutes === 1 ? '' : 's'} y ${remainder} segundo${remainder === 1 ? '' : 's'}.`;
-          } else if (minutes > 0) {
-            message = `Temporizador de ${minutes} minuto${minutes === 1 ? '' : 's'}.`;
-          } else {
-            message = `Temporizador de ${seconds} segundo${seconds === 1 ? '' : 's'}.`;
-          }
-          setMascoMsg(message);
-          setBasculinMood("happy");
-          setConversationHistory([]);
-          lastSpokenRef.current = "";
-          return;
-        }
-        case "weight_status": {
-          try {
-            const response = await api.getScaleWeight();
-            const value = typeof response.value === 'number' ? response.value : null;
-            if (value !== null) {
-              const formatted = formatWeight(value, scaleDecimals);
-              const messageWeight = formatted === '–' ? formatted : `${formatted} gramos`;
-              setMascoMsg(`Peso estable: ${messageWeight}.`);
-              setBasculinMood("happy");
-            } else {
-              setMascoMsg("No detecto peso estable ahora mismo.");
-              setBasculinMood("worried");
-            }
-          } catch (error) {
-            console.error('Failed to read weight', error);
-            setMascoMsg("No pude consultar la báscula.");
-            setBasculinMood("worried");
-          }
-          setConversationHistory([]);
-          lastSpokenRef.current = "";
-          return;
-        }
-        case "tare": {
-          try {
-            await api.scaleTare();
-            setMascoMsg("Báscula a cero.");
-            setBasculinMood("happy");
-          } catch (error) {
-            console.error('Failed to tare scale', error);
-            setMascoMsg("No se pudo poner a cero la báscula.");
-            setBasculinMood("worried");
-          }
-          setConversationHistory([]);
-          lastSpokenRef.current = "";
-          return;
-        }
-        case "recipe_start": {
-          const recipeName = intent.name?.trim();
-          setCurrentView("recipes");
-          setMascoMsg(
-            recipeName && recipeName.length > 0
-              ? `Buscando receta ${recipeName}.`
-              : "Abriendo recetario."
-          );
-          setBasculinMood("happy");
-          setConversationHistory([]);
-          lastSpokenRef.current = "";
-          return;
-        }
-        case "calibrate": {
-          setCurrentView("settings");
-          setMascoMsg("Iniciando asistente de calibración.");
-          setBasculinMood("happy");
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(new Event('open-calibration-wizard'));
-          }
-          setConversationHistory([]);
-          lastSpokenRef.current = "";
-          return;
-        }
-        case "smalltalk": {
-          try {
-            const normalizedLastSpoken = normalizeWakeText(lastSpokenRef.current);
-            if (!normalizedIncoming) {
-              setMascoMsg("No te escuché bien. ¿Puedes repetirlo?");
-              setBasculinMood("worried");
-              setConversationHistory([]);
-              lastSpokenRef.current = "";
-              return;
-            }
-            if (normalizedLastSpoken && normalizedIncoming === normalizedLastSpoken) {
-              return;
-            }
-            setBasculinMood("alert");
-            const userText = (event.text ?? "").trim();
-            const historySnapshot = [...conversationHistory];
-            if (userText) {
-              historySnapshot.push({ role: "user", text: userText });
-            }
-            const historyContext = historySnapshot
-              .map((item) => `${item.role === "assistant" ? "Asistente" : "Usuario"}: ${item.text}`)
-              .slice(-12);
-            const response = await api.assistantChat(event.text ?? "", {
-              view: currentView,
-              diabetesMode,
-              history: historyContext,
-            });
-            const replyText = (response.reply || "").trim() || "Aquí estoy, ¿qué necesitas?";
-            const mood = (response.mood || "happy").toLowerCase();
-            setMascoMsg(replyText);
-            const moodMap: Record<string, BasculinMood> = {
-              happy: "happy",
-              worried: "worried",
-              alert: "alert",
-              sleeping: "sleeping",
-              normal: "normal",
-            };
-            setBasculinMood(moodMap[mood] ?? "happy");
-            const updatedHistory = [...historySnapshot, { role: "assistant", text: replyText }].slice(-12);
-            setConversationHistory(updatedHistory);
-            if (response.speak !== false) {
-              await speakResponse(replyText);
-            }
-          } catch (error) {
-            console.error("Assistant chat failed", error);
-            const fallback = "Aquí estoy, ¿qué necesitas?";
-            setMascoMsg(fallback);
-            setBasculinMood("happy");
-            const userText = (event.text ?? "").trim();
-            const withUser = userText
-              ? [...conversationHistory, { role: "user", text: userText }].slice(-12)
-              : [...conversationHistory];
-            setConversationHistory([...withUser, { role: "assistant", text: fallback }].slice(-12));
-          }
-          return;
-        }
-        default:
-          return;
-      }
-    },
-    [handleTimerStart, scaleDecimals, currentView, diabetesMode, speakResponse, conversationHistory]
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    const loadStatus = async () => {
-      try {
-        const status = await api.getWakeStatus();
-        if (!cancelled) {
-          setWakeStatus(status);
-          if (typeof status.enabled === 'boolean') {
-            setWakeWordEnabled(status.enabled);
-          }
-        }
-      } catch (error) {
-        console.warn('Wake status unavailable', error);
-      }
-    };
-
-    void loadStatus();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ settings?: AppSettings }>).detail;
-      if (detail?.settings && typeof detail.settings.wakeWordEnabled === 'boolean') {
-        setWakeWordEnabled(detail.settings.wakeWordEnabled);
-      }
-    };
-    window.addEventListener('app-settings-updated', handler);
-    return () => {
-      window.removeEventListener('app-settings-updated', handler);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!wakeWordEnabled) {
-      setWakeListening(false);
-    }
-  }, [wakeWordEnabled]);
-
-  useEffect(() => {
-    return () => {
-      if (wakeOverlayTimeoutRef.current) {
-        window.clearTimeout(wakeOverlayTimeoutRef.current);
-        wakeOverlayTimeoutRef.current = null;
-      }
-      if (wakeReconnectTimeoutRef.current) {
-        window.clearTimeout(wakeReconnectTimeoutRef.current);
-        wakeReconnectTimeoutRef.current = null;
-      }
-      if (wakeEventSourceRef.current) {
-        wakeEventSourceRef.current.close();
-        wakeEventSourceRef.current = null;
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!wakeWordEnabled) {
-      if (wakeReconnectTimeoutRef.current) {
-        window.clearTimeout(wakeReconnectTimeoutRef.current);
-        wakeReconnectTimeoutRef.current = null;
-      }
-      if (wakeEventSourceRef.current) {
-        wakeEventSourceRef.current.close();
-        wakeEventSourceRef.current = null;
-      }
-      setWakeStatus((prev) => (prev ? { ...prev, running: false } : prev));
-      return;
-    }
-
-    let cancelled = false;
-
-    const connect = () => {
-      if (cancelled) {
-        return;
-      }
-
-      const baseUrl = apiWrapper.getBaseUrl() || storage.getSettings().apiUrl;
-      let eventsUrl: string;
-      try {
-        eventsUrl = new URL('/api/voice/wake/events', baseUrl).toString();
-      } catch {
-        eventsUrl = `${baseUrl.replace(/\/$/, '')}/api/voice/wake/events`;
-      }
-
-      const source = new EventSource(eventsUrl);
-      wakeEventSourceRef.current = source;
-
-      source.onopen = () => {
-        setWakeStatus((prev) => ({
-          enabled: true,
-          running: true,
-          last_wake_ts: prev?.last_wake_ts ?? null,
-          wake_count: prev?.wake_count ?? 0,
-          intent_count: prev?.intent_count ?? 0,
-          errors: prev?.errors,
-          backend: prev?.backend ?? null,
-        }));
-      };
-
-      const handleSseMessage = (messageEvent: MessageEvent<string>) => {
-        try {
-          const payload = JSON.parse(messageEvent.data) as WakeEvent;
-          void handleWakeEvent(payload);
-        } catch (error) {
-          console.error('Failed to parse wake event payload', error);
-        }
-      };
-
-      source.addEventListener('wake', (event) => {
-        handleSseMessage(event as MessageEvent<string>);
-      });
-      source.addEventListener('intent', (event) => {
-        handleSseMessage(event as MessageEvent<string>);
-      });
-
-      source.onmessage = (messageEvent) => {
-        handleSseMessage(messageEvent as MessageEvent<string>);
-      };
-
-      source.onerror = () => {
-        source.close();
-        if (wakeEventSourceRef.current === source) {
-          wakeEventSourceRef.current = null;
-        }
-        setWakeStatus((prev) => (prev ? { ...prev, running: false } : prev));
-        if (!cancelled) {
-          wakeReconnectTimeoutRef.current = window.setTimeout(connect, 5000);
-        }
-      };
-    };
-
-    connect();
-
-    return () => {
-      cancelled = true;
-      if (wakeReconnectTimeoutRef.current) {
-        window.clearTimeout(wakeReconnectTimeoutRef.current);
-        wakeReconnectTimeoutRef.current = null;
-      }
-      if (wakeEventSourceRef.current) {
-        wakeEventSourceRef.current.close();
-        wakeEventSourceRef.current = null;
-      }
-    };
-  }, [wakeWordEnabled, handleWakeEvent]);
 
   const renderView = () => {
     console.log("Index: Rendering view:", currentView);
@@ -632,15 +291,6 @@ const Index = () => {
         mood={basculinMood}
         enableVoice={isVoiceActive}
       />
-
-      {wakeListening && (
-        <div className="pointer-events-none fixed inset-x-0 top-24 z-40 flex justify-center">
-          <div className="flex items-center gap-2 rounded-full border border-primary/40 bg-background/95 px-5 py-2 text-sm font-medium text-primary shadow-lg">
-            <span className="animate-pulse">🎤</span>
-            <span>Te escucho…</span>
-          </div>
-        </div>
-      )}
 
       {networkStatusState?.effectiveMode === "offline" && (
         <div className="pointer-events-none fixed right-4 top-4 z-40">

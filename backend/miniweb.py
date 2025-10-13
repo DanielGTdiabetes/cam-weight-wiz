@@ -12,6 +12,7 @@ import ipaddress
 import asyncio
 import time
 import threading
+import queue
 import shlex
 import tempfile
 import traceback
@@ -68,10 +69,21 @@ _SERIAL_AVAILABLE = SerialScaleService is not None
 _LOGGED_HX711_WARNING = False
 _LOGGED_SERIAL_WARNING = False
 from backend.voice import router as voice_router
-from backend.voice_prefs import get_voice_enabled, set_voice_enabled
+from backend.routes.voice import router as voice_ptt_router
 from backend.camera import router as camera_router
 from backend.wake import router as wake_router, init_wake_if_enabled
 from backend.routers.food import router as food_router
+from backend.models.settings import AppSettings, load_settings, dump_settings
+from backend.services.voice_service import voice_service
+from backend.services.basculin_coach import basculin_coach
+from backend.core.events import (
+    coach_event_bus,
+    FoodScannedEvent,
+    NutritionUpdatedEvent,
+    GlucoseUpdateEvent,
+    WeightStableEvent,
+    TareDoneEvent,
+)
 
 # ---------- Constantes y paths ----------
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -881,6 +893,14 @@ def _load_config() -> Dict[str, Any]:
     if changed:
         _save_json(CONFIG_PATH, config)
     return config
+
+
+def _current_app_settings() -> AppSettings:
+    return load_settings(_load_config())
+
+
+voice_service.reload_settings(_current_app_settings)
+basculin_coach.reload_settings(_current_app_settings)
 
 
 def _default_ota_state() -> Dict[str, Any]:
@@ -3585,9 +3605,13 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         LOG_SCALE.warning("No se pudo activar AP en arranque: %s", exc)
 
-    await init_scale()
-    yield
-    await close_scale()
+    basculin_coach.start()
+    try:
+        await init_scale()
+        yield
+    finally:
+        basculin_coach.stop()
+        await close_scale()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -3602,6 +3626,7 @@ app.add_middleware(
 init_wake_if_enabled(app)
 
 app.include_router(voice_router)
+app.include_router(voice_ptt_router)
 app.include_router(camera_router)
 app.include_router(wake_router)
 app.include_router(food_router, prefix="/api/food", tags=["food"])
@@ -3609,13 +3634,51 @@ app.include_router(food_router, prefix="/api/food", tags=["food"])
 
 @app.get("/api/voice/state")
 async def api_voice_state() -> Dict[str, bool]:
-    return {"enabled": get_voice_enabled()}
+    return {"enabled": _current_app_settings().voice.speech_enabled}
 
 
 @app.post("/api/voice/state")
 async def api_voice_state_update(payload: VoiceStatePayload) -> Dict[str, bool]:
-    set_voice_enabled(payload.enabled)
-    return {"enabled": get_voice_enabled()}
+    config = _load_config()
+    settings = load_settings(config)
+    settings.voice.speech_enabled = bool(payload.enabled)
+    dump_settings(settings, config)
+
+    general_cfg = config.setdefault("general", {})
+    if isinstance(general_cfg, dict):
+        general_cfg["tts_enabled"] = settings.voice.speech_enabled
+
+    _save_json(CONFIG_PATH, config)
+    # Reload runtime providers so new setting is honoured immediately
+    voice_service.reload_settings(_current_app_settings)
+    basculin_coach.reload_settings(_current_app_settings)
+
+    return {"enabled": settings.voice.speech_enabled}
+
+
+@app.get("/api/voice/coach/events")
+async def api_voice_coach_events(request: Request):
+    async def event_stream():
+        token, speech_queue = voice_service.subscribe_speech()
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(asyncio.to_thread(speech_queue.get), timeout=5.0)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
+                data = json.dumps(payload, ensure_ascii=False)
+                yield "event: speech\n"
+                yield f"data: {data}\n\n"
+        except asyncio.CancelledError:  # pragma: no cover - client cancelled
+            pass
+        finally:
+            voice_service.unsubscribe_speech(token)
+
+    headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
 @app.get("/health")
@@ -3719,6 +3782,7 @@ async def api_scale_tare():
     result = service.tare()
     if result.get("ok"):
         LOG_SCALE.info("Tare command processed: offset=%s", result.get("tare_offset"))
+        coach_event_bus.publish(TareDoneEvent())
     else:
         LOG_SCALE.warning("Tare command failed: %s", result.get("reason"))
     return result
@@ -4372,6 +4436,8 @@ async def update_settings(request: Request):
         if offline_mode_changed:
             _emit_network_status_update(config)
         _apply_settings_changes(list(changed_sections), **change_metadata)
+        voice_service.reload_settings(_current_app_settings)
+        basculin_coach.reload_settings(_current_app_settings)
         
         # Broadcast cambios via WebSocket (fire and forget)
         asyncio.create_task(_broadcast_settings_change(changed_sections, change_metadata))

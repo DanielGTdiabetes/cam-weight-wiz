@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 import { Mic, MicOff, ChefHat, ArrowLeft, ArrowRight, X, ListChecks, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -14,41 +22,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { useRecipeAvailability } from "@/hooks/useRecipeAvailability";
 import { useAudioPref } from "@/state/useAudio";
-
-interface SpeechRecognitionEvent extends Event {
-  results: SpeechRecognitionResultList;
-  resultIndex: number;
-}
-
-interface SpeechRecognitionErrorEvent extends Event {
-  error: string;
-  message: string;
-}
-
-interface SpeechRecognition extends EventTarget {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  maxAlternatives: number;
-  onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => void) | null;
-  onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => void) | null;
-  onend: ((this: SpeechRecognition, ev: Event) => void) | null;
-  start(): void;
-  stop(): void;
-}
-
-interface SpeechRecognitionConstructor {
-  new (): SpeechRecognition;
-}
-
-declare global {
-  interface Window {
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-    SpeechRecognition?: SpeechRecognitionConstructor;
-  }
-}
-
-type SpeechRecognitionInstance = SpeechRecognition;
 
 interface IngredientDisplay {
   name: string;
@@ -90,7 +63,6 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
   const [stepResponses, setStepResponses] = useState<Record<number, string>>({});
   const [assistantMessage, setAssistantMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
-  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
   const [recipeCompleted, setRecipeCompleted] = useState(false);
   const lastSpokenStepRef = useRef<string | null>(null);
   const lastAssistantSpeechRef = useRef<string | null>(null);
@@ -112,123 +84,140 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
   const inputsDisabled = !recipesEnabled && !availabilityLoading;
   const recipeModel = recipe?.model ?? availabilityModel ?? null;
 
-  const stopRecognition = useCallback(() => {
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (error) {
-        console.warn("Speech recognition stop failed", error);
-      }
-      recognitionRef.current = null;
-    }
-    setIsListening(false);
-  }, []);
+  const pttTargetRef = useRef<"prompt" | "step" | null>(null);
 
-  const cleanupMedia = useCallback(() => {
-    stopRecognition();
-
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    try {
-      if (typeof window.speechSynthesis !== "undefined") {
-        window.speechSynthesis.cancel();
-      }
-    } catch (error) {
-      console.warn("Failed to cancel speech synthesis", error);
-    }
-
-    try {
-      const audioElements = Array.from(window.document.querySelectorAll("audio"));
-      audioElements.forEach((audio) => {
-        try {
-          audio.pause();
-          audio.currentTime = 0;
-        } catch (error) {
-          console.warn("Failed to stop audio element", error);
-        }
-      });
-    } catch (error) {
-      console.warn("Failed to reset audio elements", error);
-    }
-  }, [stopRecognition]);
-
-  useEffect(() => () => cleanupMedia(), [cleanupMedia]);
-
-  const getRecognitionInstance = (): SpeechRecognitionInstance | null => {
-    if (typeof window === "undefined") {
-      return null;
-    }
-    const globalWindow = window as Window & {
-      SpeechRecognition?: SpeechRecognitionConstructor;
-      webkitSpeechRecognition?: SpeechRecognitionConstructor;
-    };
-    const RecognitionClass = globalWindow.SpeechRecognition || globalWindow.webkitSpeechRecognition;
-    if (!RecognitionClass) {
-      return null;
-    }
-    const recognition: SpeechRecognitionInstance = new RecognitionClass();
-    recognition.lang = "es-ES";
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-    return recognition;
-  };
-
-  const handleMicToggle = () => {
-    if (isListening) {
-      stopRecognition();
-      return;
-    }
-
-    const recognition = getRecognitionInstance();
-    if (!recognition) {
-      toast({
-        title: "Micrófono no disponible",
-        description: "Este navegador no soporta reconocimiento de voz",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    recognitionRef.current = recognition;
-    recognition.onresult = (event: SpeechRecognitionEvent) => {
-      const transcript = Array.from(event.results)
-        .map((result) => result[0].transcript)
-        .join(" ")
-        .trim();
-
-      if (!transcript) {
+  const applyTranscript = useCallback(
+    (target: "prompt" | "step", transcript: string) => {
+      const normalized = transcript.trim();
+      if (!normalized) {
         return;
       }
-
-      if (!recipeStarted) {
-        setUserPrompt(transcript);
+      if (target === "prompt") {
+        setUserPrompt(normalized);
       } else {
-        setStepResponses((prev) => ({ ...prev, [currentStepIndex]: transcript }));
+        setStepResponses((prev) => ({ ...prev, [currentStepIndex]: normalized }));
       }
-    };
+    },
+    [currentStepIndex]
+  );
 
-    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-      console.error("Speech recognition error", event);
-      toast({ title: "Error de micrófono", description: "Intenta nuevamente" });
-      setIsListening(false);
-    };
-
-    recognition.onend = () => {
-      setIsListening(false);
-    };
-
-    try {
-      recognition.start();
+  const startVoiceCapture = useCallback(
+    async (target: "prompt" | "step") => {
+      if (isListening) {
+        return;
+      }
+      pttTargetRef.current = target;
       setIsListening(true);
-    } catch (error) {
-      console.error("Speech recognition start failed", error);
-      toast({ title: "No se pudo iniciar el micrófono" });
-    }
-  };
+      try {
+        await api.startVoicePtt();
+      } catch (error) {
+        pttTargetRef.current = null;
+        setIsListening(false);
+        if (error instanceof ApiError && error.status === 423) {
+          toast({
+            title: "Micrófono ocupado",
+            description: "Inténtalo de nuevo en unos segundos.",
+            variant: "destructive",
+          });
+        } else {
+          toast({
+            title: "No se pudo iniciar el micrófono",
+            description: "Revisa la conexión o inténtalo otra vez.",
+            variant: "destructive",
+          });
+        }
+      }
+    },
+    [isListening, toast]
+  );
+
+  const stopVoiceCapture = useCallback(
+    async () => {
+      if (!isListening) {
+        return;
+      }
+      setIsListening(false);
+      const target = pttTargetRef.current ?? (recipeStarted ? "step" : "prompt");
+      pttTargetRef.current = null;
+      try {
+        const response = await api.stopVoicePtt();
+        const transcript = response.transcript?.trim();
+        if (transcript) {
+          applyTranscript(target, transcript);
+        }
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 400) {
+          toast({
+            title: "No se pudo capturar el audio",
+            description: "Inténtalo nuevamente.",
+            variant: "destructive",
+          });
+        } else {
+          console.error("Voice PTT stop failed", error);
+        }
+      }
+    },
+    [applyTranscript, isListening, recipeStarted, toast]
+  );
+
+  const handlePointerDown = useCallback(
+    (target: "prompt" | "step") => (event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (event.pointerType === "mouse" && event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+      void startVoiceCapture(target);
+    },
+    [startVoiceCapture]
+  );
+
+  const handlePointerUp = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      if (event.pointerType === "mouse" && event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+      void stopVoiceCapture();
+    },
+    [stopVoiceCapture]
+  );
+
+  const handlePointerCancel = useCallback(() => {
+    void stopVoiceCapture();
+  }, [stopVoiceCapture]);
+
+  const handleKeyDown = useCallback(
+    (target: "prompt" | "step") => (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      if (event.key !== " " && event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      void startVoiceCapture(target);
+    },
+    [startVoiceCapture]
+  );
+
+  const handleKeyUp = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      if (event.key !== " " && event.key !== "Enter") {
+        return;
+      }
+      event.preventDefault();
+      void stopVoiceCapture();
+    },
+    [stopVoiceCapture]
+  );
+
+  useEffect(() => {
+    return () => {
+      void stopVoiceCapture();
+    };
+  }, [stopVoiceCapture]);
 
   const resetState = useCallback(() => {
+    void stopVoiceCapture();
     setRecipe(null);
     setRecipeStarted(false);
     setRecipeCompleted(false);
@@ -239,8 +228,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     lastSpokenStepRef.current = null;
     lastAssistantSpeechRef.current = null;
     previousStepRef.current = -1;
-    cleanupMedia();
-  }, [cleanupMedia]);
+  }, [stopVoiceCapture]);
 
   const handleStart = async () => {
     const prompt = userPrompt.trim();
@@ -273,7 +261,6 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
 
     setIsLoading(true);
     try {
-      cleanupMedia();
       lastSpokenStepRef.current = null;
       lastAssistantSpeechRef.current = null;
       previousStepRef.current = -1;
@@ -519,7 +506,16 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
 
             <div className="grid grid-cols-2 gap-4">
               <Button
-                onClick={handleMicToggle}
+                onPointerDown={handlePointerDown("prompt")}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerCancel}
+                onPointerLeave={() => {
+                  if (isListening) {
+                    void stopVoiceCapture();
+                  }
+                }}
+                onKeyDown={handleKeyDown("prompt")}
+                onKeyUp={handleKeyUp}
                 variant={isListening ? "destructive" : "secondary"}
                 size="xl"
                 className="h-20 text-xl"
@@ -527,11 +523,11 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
               >
                 {isListening ? (
                   <>
-                    <MicOff className="mr-2 h-6 w-6" /> Detener voz
+                    <MicOff className="mr-2 h-6 w-6" /> Suelta para enviar
                   </>
                 ) : (
                   <>
-                    <Mic className="mr-2 h-6 w-6" /> Hablar
+                    <Mic className="mr-2 h-6 w-6" /> Mantén pulsado
                   </>
                 )}
               </Button>
@@ -546,6 +542,9 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
                 {startButtonContent}
               </Button>
             </div>
+            {isListening && (
+              <p className="text-sm text-muted-foreground text-center">Escuchando… suelta el botón para enviar.</p>
+            )}
           </div>
         </Card>
       </div>
@@ -633,17 +632,26 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
 
             <div className="mt-3 flex gap-3">
               <Button
-                onClick={handleMicToggle}
+                onPointerDown={handlePointerDown("step")}
+                onPointerUp={handlePointerUp}
+                onPointerCancel={handlePointerCancel}
+                onPointerLeave={() => {
+                  if (isListening) {
+                    void stopVoiceCapture();
+                  }
+                }}
+                onKeyDown={handleKeyDown("step")}
+                onKeyUp={handleKeyUp}
                 variant={isListening ? "destructive" : "outline"}
                 className="flex-1"
               >
                 {isListening ? (
                   <>
-                    <MicOff className="mr-2 h-4 w-4" /> Detener voz
+                    <MicOff className="mr-2 h-4 w-4" /> Suelta para enviar
                   </>
                 ) : (
                   <>
-                    <Mic className="mr-2 h-4 w-4" /> Dictar
+                    <Mic className="mr-2 h-4 w-4" /> Mantén pulsado
                   </>
                 )}
               </Button>
@@ -654,6 +662,10 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
                 Limpiar
               </Button>
             </div>
+
+            {isListening && (
+              <p className="mt-2 text-sm text-muted-foreground">Escuchando… suelta el botón para registrar la respuesta.</p>
+            )}
 
             {assistantMessage && (
               <div className="mt-4 rounded-lg border border-primary/30 bg-primary/10 p-4 text-sm">
@@ -683,7 +695,16 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
             <ArrowLeft className="mr-2 h-5 w-5" /> Anterior
           </Button>
           <Button
-            onClick={handleMicToggle}
+            onPointerDown={handlePointerDown("step")}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
+            onPointerLeave={() => {
+              if (isListening) {
+                void stopVoiceCapture();
+              }
+            }}
+            onKeyDown={handleKeyDown("step")}
+            onKeyUp={handleKeyUp}
             variant={isListening ? "destructive" : "outline"}
             size="xl"
             className="h-16 text-xl"

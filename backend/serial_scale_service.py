@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional
 
+from backend.core.events import coach_event_bus, WeightStableEvent
+
 try:  # pragma: no cover - external dependency
     import serial
     from serial import SerialException
@@ -304,6 +306,11 @@ class SerialScaleService:
         self._last_grams = grams
         self._last_timestamp = time.time()
         self._last_stable = stable
+        if stable:
+            try:
+                coach_event_bus.publish(WeightStableEvent(grams=grams))
+            except Exception:  # pragma: no cover - defensive log
+                self._log.debug("Failed to publish weight stable event", exc_info=True)
 
     def _send_and_wait_ack(
         self,
