@@ -294,6 +294,65 @@ def _normalize_http_url(raw: str) -> str:
 _DEFAULT_BACKEND_BASE_URL = "http://127.0.0.1:8081"
 BACKEND_BASE_URL = get_backend_base_url() or _DEFAULT_BACKEND_BASE_URL
 MINIWEB_BASE_URL = get_miniweb_base_url()
+_MINIWEB_SCALE_MODE = os.getenv("BASCULA_MINIWEB_SCALE_MODE", "local").strip().lower() or "local"
+_REMOTE_SCALE_ENABLED = _MINIWEB_SCALE_MODE == "remote"
+_REMOTE_SCALE_TIMEOUT = float(os.getenv("BASCULA_MINIWEB_SCALE_TIMEOUT", "5.0"))
+
+
+def _build_backend_url(path: str) -> str:
+    suffix = path if path.startswith("/") else f"/{path}"
+    return f"{BACKEND_BASE_URL.rstrip('/')}{suffix}"
+
+
+async def _backend_scale_request(
+    method: str,
+    path: str,
+    *,
+    json_body: Optional[Dict[str, Any]] = None,
+    timeout: float | None = _REMOTE_SCALE_TIMEOUT,
+) -> Dict[str, Any]:
+    if not BACKEND_BASE_URL:
+        raise HTTPException(status_code=503, detail="backend_url_not_configured")
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(method, _build_backend_url(path), json=json_body)
+            response.raise_for_status()
+            data = response.json()
+            return data if isinstance(data, dict) else {}
+    except httpx.TimeoutException as exc:
+        LOG_SCALE.error("Scale backend %s %s timeout: %s", method, path, exc)
+        raise HTTPException(status_code=504, detail="scale_backend_timeout") from exc
+    except httpx.HTTPStatusError as exc:
+        LOG_SCALE.error(
+            "Scale backend %s %s error HTTP %s: %s",
+            method,
+            path,
+            exc.response.status_code,
+            exc.response.text[:200],
+        )
+        raise HTTPException(status_code=exc.response.status_code, detail="scale_backend_error") from exc
+    except httpx.HTTPError as exc:
+        LOG_SCALE.error("Scale backend %s %s unreachable: %s", method, path, exc)
+        raise HTTPException(status_code=502, detail="scale_backend_unreachable") from exc
+
+
+async def _backend_stream_scale_events(request: Request) -> AsyncGenerator[bytes, None]:
+    url = _build_backend_url("/api/scale/events")
+    headers = {"Accept": "text/event-stream"}
+    try:
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream("GET", url, headers=headers) as response:
+                response.raise_for_status()
+                async for chunk in response.aiter_raw():
+                    if await request.is_disconnected():
+                        break
+                    if chunk:
+                        yield chunk
+    except httpx.HTTPError as exc:
+        LOG_SCALE.error("Scale backend SSE failed: %s", exc)
+        error_payload = json.dumps({"error": "scale_backend_unreachable"})
+        yield f"event: error\ndata: {error_payload}\n\n".encode("utf-8")
 
 
 def _reload_backend_service() -> Tuple[bool, Optional[str]]:
@@ -3491,6 +3550,10 @@ async def init_scale() -> None:
     global scale_service
     if scale_service is not None:
         return
+    if _REMOTE_SCALE_ENABLED:
+        LOG_SCALE.info("Miniweb scale service disabled (remote mode)")
+        scale_service = None
+        return
     try:
         scale_service = _init_scale_service()
     except Exception as exc:
@@ -3565,7 +3628,31 @@ def _extract_weight_payload(data: Dict[str, Any]) -> Tuple[Optional[float], Opti
     return numeric_value, ts_value
 
 
+def _hydrate_weight_response(raw: Dict[str, Any]) -> Tuple[Dict[str, Any], Optional[float], Optional[datetime]]:
+    data: Dict[str, Any] = raw if isinstance(raw, dict) else {}
+    value, ts_value = _extract_weight_payload(data)
+
+    if data.get("ok"):
+        if ts_value is None:
+            ts_value = datetime.now(timezone.utc)
+        if ts_value and "ts" not in data:
+            data["ts"] = ts_value.isoformat()
+        _update_last_weight(value, ts_value)
+        return data, value, ts_value
+
+    cached_value, cached_ts = _get_cached_weight()
+    if value is None:
+        value = cached_value
+    if ts_value is None:
+        ts_value = cached_ts
+    return data, value, ts_value
+
+
 def _read_scale_snapshot() -> Tuple[Dict[str, Any], Optional[float], Optional[datetime]]:
+    if _REMOTE_SCALE_ENABLED:
+        cached_value, cached_ts = _get_cached_weight()
+        return {"ok": False, "reason": "service_not_initialized"}, cached_value, cached_ts
+
     service = _get_scale_service()
     if service is None or not hasattr(service, "get_reading"):
         cached_value, cached_ts = _get_cached_weight()
@@ -3578,23 +3665,7 @@ def _read_scale_snapshot() -> Tuple[Dict[str, Any], Optional[float], Optional[da
         cached_value, cached_ts = _get_cached_weight()
         return {"ok": False, "reason": "exception"}, cached_value, cached_ts
 
-    data: Dict[str, Any] = raw if isinstance(raw, dict) else {}
-    value, ts_value = _extract_weight_payload(data)
-
-    if data.get("ok"):
-        if ts_value is None:
-            ts_value = datetime.now(timezone.utc)
-        _update_last_weight(value, ts_value)
-        if ts_value and "ts" not in data:
-            data["ts"] = ts_value.isoformat()
-        return data, value, ts_value
-
-    cached_value, cached_ts = _get_cached_weight()
-    if value is None:
-        value = cached_value
-    if ts_value is None:
-        ts_value = cached_ts
-    return data, value, ts_value
+    return _hydrate_weight_response(raw if isinstance(raw, dict) else {})
 
 
 @asynccontextmanager
@@ -3687,6 +3758,9 @@ async def health() -> Dict[str, bool]:
 
 @app.get("/api/scale/status")
 async def api_scale_status():
+    if _REMOTE_SCALE_ENABLED:
+        return await _backend_scale_request("GET", "/api/scale/status")
+
     service = _get_scale_service()
     if service is None:
         config = _load_config()
@@ -3706,12 +3780,30 @@ async def api_scale_status():
 
 @app.get("/api/scale/read")
 async def api_scale_read():
+    if _REMOTE_SCALE_ENABLED:
+        remote = await _backend_scale_request("GET", "/api/scale/read")
+        normalized, _, _ = _hydrate_weight_response(remote)
+        return normalized
+
     data, _, _ = _read_scale_snapshot()
     return data
 
 
 @app.get("/api/scale/weight")
 async def api_scale_weight():
+    if _REMOTE_SCALE_ENABLED:
+        remote = await _backend_scale_request("GET", "/api/scale/weight")
+        proxy_payload = {
+            "weight": remote.get("value"),
+            "ts": remote.get("ts"),
+            "ok": True,
+        }
+        _, value, ts_value = _hydrate_weight_response(proxy_payload)
+        if value is None and ts_value is None:
+            value, ts_value = _get_cached_weight()
+        ts_str = ts_value.isoformat() if ts_value else None
+        return {"value": value, "ts": ts_str}
+
     _, value, ts_value = _read_scale_snapshot()
     if value is None and ts_value is None:
         value, ts_value = _get_cached_weight()
@@ -3721,6 +3813,14 @@ async def api_scale_weight():
 
 @app.get("/api/scale/events")
 async def api_scale_events(request: Request) -> StreamingResponse:
+    if _REMOTE_SCALE_ENABLED:
+        headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        return StreamingResponse(
+            _backend_stream_scale_events(request),
+            media_type="text/event-stream",
+            headers=headers,
+        )
+
     client_host = request.client.host if request.client else "unknown"
 
     async def event_stream() -> AsyncGenerator[str, None]:
@@ -3775,6 +3875,15 @@ async def api_scale_events(request: Request) -> StreamingResponse:
 
 @app.post("/api/scale/tare")
 async def api_scale_tare():
+    if _REMOTE_SCALE_ENABLED:
+        result = await _backend_scale_request("POST", "/api/scale/tare")
+        if result.get("ok"):
+            LOG_SCALE.info("Tare command proxied successfully")
+            coach_event_bus.publish(TareDoneEvent())
+        else:
+            LOG_SCALE.warning("Remote tare command failed: %s", result.get("reason"))
+        return result
+
     service = _get_scale_service()
     if service is None:
         LOG_SCALE.info("Tare stub response (no scale service configured)")
@@ -3790,6 +3899,19 @@ async def api_scale_tare():
 
 @app.post("/api/scale/calibrate")
 async def api_scale_calibrate(payload: CalibrationPayload):
+    if _REMOTE_SCALE_ENABLED:
+        payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        result = await _backend_scale_request("POST", "/api/scale/calibrate", json_body=payload_data)
+        if result.get("ok"):
+            LOG_SCALE.info(
+                "Remote calibration updated: factor=%s tare=%s",
+                result.get("calibration_factor"),
+                result.get("tare_offset"),
+            )
+        else:
+            LOG_SCALE.warning("Remote calibration failed: %s", result.get("reason"))
+        return result
+
     service = _get_scale_service()
     if service is None:
         return {"ok": False, "reason": "service_not_initialized"}
@@ -3807,6 +3929,19 @@ async def api_scale_calibrate(payload: CalibrationPayload):
 
 @app.post("/api/scale/calibrate/apply")
 async def api_scale_calibrate_apply(payload: CalibrationApplyPayload):
+    if _REMOTE_SCALE_ENABLED:
+        payload_data = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        result = await _backend_scale_request("POST", "/api/scale/calibrate/apply", json_body=payload_data)
+        if result.get("ok"):
+            LOG_SCALE.info(
+                "Remote calibration apply successful: factor=%s tare=%s",
+                result.get("calibration_factor"),
+                result.get("tare_offset"),
+            )
+        else:
+            LOG_SCALE.warning("Remote calibration apply failed: %s", result.get("reason"))
+        return result
+
     service = _get_scale_service()
     if service is None:
         LOG_SCALE.info("Calibration apply stub response (no scale service configured)")
