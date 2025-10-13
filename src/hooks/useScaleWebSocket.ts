@@ -481,15 +481,9 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
           try {
             const message = event as MessageEvent<string>;
-            const payload = JSON.parse(message.data) as {
-              value: number | string | null;
-              ts?: string | null;
-              stable?: boolean | number | string | null;
-            };
+            const payload = JSON.parse(message.data) as { value: number | string | null; ts?: string | null };
             const rawValue = payload?.value;
-            const stableRaw = payload?.stable;
             let nextWeight = 0;
-            let nextStable: boolean | null = null;
 
             if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
               nextWeight = rawValue;
@@ -500,21 +494,8 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
               }
             }
 
-            if (typeof stableRaw === "boolean") {
-              nextStable = stableRaw;
-            } else if (typeof stableRaw === "number") {
-              nextStable = stableRaw !== 0;
-            } else if (typeof stableRaw === "string") {
-              const normalized = stableRaw.trim().toLowerCase();
-              if (normalized) {
-                nextStable = ["1", "true", "yes", "stable"].includes(normalized);
-              }
-            }
-
             setWeight(nextWeight);
-            if (nextStable !== null) {
-              setIsStable(nextStable);
-            }
+            setIsStable(false);
             setUnit("g");
             realtimeConnectedRef.current = true;
             updateConnectivity();
