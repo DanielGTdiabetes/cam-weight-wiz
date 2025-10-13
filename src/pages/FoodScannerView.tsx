@@ -26,6 +26,7 @@ export const FoodScannerView = () => {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [supportsBrowserCamera, setSupportsBrowserCamera] = useState(false);
   const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState(false);
   const [prefilledBarcode, setPrefilledBarcode] = useState<string | undefined>(undefined);
   const [isRemoteCapturing, setIsRemoteCapturing] = useState(false);
@@ -442,6 +443,14 @@ export const FoodScannerView = () => {
     return () => window.removeEventListener("online", handleOnline);
   }, [flushScannerQueue, toast]);
 
+  useEffect(() => {
+    if (typeof navigator === "undefined") {
+      setSupportsBrowserCamera(false);
+      return;
+    }
+    setSupportsBrowserCamera(typeof navigator.mediaDevices?.getUserMedia === "function");
+  }, []);
+
   return (
     <div className="flex h-full flex-col gap-6 bg-background p-4">
       <div className="grid gap-6 md:grid-cols-[1.4fr_1fr]">
@@ -459,7 +468,7 @@ export const FoodScannerView = () => {
                   onClick={startCamera}
                   variant="secondary"
                   size="sm"
-                  disabled={isCameraActive}
+                  disabled={isCameraActive || !supportsBrowserCamera}
                 >
                   <Camera className="mr-2 h-4 w-4" /> Activar cámara
                 </Button>
@@ -501,6 +510,11 @@ export const FoodScannerView = () => {
 
             {cameraError && (
               <p className="mb-4 text-sm text-destructive">{cameraError}</p>
+            )}
+            {!supportsBrowserCamera && (
+              <p className="mb-4 text-sm text-muted-foreground">
+                La cámara integrada de la báscula se usa automáticamente al analizar. Activa “Analizar alimento” para capturar una foto.
+              </p>
             )}
 
             <div className="flex flex-wrap items-center gap-3">

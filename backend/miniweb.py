@@ -3725,12 +3725,21 @@ async def api_scale_events(request: Request) -> StreamingResponse:
 
     async def event_stream() -> AsyncGenerator[str, None]:
         LOG_SCALE.info("[sse] client connected: %s", client_host)
+        config = _load_config()
+        scale_cfg = config.get("scale") if isinstance(config.get("scale"), dict) else {}
+        decimals_raw = scale_cfg.get("decimals")
+        try:
+            decimals = int(decimals_raw)
+        except (TypeError, ValueError):
+            decimals = 0
+
         last_sent_value: Optional[float] = None
+        last_stable: Optional[bool] = None
         has_sent_initial = False
         last_emit = 0.0
         last_keepalive = time.monotonic()
-        hysteresis = 10.0  # 10 g ≈ 0.01 kg
-        min_interval = 0.15
+        hysteresis = 0.1 if decimals >= 1 else 1.0
+        min_interval = 0.08
 
         try:
             while True:
@@ -3740,6 +3749,7 @@ async def api_scale_events(request: Request) -> StreamingResponse:
                 _, value, ts_value = _read_scale_snapshot()
                 ts_str = ts_value.isoformat() if ts_value else None
                 now = time.monotonic()
+                stable_flag = data.get("stable") if isinstance(data, dict) else None
 
                 should_emit = False
                 if not has_sent_initial:
@@ -3750,12 +3760,15 @@ async def api_scale_events(request: Request) -> StreamingResponse:
                     should_emit = True
                 else:
                     should_emit = abs(value - last_sent_value) >= hysteresis
+                if stable_flag is not None and stable_flag != last_stable:
+                    should_emit = True
 
                 if should_emit and now - last_emit >= min_interval:
-                    payload = json.dumps({"value": value, "ts": ts_str})
+                    payload = json.dumps({"value": value, "ts": ts_str, "stable": stable_flag})
                     yield "event: weight\n"
                     yield f"data: {payload}\n\n"
                     last_sent_value = value
+                    last_stable = stable_flag if isinstance(stable_flag, bool) else last_stable
                     has_sent_initial = True
                     last_emit = now
                     last_keepalive = now

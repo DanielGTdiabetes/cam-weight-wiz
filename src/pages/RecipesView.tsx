@@ -459,16 +459,16 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     })();
 
     content = (
-      <div className="flex flex-1 items-center justify-center p-8">
-        <Card className="w-full max-w-2xl p-8">
-          <div className="mb-8 text-center">
+      <div className="flex flex-1 overflow-y-auto">
+        <Card className="mx-auto w-full max-w-2xl p-6 md:p-8">
+          <div className="mb-6 text-center">
             <div className="mb-4 flex justify-center">
               <div className="rounded-full bg-primary/20 p-6">
                 <ChefHat className="h-16 w-16 text-primary" />
               </div>
             </div>
-            <h2 className="mb-4 text-4xl font-bold">Asistente de Recetas</h2>
-            <p className="text-xl text-muted-foreground">
+            <h2 className="mb-4 text-3xl font-bold md:text-4xl">Asistente de Recetas</h2>
+            <p className="text-lg text-muted-foreground md:text-xl">
               Describe qué quieres cocinar y te guiaremos paso a paso.
             </p>
             {recipeModel && (
@@ -504,7 +504,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
               disabled={inputsDisabled}
             />
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Button
                 onPointerDown={handlePointerDown("prompt")}
                 onPointerUp={handlePointerUp}
@@ -518,7 +518,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
                 onKeyUp={handleKeyUp}
                 variant={isListening ? "destructive" : "secondary"}
                 size="xl"
-                className="h-20 text-xl"
+                className="h-16 text-lg md:h-20 md:text-xl"
                 disabled={!canUseRecipes}
               >
                 {isListening ? (
@@ -537,7 +537,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
                 disabled={isLoading || !canUseRecipes}
                 variant="glow"
                 size="xl"
-                className="h-20 text-xl"
+                className="h-16 text-lg md:h-20 md:text-xl"
               >
                 {startButtonContent}
               </Button>
@@ -553,7 +553,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
     content = null;
   } else {
     content = (
-      <div className="flex flex-1 flex-col gap-4 p-4">
+      <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
         <div className="grid gap-4 md:grid-cols-[1fr_1fr]">
           <Card className="border-primary/30 p-6">
             <div className="mb-4 flex items-center justify-between">
@@ -676,7 +676,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
           </Card>
         </div>
 
-        <div className="mt-auto grid grid-cols-4 gap-3">
+        <div className="mt-auto grid grid-cols-2 gap-3 md:grid-cols-4">
           <Button
             onClick={handleCancel}
             variant="outline"
@@ -733,19 +733,21 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
   }
 
   return (
-    <div className="relative flex h-full flex-col">
+    <div className="relative flex h-full flex-col overflow-hidden">
       {navControls}
-      <div className="absolute right-4 top-4 z-50 flex items-center">
-        <Button
-          variant="secondary"
-          size="lg"
-          onClick={handleExit}
-          className="shadow-md"
-        >
+      <div className="absolute right-4 top-4 z-50 hidden md:flex">
+        <Button variant="secondary" size="lg" onClick={handleExit} className="shadow-md">
           <X className="mr-2 h-4 w-4" /> Salir
         </Button>
       </div>
-      {content}
+      <div className="flex flex-1 flex-col overflow-hidden pt-16 md:pt-0">
+        <div className="flex justify-end px-4 pb-2 md:hidden">
+          <Button variant="secondary" size="sm" onClick={handleExit}>
+            <X className="mr-1 h-3 w-3" /> Salir
+          </Button>
+        </div>
+        {content}
+      </div>
     </div>
   );
 };

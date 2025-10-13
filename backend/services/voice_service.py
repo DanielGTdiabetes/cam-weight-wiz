@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Callable, Dict, Literal, Optional, Tuple
 
 from backend.models.settings import AppSettings, load_settings
-from backend.wake import WakeListener, _BaseAudioSource  # type: ignore[attr-defined]
+from backend.wake import (  # type: ignore[attr-defined]
+    WakeListener,
+    _BaseAudioSource,
+    get_wake_listener,
+)
 
 logger = logging.getLogger("bascula.voice.service")
 
@@ -47,10 +51,42 @@ class VoiceService:
         self._speech_lock = threading.Lock()
         self._speech_subscribers: Dict[int, queue.Queue[Dict[str, object]]] = {}
         self._next_speech_token = 1
+        self._global_wake_listener: Optional[WakeListener] = None
+        self._wake_was_enabled = False
 
     # ------------------------------------------------------------------
     # Push-to-talk lifecycle
     # ------------------------------------------------------------------
+    def _pause_global_wake(self) -> None:
+        listener = get_wake_listener()
+        self._global_wake_listener = listener
+        self._wake_was_enabled = False
+        if listener is None:
+            return
+        was_enabled = bool(listener.enabled)
+        self._wake_was_enabled = was_enabled
+        if was_enabled:
+            try:
+                logger.info("VOICE[PTT] pausing wake listener")
+                listener.set_enabled(False)
+                time.sleep(0.1)
+            except Exception:
+                logger.exception("VOICE[PTT] failed to pause wake listener")
+
+    def _resume_global_wake(self) -> None:
+        listener = self._global_wake_listener
+        should_enable = self._wake_was_enabled and listener is not None
+        self._global_wake_listener = None
+        self._wake_was_enabled = False
+        if listener is None:
+            return
+        if should_enable:
+            try:
+                logger.info("VOICE[PTT] resuming wake listener")
+                listener.set_enabled(True)
+            except Exception:
+                logger.exception("VOICE[PTT] failed to resume wake listener")
+
     def start_listen_ptt(self) -> PttResult:
         """Begin push-to-talk capture if the service is in recipes mode."""
         with self._state_lock:
@@ -63,11 +99,13 @@ class VoiceService:
             self._captured_chunks = []
             self._capture_error = None
             self._capture_stop.clear()
+            self._pause_global_wake()
             self._wake_helper.enabled = True
             self._wake_helper._audio_failure_reported = False  # type: ignore[attr-defined]
             source, reason = self._obtain_audio_source()
             if source is None:
                 logger.warning("VOICE[PTT] unable to open microphone: %s", reason or "unknown")
+                self._resume_global_wake()
                 return PttResult(ok=False, reason=reason or "unavailable")
 
             self.listen_enabled = True
@@ -101,6 +139,7 @@ class VoiceService:
                 self._wake_helper._close_audio_source(source)
             except Exception:  # pragma: no cover - defensive
                 logger.exception("VOICE[PTT] failed closing audio source")
+        self._resume_global_wake()
 
         pcm_audio = b"".join(self._captured_chunks)
         self._captured_chunks = []

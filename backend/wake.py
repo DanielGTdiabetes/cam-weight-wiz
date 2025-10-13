@@ -1024,6 +1024,11 @@ def _get_listener() -> WakeListener:
     return _wake_listener
 
 
+def get_wake_listener() -> Optional[WakeListener]:
+    """Return the active wake listener instance, if any."""
+    return _wake_listener
+
+
 @router.get("/status")
 async def wake_status() -> Dict[str, Any]:
     listener = _get_listener()
