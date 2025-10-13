@@ -344,11 +344,36 @@ async def _backend_stream_scale_events(request: Request) -> AsyncGenerator[bytes
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream("GET", url, headers=headers) as response:
                 response.raise_for_status()
-                async for chunk in response.aiter_raw():
+                async for line in response.aiter_lines():
                     if await request.is_disconnected():
                         break
-                    if chunk:
-                        yield chunk
+                    if line is None:
+                        continue
+                    if not line:
+                        continue
+                    if line.startswith(":"):
+                        yield f"{line}\n".encode("utf-8")
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    raw_payload = line.split(":", 1)[1].strip()
+                    if not raw_payload:
+                        continue
+                    try:
+                        parsed = json.loads(raw_payload)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    normalized, value, ts_value = _hydrate_weight_response(parsed if isinstance(parsed, dict) else {})
+                    ts_str = ts_value.isoformat() if ts_value else None
+                    stable = normalized.get("stable")
+                    event_payload = {
+                        "value": value,
+                        "ts": ts_str,
+                        "stable": stable if isinstance(stable, bool) else None,
+                        "ok": normalized.get("ok", bool(value is not None)),
+                    }
+                    yield b"event: weight\n"
+                    yield f"data: {json.dumps(event_payload)}\n\n".encode("utf-8")
     except httpx.HTTPError as exc:
         LOG_SCALE.error("Scale backend SSE failed: %s", exc)
         error_payload = json.dumps({"error": "scale_backend_unreachable"})
