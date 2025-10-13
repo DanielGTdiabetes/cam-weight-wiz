@@ -735,19 +735,7 @@ export const RecipesView = ({ context = "page", onClose }: RecipesViewProps = {}
   return (
     <div className="relative flex h-full flex-col overflow-hidden">
       {navControls}
-      <div className="absolute right-4 top-4 z-50 hidden md:flex">
-        <Button variant="secondary" size="lg" onClick={handleExit} className="shadow-md">
-          <X className="mr-2 h-4 w-4" /> Salir
-        </Button>
-      </div>
-      <div className="flex flex-1 flex-col overflow-hidden pt-16 md:pt-0">
-        <div className="flex justify-end px-4 pb-2 md:hidden">
-          <Button variant="secondary" size="sm" onClick={handleExit}>
-            <X className="mr-1 h-3 w-3" /> Salir
-          </Button>
-        </div>
-        {content}
-      </div>
+      {content}
     </div>
   );
 };

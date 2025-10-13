@@ -3605,6 +3605,8 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         LOG_SCALE.warning("No se pudo activar AP en arranque: %s", exc)
 
+    loop = asyncio.get_running_loop()
+    voice_service.set_loop(loop)
     basculin_coach.start()
     try:
         await init_scale()
@@ -3725,20 +3727,12 @@ async def api_scale_events(request: Request) -> StreamingResponse:
 
     async def event_stream() -> AsyncGenerator[str, None]:
         LOG_SCALE.info("[sse] client connected: %s", client_host)
-        config = _load_config()
-        scale_cfg = config.get("scale") if isinstance(config.get("scale"), dict) else {}
-        decimals_raw = scale_cfg.get("decimals")
-        try:
-            decimals = int(decimals_raw)
-        except (TypeError, ValueError):
-            decimals = 0
-
         last_sent_value: Optional[float] = None
         last_stable: Optional[bool] = None
         has_sent_initial = False
         last_emit = 0.0
         last_keepalive = time.monotonic()
-        hysteresis = 0.1 if decimals >= 1 else 1.0
+        hysteresis = 2.0  # gramos de variación mínima
         min_interval = 0.08
 
         try:

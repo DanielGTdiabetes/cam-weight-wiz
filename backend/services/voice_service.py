@@ -47,12 +47,18 @@ class VoiceService:
         self._captured_chunks: list[bytes] = []
         self._last_transcript: Optional[str] = None
         self._capture_error: Optional[str] = None
-        self._wake_helper = WakeListener(initial_enabled=True)
+        listener = get_wake_listener()
+        if listener is None:
+            logger.error("VOICE service could not access global wake listener")
+            listener = WakeListener(initial_enabled=True)
+            listener.start()
+        self._wake_helper = listener
         self._speech_lock = threading.Lock()
         self._speech_subscribers: Dict[int, queue.Queue[Dict[str, object]]] = {}
         self._next_speech_token = 1
         self._global_wake_listener: Optional[WakeListener] = None
         self._wake_was_enabled = False
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     # ------------------------------------------------------------------
     # Push-to-talk lifecycle
@@ -325,3 +331,14 @@ voice_service = VoiceService()
 
 
 __all__ = ["voice_service", "VoiceService", "PttResult"]
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+
+    def enqueue_say(self, text: str, *, voice: Optional[str] = None) -> None:
+        if self._loop is None:
+            logger.warning("VOICE enqueue ignored because no event loop registered: %s", text)
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self.say(text, voice=voice), self._loop)
+        except Exception:
+            logger.exception("VOICE failed to enqueue speech task")
