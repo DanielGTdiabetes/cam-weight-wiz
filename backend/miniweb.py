@@ -3758,7 +3758,24 @@ async def api_scale_events(request: Request) -> StreamingResponse:
                     should_emit = True
 
                 if should_emit and now - last_emit >= min_interval:
-                    payload = json.dumps({"value": value, "ts": ts_str, "stable": stable_flag})
+                    serialized_value: Optional[float]
+                    if value is None:
+                        serialized_value = None
+                    elif isinstance(value, (int, float)):
+                        serialized_value = float(value)
+                    else:
+                        try:
+                            serialized_value = float(value)
+                        except (TypeError, ValueError):
+                            serialized_value = None
+
+                    payload = json.dumps(
+                        {
+                            "value": serialized_value,
+                            "ts": ts_str,
+                            "stable": stable_flag if isinstance(stable_flag, bool) else None,
+                        }
+                    )
                     yield "event: weight\n"
                     yield f"data: {payload}\n\n"
                     last_sent_value = value
