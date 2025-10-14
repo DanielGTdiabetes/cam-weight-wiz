@@ -175,11 +175,45 @@ export const useGlucoseStore = create<GlucoseStore>((set) => ({
 
 export const glucoseStore = useGlucoseStore;
 
+const resolveDiabetesEventsBase = (
+  baseUrl: string,
+): { origin?: string; path: string } => {
+  const normalized = baseUrl.replace(/\/$/, "");
+  if (!normalized) {
+    return { path: "" };
+  }
+  try {
+    const url = new URL(normalized);
+    return {
+      origin: url.origin,
+      path: url.pathname.replace(/\/$/, ""),
+    };
+  } catch {
+    const path = normalized.startsWith("/") ? normalized : `/${normalized}`;
+    return { path };
+  }
+};
+
+const buildDiabetesEventsPathFromBase = (path: string): string => {
+  const trimmedPath = path.replace(/\/$/, "");
+  if (!trimmedPath) {
+    return "/api/diabetes/events";
+  }
+  return `${trimmedPath}/api/diabetes/events`;
+};
+
+export const buildDiabetesEventsPath = (): string => {
+  const baseUrl = apiWrapper.getBaseUrl();
+  const { path } = resolveDiabetesEventsBase(baseUrl);
+  return buildDiabetesEventsPathFromBase(path);
+};
+
 export const buildDiabetesEventsUrl = (): string => {
   const baseUrl = apiWrapper.getBaseUrl();
-  try {
-    return new URL("/api/diabetes/events", baseUrl).toString();
-  } catch {
-    return `${baseUrl.replace(/\/$/, "")}/api/diabetes/events`;
+  const { origin, path } = resolveDiabetesEventsBase(baseUrl);
+  const eventsPath = buildDiabetesEventsPathFromBase(path);
+  if (origin) {
+    return `${origin}${eventsPath}`;
   }
+  return eventsPath;
 };
