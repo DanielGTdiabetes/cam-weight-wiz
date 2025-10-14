@@ -22,6 +22,7 @@ import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useAudioPref } from "@/state/useAudio";
 import { useTimerStore } from "@/state/timerStore";
 import { AppShell } from "@/layouts/AppShell";
+import { useServiciosState } from "@/hooks/servicios/useServiciosState";
 
 type BasculinMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
 
@@ -37,6 +38,7 @@ const Index = () => {
   const [networkNotice, setNetworkNotice] = useState<
     { message: string; type: "info" | "warning" | "success" | "error" } | null
   >(null);
+  const [stateWarningDismissed, setStateWarningDismissed] = useState(false);
   const [mascoMsg, setMascoMsg] = useState<string | undefined>();
   const [basculinMood, setBasculinMood] = useState<BasculinMood>("normal");
   const durationMs = useTimerStore((state) => state.durationMs);
@@ -52,6 +54,20 @@ const Index = () => {
     setBasculinMood("alert");
   }, []);
   const countdown = useCountdown({ durationMs, startedAt, onFinished: handleTimerFinished });
+
+  const { warning: serviciosWarning, recoveryActive } = useServiciosState();
+
+  useEffect(() => {
+    if (recoveryActive) {
+      setShowRecovery(true);
+    }
+  }, [recoveryActive]);
+
+  useEffect(() => {
+    if (!serviciosWarning) {
+      setStateWarningDismissed(false);
+    }
+  }, [serviciosWarning]);
 
   const speakResponse = useCallback(
     async (text: string) => {
@@ -314,6 +330,13 @@ const Index = () => {
               message={networkNotice.message}
               type={networkNotice.type}
               onClose={() => setNetworkNotice(null)}
+            />
+          )}
+          {serviciosWarning && !stateWarningDismissed && (
+            <NotificationBar
+              message={serviciosWarning}
+              type="warning"
+              onClose={() => setStateWarningDismissed(true)}
             />
           )}
           {notification && (

@@ -83,6 +83,17 @@ El script comprueba `shellcheck`, `systemd-analyze verify`, `nginx -t`, `curl 12
 - **bascula-health-wait.service** – espera a que `/api/miniweb/status` devuelva `"ok": true` antes de dejar continuar al kiosk. 【F:systemd/bascula-health-wait.service†L1-L13】
 - **bascula-ui.service** – arranca `startx` + Chromium kiosk sólo cuando `bascula-health-wait.service` completó correctamente. Prepara `/run/user/1000` y los logs antes de lanzar la sesión gráfica. 【F:systemd/bascula-ui.service†L1-L27】
 
+### Estado agregado del sistema (`GET /api/state`)
+
+- El backend expone `GET /api/state` con un resumen ligero pensado para la UI. El payload incluye `app.version`, `app.mode`, el estado de servicios (`backend`, `miniweb`, `tts`, `camera` y `network.online/ap_mode`), además de banderas de diabetes y ajustes de sonido.【F:backend/main.py†L2806-L2910】
+- El endpoint nunca lanza error: si miniweb, la cámara o las voces no responden se devuelven valores por defecto (`miniweb: "unknown"`, `tts/camera: "down"`, `network.online=false`) en lugar de propagar excepciones.【F:backend/main.py†L2806-L2871】
+
+### Criterios de modo recovery en la UI
+
+- La UI monitoriza `/api/health`, `/api/settings` y `/api/scale/status`; sólo tras **tres fallos consecutivos** en cualquiera de ellos se fuerza `localStorage.recovery_mode = "true"` y se muestra la pantalla de recuperación.【F:src/hooks/servicios/useServiciosState.ts†L104-L158】
+- Las caídas puntuales de `/api/state` se notifican con un aviso no bloqueante en la barra superior; no activan recovery ni recargas agresivas.【F:src/hooks/servicios/useServiciosState.ts†L55-L103】【F:src/pages/Index.tsx†L69-L89】【F:src/pages/Index.tsx†L227-L235】
+
+
 ### Troubleshooting rápido
 
 - **Miniweb no responde**: revisa `journalctl -u bascula-miniweb -n 50` y vuelve a lanzar `sudo systemctl restart bascula-miniweb`. Asegúrate de que la virtualenv exista en `/opt/bascula/current/.venv`.
