@@ -1,6 +1,11 @@
 import { useEffect, useMemo } from "react";
 import { Droplet } from "lucide-react";
-import { useGlucoseStore, glucoseStore, buildDiabetesEventsUrl } from "@/state/glucose";
+import {
+  useGlucoseStore,
+  glucoseStore,
+  buildDiabetesEventsUrl,
+  buildDiabetesEventsPath,
+} from "@/state/glucose";
 import { logger } from "@/services/logger";
 
 const TREND_SYMBOLS: Record<string, string> = {
@@ -72,7 +77,7 @@ export const GlucoseHeaderBadge = () => {
 
       let url = buildDiabetesEventsUrl();
       if (typeof window !== "undefined" && window.location.protocol === "https:" && url.startsWith("http://")) {
-        url = "/api/diabetes/events";
+        url = buildDiabetesEventsPath();
       }
       try {
         source = new EventSource(url);
