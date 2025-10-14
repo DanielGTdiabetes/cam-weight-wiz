@@ -5,15 +5,12 @@ import { FoodScannerView } from "@/pages/FoodScannerView";
 import { TimerFullView } from "@/pages/TimerFullView";
 import { RecipesView } from "@/pages/RecipesView";
 import { SettingsView } from "@/pages/SettingsView";
-import { TopBar } from "@/components/TopBar";
 import { NotificationBar } from "@/components/NotificationBar";
 import { TimerDialog } from "@/components/TimerDialog";
 import { Mode1515Dialog } from "@/components/Mode1515Dialog";
 import { RecoveryMode } from "@/components/RecoveryMode";
 import { APModeScreen } from "@/components/APModeScreen";
 import { BasculinMascot } from "@/components/BasculinMascot";
-import { Clock, ArrowLeft } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
 import { networkDetector, NetworkStatus } from "@/services/networkDetector";
 import { api } from "@/services/api";
@@ -22,6 +19,7 @@ import { storage } from "@/services/storage";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useAudioPref } from "@/state/useAudio";
+import { AppShell } from "@/layouts/AppShell";
 
 type BasculinMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
 
@@ -264,6 +262,25 @@ const Index = () => {
   const showTopBar = currentView !== "menu" && currentView !== "timer" && currentView !== "recipes";
   const shouldShowMascot = !showRecovery && !showAPMode;
 
+  const topBarProps = showTopBar
+    ? {
+        isVoiceActive,
+        isWifiConnected:
+          networkStatusState?.connectivity === "full"
+            ? true
+            : networkStatusState?.isWifiConnected ?? false,
+        timerSeconds,
+        onSettingsClick: () => setCurrentView("settings"),
+        onTimerClick: () => setShowTimerDialog(true),
+        onVoiceToggle: () => {
+          void setVoiceEnabled(!isVoiceActive);
+        },
+        onBackClick: handleBackToMenu,
+        showBackButton: true,
+        showTimerButton: currentView === "scale" || currentView === "scanner",
+      }
+    : undefined;
+
   // Show special screens first
   if (showRecovery) {
     return <RecoveryMode />;
@@ -274,55 +291,11 @@ const Index = () => {
   }
 
   return (
-    <div className="h-screen overflow-hidden bg-background">
-      {/* Mode 15/15 Dialog */}
-      {show1515Mode && glucoseData && (
-        <Mode1515Dialog
-          glucose={glucoseData.glucose}
-          onClose={() => setShow1515Mode(false)}
-        />
-      )}
-
-      {/* Basculin Mascot */}
-      <BasculinMascot
-        isActive={shouldShowMascot}
-        message={mascoMsg}
-        position="corner"
-        mood={basculinMood}
-        enableVoice={isVoiceActive}
-      />
-
-      {networkStatusState?.effectiveMode === "offline" && (
-        <div className="pointer-events-none fixed right-4 top-4 z-40">
-          <div className="flex items-center gap-2 rounded-full border border-amber-400/70 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-200 shadow-lg backdrop-blur">
-            <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
-            Offline
-          </div>
-        </div>
-      )}
-
-      {/* Top Bar - Show in most views except menu, timer, recipes */}
-      {showTopBar && (
+    <AppShell
+      showTopBar={showTopBar}
+      topBarProps={topBarProps}
+      notifications={
         <>
-          <TopBar
-            isVoiceActive={isVoiceActive}
-            isWifiConnected={
-              networkStatusState?.connectivity === "full"
-                ? true
-                : networkStatusState?.isWifiConnected ?? false
-            }
-            glucose={glucoseData?.glucose}
-            glucoseTrend={glucoseData?.trend}
-            timerSeconds={timerSeconds}
-            onSettingsClick={() => setCurrentView("settings")}
-            onTimerClick={() => setShowTimerDialog(true)}
-            onVoiceToggle={() => {
-              void setVoiceEnabled(!isVoiceActive);
-            }}
-            onBackClick={handleBackToMenu}
-            showBackButton={true}
-            showTimerButton={currentView === "scale" || currentView === "scanner"}
-          />
           {networkNotice && (
             <NotificationBar
               message={networkNotice.message}
@@ -334,20 +307,44 @@ const Index = () => {
             <NotificationBar message={notification} type="info" onClose={() => setNotification("")} />
           )}
         </>
-      )}
+      }
+    >
+      <>
+        {show1515Mode && glucoseData && (
+          <Mode1515Dialog
+            glucose={glucoseData.glucose}
+            onClose={() => setShow1515Mode(false)}
+          />
+        )}
 
-      {/* Main Content */}
-      <div className={showTopBar ? "h-[calc(100vh-60px)] overflow-y-auto" : "h-screen"}>
-        {renderView()}
-      </div>
+        <BasculinMascot
+          isActive={shouldShowMascot}
+          message={mascoMsg}
+          position="corner"
+          mood={basculinMood}
+          enableVoice={isVoiceActive}
+        />
 
-      {/* Timer Dialog */}
-      <TimerDialog
-        open={showTimerDialog}
-        onClose={() => setShowTimerDialog(false)}
-        onStart={handleTimerStart}
-      />
-    </div>
+        {networkStatusState?.effectiveMode === "offline" && (
+          <div className="pointer-events-none fixed right-4 top-4 z-40">
+            <div className="flex items-center gap-2 rounded-full border border-amber-400/70 bg-amber-500/10 px-4 py-2 text-sm font-semibold text-amber-200 shadow-lg backdrop-blur">
+              <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+              Offline
+            </div>
+          </div>
+        )}
+
+        <div className="min-h-full">
+          {renderView()}
+        </div>
+
+        <TimerDialog
+          open={showTimerDialog}
+          onClose={() => setShowTimerDialog(false)}
+          onStart={handleTimerStart}
+        />
+      </>
+    </AppShell>
   );
 };
 

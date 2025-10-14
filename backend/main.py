@@ -52,10 +52,10 @@ from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
 from backend.routers import food as food_router
+from backend.routes.diabetes import router as diabetes_router, glucose_monitor
 from backend.app.services.settings_service import get_settings_service
 from backend.voice import list_voices as list_piper_voices, router as voice_router
 from backend.wake import router as wake_router, init_wake_if_enabled
-from backend.core.events import coach_event_bus, GlucoseUpdateEvent
 
 CAPTURES_DIR = Path(os.getenv("BASCULA_CAPTURES_DIR", "/run/bascula/captures"))
 
@@ -1234,6 +1234,7 @@ app.include_router(wake_router)
 app.include_router(camera_router)
 app.include_router(audio_router)
 app.include_router(food_router.router, prefix="/api/food", tags=["food"])
+app.include_router(diabetes_router)
 
 
 @app.get("/api/voices", include_in_schema=False)
@@ -1628,43 +1629,31 @@ async def get_timer_status():
 
 @app.get("/api/nightscout/glucose")
 async def get_glucose():
-    """Get current glucose from Nightscout"""
-    config = load_config()
-    ns_url, ns_token = _get_nightscout_credentials(config)
-    
-    if not ns_url:
+    """Get current glucose using the diabetes monitor cache."""
+    status = await glucose_monitor.get_snapshot(force_refresh=True)
+    if not status.enabled:
         raise HTTPException(status_code=400, detail="Nightscout not configured")
-    
-    try:
-        async with httpx.AsyncClient() as client:
-            headers = {"API-SECRET": ns_token} if ns_token else {}
-            response = await client.get(f"{ns_url}/api/v1/entries/current.json", headers=headers, timeout=5)
-            data = response.json()
-            
-            if data and len(data) > 0:
-                entry = data[0]
-                raw_glucose = entry.get("sgv", 0)
-                try:
-                    glucose_value = float(raw_glucose)
-                except (TypeError, ValueError):
-                    glucose_value = 0.0
-                trend_value = entry.get("direction")
-                normalized_trend = trend_value.lower() if isinstance(trend_value, str) else None
-                coach_event_bus.publish(
-                    GlucoseUpdateEvent(
-                        mgdl=glucose_value,
-                        trend=normalized_trend,
-                    )
-                )
-                return {
-                    "glucose": glucose_value,
-                    "trend": normalized_trend or "flat",
-                    "timestamp": entry.get("dateString", "")
-                }
-            else:
-                raise HTTPException(status_code=404, detail="No glucose data")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Nightscout error: {str(e)}")
+    if not status.nightscout_connected or status.mgdl is None:
+        raise HTTPException(status_code=404, detail="No glucose data")
+
+    if status.updated_at is None:
+        timestamp = datetime.now(timezone.utc)
+    else:
+        timestamp = status.updated_at.astimezone(timezone.utc)
+
+    trend_map = {
+        "up": "up",
+        "up_slow": "up",
+        "flat": "stable",
+        "down_slow": "down",
+        "down": "down",
+    }
+
+    return {
+        "glucose": float(status.mgdl),
+        "trend": trend_map.get(status.trend or "flat", "stable"),
+        "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
+    }
 
 @app.post("/api/nightscout/bolus")
 async def export_bolus(data: BolusData):

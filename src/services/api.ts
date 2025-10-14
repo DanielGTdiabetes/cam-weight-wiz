@@ -74,6 +74,14 @@ export interface GlucoseData {
   timestamp: string;
 }
 
+export interface DiabetesStatus {
+  enabled: boolean;
+  nightscout_connected: boolean;
+  mgdl: number | null;
+  trend: "up" | "up_slow" | "flat" | "down_slow" | "down" | null;
+  updated_at: string | null;
+}
+
 export interface OtaJobState {
   status: "idle" | "running" | "success" | "error";
   started_at: number;
@@ -295,6 +303,10 @@ class ApiService {
       throw new ApiError('Nightscout no configurado', 0, 'NOT_CONFIGURED');
     }
     return apiWrapper.get<GlucoseData>('/api/nightscout/glucose');
+  }
+
+  async getDiabetesStatus(): Promise<DiabetesStatus> {
+    return apiWrapper.get<DiabetesStatus>('/api/diabetes/status');
   }
 
   async exportBolus(

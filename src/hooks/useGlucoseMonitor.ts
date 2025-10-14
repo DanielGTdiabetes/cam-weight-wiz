@@ -1,9 +1,7 @@
-import { useEffect, useState } from "react";
-import { api, type GlucoseData } from "@/services/api";
-import { ApiError } from "@/services/apiWrapper";
-import { storage } from "@/services/storage";
-import { logger } from "@/services/logger";
+import { useEffect, useMemo, useRef } from "react";
+import { type GlucoseData } from "@/services/api";
 import { useToast } from "@/hooks/use-toast";
+import { useGlucoseStore } from "@/state/glucose";
 
 interface UseGlucoseMonitorReturn extends GlucoseData {
   isLoading: boolean;
@@ -15,73 +13,80 @@ export const useGlucoseMonitor = (
   lowThreshold = 70,
   highThreshold = 180
 ): UseGlucoseMonitorReturn | null => {
-  const [data, setData] = useState<GlucoseData | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
+  const { mgdl, trend, updatedAt, nightscoutConnected, initialized, lowThreshold: storeLow, highThreshold: storeHigh } =
+    useGlucoseStore((state) => ({
+      mgdl: state.mgdl,
+      trend: state.trend,
+      updatedAt: state.updatedAt,
+      nightscoutConnected: state.nightscoutConnected,
+      initialized: state.initialized,
+      lowThreshold: state.lowThreshold,
+      highThreshold: state.highThreshold,
+    }));
+
+  const lastAlertRef = useRef<"low" | "high" | null>(null);
+
+  const effectiveLow = storeLow ?? lowThreshold;
+  const effectiveHigh = storeHigh ?? highThreshold;
 
   useEffect(() => {
-    // Check if Nightscout is configured
-    const settings = storage.getSettings();
-    const isConfigured = !!settings.nightscoutUrl;
-    
-    if (!enabled || !isConfigured) {
-      logger.debug('Glucose monitor disabled', { enabled, isConfigured });
+    if (!enabled) {
+      lastAlertRef.current = null;
       return;
     }
-
-    const fetchGlucose = async () => {
-      try {
-        setIsLoading(true);
-        const glucoseData = await api.getGlucose();
-        setData(glucoseData);
-        setError(null);
-        logger.info('Glucose data fetched', { glucose: glucoseData.glucose });
-
-        // Check for alarms
-        if (glucoseData.glucose < lowThreshold) {
-          toast({
-            title: "⚠️ Hipoglucemia Detectada",
-            description: `Glucosa: ${glucoseData.glucose} mg/dl`,
-            variant: "destructive",
-            duration: 10000,
-          });
-        } else if (glucoseData.glucose > highThreshold) {
-          toast({
-            title: "⚠️ Hiperglucemia Detectada",
-            description: `Glucosa: ${glucoseData.glucose} mg/dl`,
-            variant: "destructive",
-            duration: 10000,
-          });
-        }
-      } catch (err) {
-        if (err instanceof ApiError && err.code === 'NOT_CONFIGURED') {
-          // Silent fail if not configured
-          logger.debug('Nightscout not configured');
-          return;
-        }
-        
-        logger.error('Failed to fetch glucose', { error: err });
-        setError("Error al obtener datos de glucosa");
-      } finally {
-        setIsLoading(false);
+    if (!nightscoutConnected || mgdl === null) {
+      return;
+    }
+    if (mgdl < effectiveLow) {
+      if (lastAlertRef.current !== "low") {
+        toast({
+          title: "⚠️ Hipoglucemia Detectada",
+          description: `Glucosa: ${mgdl} mg/dl`,
+          variant: "destructive",
+          duration: 10000,
+        });
+        lastAlertRef.current = "low";
       }
-    };
+      return;
+    }
+    if (mgdl > effectiveHigh) {
+      if (lastAlertRef.current !== "high") {
+        toast({
+          title: "⚠️ Hiperglucemia Detectada",
+          description: `Glucosa: ${mgdl} mg/dl`,
+          variant: "destructive",
+          duration: 10000,
+        });
+        lastAlertRef.current = "high";
+      }
+      return;
+    }
+    lastAlertRef.current = null;
+  }, [enabled, mgdl, nightscoutConnected, effectiveLow, effectiveHigh, toast]);
 
-    // Fetch immediately
-    fetchGlucose();
+  const normalizedTrend = useMemo(() => {
+    if (!trend) {
+      return "stable" as const;
+    }
+    if (trend === "up" || trend === "up_slow") {
+      return "up" as const;
+    }
+    if (trend === "down" || trend === "down_slow") {
+      return "down" as const;
+    }
+    return "stable" as const;
+  }, [trend]);
 
-    // Then every 5 minutes
-    const interval = setInterval(fetchGlucose, 5 * 60 * 1000);
-
-    return () => clearInterval(interval);
-  }, [enabled, lowThreshold, highThreshold, toast]);
-
-  if (!enabled || !data) return null;
+  if (!enabled || !nightscoutConnected || mgdl === null) {
+    return null;
+  }
 
   return {
-    ...data,
-    isLoading,
-    error,
+    glucose: mgdl,
+    trend: normalizedTrend,
+    timestamp: updatedAt ?? "",
+    isLoading: !initialized,
+    error: null,
   };
 };

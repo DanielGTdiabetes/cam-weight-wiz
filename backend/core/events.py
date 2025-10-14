@@ -127,6 +127,7 @@ coach_event_bus = CoachEventBus(
     rate_overrides={
         "weight-stable": 10.0,
         "tare-done": 5.0,
+        "glucose-update": 3.0,
     }
 )
 

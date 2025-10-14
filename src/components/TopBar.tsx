@@ -1,12 +1,9 @@
 import { Volume2, VolumeX, Wifi, WifiOff, Settings, Clock, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
 
 interface TopBarProps {
   isVoiceActive?: boolean;
   isWifiConnected?: boolean;
-  glucose?: number;
-  glucoseTrend?: "up" | "down" | "stable";
   timerSeconds?: number;
   onSettingsClick: () => void;
   onTimerClick?: () => void;
@@ -19,8 +16,6 @@ interface TopBarProps {
 export const TopBar = ({
   isVoiceActive = false,
   isWifiConnected = true,
-  glucose,
-  glucoseTrend,
   timerSeconds,
   onSettingsClick,
   onTimerClick,
@@ -69,25 +64,8 @@ export const TopBar = ({
         )}
       </div>
 
-      {/* Center - Glucose & Timer */}
+      {/* Center - Timer */}
       <div className="flex items-center gap-4">
-        {glucose !== undefined && (
-          <div className="flex items-center gap-3 rounded-xl bg-primary/10 px-5 py-3">
-            <span className="text-3xl font-bold text-primary">{glucose}</span>
-            <span className="text-base text-muted-foreground">mg/dl</span>
-            {glucoseTrend && (
-              <span className={cn(
-                "text-2xl",
-                glucoseTrend === "up" && "text-warning",
-                glucoseTrend === "down" && "text-destructive",
-                glucoseTrend === "stable" && "text-success"
-              )}>
-                {glucoseTrend === "up" ? "↑" : glucoseTrend === "down" ? "↓" : "→"}
-              </span>
-            )}
-          </div>
-        )}
-        
         {timerSeconds !== undefined && (
           <Button
             onClick={onTimerClick}
