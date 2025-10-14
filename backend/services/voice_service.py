@@ -203,11 +203,19 @@ class VoiceService:
             return False
 
         settings = self._settings_provider()
-        speech_enabled = bool(settings.voice.speech_enabled)
-        self._broadcast_speech(normalized, spoken=speech_enabled, voice=voice)
+        speech_setting_enabled = bool(settings.voice.speech_enabled)
+        with self._state_lock:
+            listening = self.listen_enabled
 
-        if not speech_enabled:
+        should_play_audio = speech_setting_enabled and not listening
+        self._broadcast_speech(normalized, spoken=should_play_audio, voice=voice)
+
+        if not speech_setting_enabled:
             logger.info("VOICE muted, skipping playback: %s", normalized)
+            return False
+
+        if listening:
+            logger.info("VOICE[PTT] capture active, suppressing playback: %s", normalized)
             return False
 
         try:
