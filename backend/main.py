@@ -49,6 +49,7 @@ import grp
 from backend.audio_utils import play_audio_file, play_pcm_audio
 from backend.audio import router as audio_router
 from backend.camera import router as camera_router
+from backend.camera_service import list_cameras
 from backend.scale_service import HX711Service
 from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
@@ -2833,6 +2834,178 @@ async def health_check():
 @app.get("/api/health")
 async def api_health_alias():
     return await health_check()
+
+
+async def _probe_miniweb_status() -> tuple[str, Dict[str, Any]]:
+    """Return miniweb reachability status and payload without raising."""
+
+    base_url = os.getenv("BASCULA_MINIWEB_INTERNAL_URL")
+    if base_url:
+        url = base_url.rstrip("/") + "/api/miniweb/status"
+    else:
+        host = os.getenv("BASCULA_MINIWEB_HOST", "127.0.0.1")
+        port = os.getenv("BASCULA_MINIWEB_PORT", "8080")
+        url = f"http://{host}:{port}/api/miniweb/status"
+
+    status = "unknown"
+    payload: Dict[str, Any] = {}
+
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(url)
+        if response.status_code == 200:
+            status = "up"
+            try:
+                data = response.json()
+                if isinstance(data, dict):
+                    payload = data
+            except Exception:
+                payload = {}
+        elif response.status_code >= 400:
+            status = "down"
+    except httpx.TimeoutException:
+        status = "unknown"
+    except httpx.RequestError:
+        status = "unknown"
+    except Exception:
+        status = "unknown"
+
+    return status, payload
+
+
+async def _resolve_tts_status(voice_enabled: bool) -> str:
+    """Best-effort detection of TTS availability."""
+
+    if not voice_enabled:
+        return "down"
+
+    try:
+        voices = await asyncio.to_thread(list_piper_voices)
+    except Exception:
+        return "down"
+
+    if isinstance(voices, dict):
+        models = voices.get("piper_models")
+        espeak_available = voices.get("espeak_available")
+        has_models = isinstance(models, list) and len(models) > 0
+        if has_models or bool(espeak_available):
+            return "up"
+
+    return "down"
+
+
+async def _resolve_camera_status() -> str:
+    """Check if a camera is detected without raising exceptions."""
+
+    try:
+        cameras = await asyncio.to_thread(list_cameras)
+    except Exception:
+        return "down"
+
+    if isinstance(cameras, list) and cameras:
+        return "up"
+    return "down"
+
+
+@app.get("/api/state")
+async def get_state() -> Dict[str, Any]:
+    """Aggregate lightweight system status without failing on partial data."""
+
+    try:
+        config = load_config()
+    except Exception:
+        config = {}
+
+    general_cfg = config.get("general") if isinstance(config.get("general"), dict) else {}
+    ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+    voice_cfg = config.get("voice") if isinstance(config.get("voice"), dict) else {}
+    diabetes_cfg = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
+
+    sound_enabled = bool(general_cfg.get("sound_enabled", True))
+    voice_enabled = bool(
+        voice_cfg.get("speech_enabled")
+        if isinstance(voice_cfg.get("speech_enabled"), bool)
+        else general_cfg.get("tts_enabled", True)
+    )
+    offline_mode = bool(ui_cfg.get("offline_mode", False))
+
+    diabetes_enabled = bool(
+        diabetes_cfg.get("enabled")
+        if isinstance(diabetes_cfg.get("enabled"), bool)
+        else diabetes_cfg.get("diabetes_enabled", False)
+    )
+
+    nightscout_connected = False
+    try:
+        snapshot = await glucose_monitor.get_snapshot()
+        diabetes_enabled = bool(snapshot.enabled)
+        nightscout_connected = bool(snapshot.nightscout_connected)
+    except Exception:
+        pass
+
+    miniweb_status, miniweb_payload = await _probe_miniweb_status()
+
+    network_online = False
+    ap_mode = False
+    app_mode = os.getenv("BASCULA_APP_MODE") or "unknown"
+
+    if isinstance(miniweb_payload, dict) and miniweb_payload:
+        connectivity = str(miniweb_payload.get("connectivity", ""))
+        internet_available = miniweb_payload.get("internet") is True
+        online_flag = miniweb_payload.get("online")
+        network_online = bool(
+            internet_available
+            or (isinstance(connectivity, str) and connectivity.lower() == "full")
+            or online_flag is True
+        )
+        ap_mode = bool(
+            miniweb_payload.get("ap_active")
+            or (str(miniweb_payload.get("effective_mode", "")).lower() == "ap")
+        )
+        effective_mode = miniweb_payload.get("effective_mode")
+        if isinstance(effective_mode, str) and effective_mode.strip():
+            app_mode = effective_mode.strip()
+    else:
+        network_online = not offline_mode
+        if offline_mode:
+            app_mode = "offline"
+        elif app_mode == "unknown":
+            app_mode = "kiosk"
+
+    app_version = (
+        os.getenv("BASCULA_APP_VERSION")
+        or os.getenv("BASCULA_VERSION")
+        or app.version
+        or "unknown"
+    )
+
+    tts_status = await _resolve_tts_status(voice_enabled)
+    camera_status = await _resolve_camera_status()
+
+    return {
+        "app": {
+            "version": app_version,
+            "mode": app_mode,
+        },
+        "services": {
+            "backend": "up",
+            "miniweb": miniweb_status,
+            "tts": tts_status,
+            "camera": camera_status,
+            "network": {
+                "online": network_online,
+                "ap_mode": ap_mode,
+            },
+        },
+        "diabetes": {
+            "enabled": diabetes_enabled,
+            "nightscout_connected": nightscout_connected,
+        },
+        "ui": {
+            "sound_enabled": sound_enabled,
+            "voice_enabled": voice_enabled,
+        },
+    }
 
 @app.get("/")
 async def root():

@@ -186,6 +186,31 @@ export type MiniwebStatus = {
   internet?: boolean;
 } & Record<string, unknown>;
 
+export interface BackendStatePayload {
+  app?: {
+    version?: string | null;
+    mode?: string | null;
+  } | null;
+  services?: {
+    backend?: string | null;
+    miniweb?: string | null;
+    tts?: string | null;
+    camera?: string | null;
+    network?: {
+      online?: boolean;
+      ap_mode?: boolean;
+    } | null;
+  } | null;
+  diabetes?: {
+    enabled?: boolean;
+    nightscout_connected?: boolean;
+  } | null;
+  ui?: {
+    sound_enabled?: boolean;
+    voice_enabled?: boolean;
+  } | null;
+}
+
 class ApiService {
   constructor() {
     // Update API base URL from settings
@@ -518,6 +543,10 @@ class ApiService {
 
   async miniwebStatus(): Promise<MiniwebStatus> {
     return apiWrapper.get<MiniwebStatus>('/api/miniweb/status');
+  }
+
+  async getBackendState(): Promise<BackendStatePayload> {
+    return apiWrapper.get<BackendStatePayload>('/api/state');
   }
 }
 

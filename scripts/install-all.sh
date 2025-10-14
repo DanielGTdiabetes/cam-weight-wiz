@@ -90,8 +90,9 @@ on_exit() {
     log_warn "UI inactiva"
   fi
 
-  log "HTTP / => ${SUMMARY_HTTP_ROOT_STATUS:-n/d}" 
-  log "HTTP /api/health => ${SUMMARY_HTTP_API_STATUS:-n/d}" 
+  log "HTTP / => ${SUMMARY_HTTP_ROOT_STATUS:-n/d}"
+  log "HTTP /api/health => ${SUMMARY_HTTP_API_STATUS:-n/d}"
+  log "HTTP /api/state => ${SUMMARY_HTTP_STATE_STATUS:-n/d}"
   log "Miniweb status => ${SUMMARY_MINIWEB_STATUS:-n/d}"
 
   log "piper CLI => ${SUMMARY_PIPER_CLI:-no-test}"
@@ -183,6 +184,7 @@ SUMMARY_SCALE_STATUS=""
 SUMMARY_SCALE_CONNECTED=""
 SUMMARY_HTTP_ROOT_STATUS=""
 SUMMARY_HTTP_API_STATUS=""
+SUMMARY_HTTP_STATE_STATUS=""
 SUMMARY_MINIWEB_STATUS=""
 SUMMARY_KMS_STATUS=""
 SUMMARY_XORG_STATUS=""
@@ -2234,6 +2236,18 @@ run_final_checks() {
       SUMMARY_HTTP_API_STATUS="HTTP ${api_status}"
     else
       SUMMARY_HTTP_API_STATUS="${api_status}"
+    fi
+  fi
+  if [[ -z "${SUMMARY_HTTP_STATE_STATUS}" ]]; then
+    local state_status
+    state_status=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/api/state 2>/dev/null || echo "curl_error")
+    if [[ "${state_status}" =~ ^[0-9]+$ ]]; then
+      SUMMARY_HTTP_STATE_STATUS="HTTP ${state_status}"
+    else
+      SUMMARY_HTTP_STATE_STATUS="${state_status}"
+    fi
+    if [[ "${state_status}" != "200" ]]; then
+      log_warn "[no-block] /api/state devolvió ${SUMMARY_HTTP_STATE_STATUS}"
     fi
   fi
   if [[ -z "${SUMMARY_MINIWEB_STATUS}" ]]; then
