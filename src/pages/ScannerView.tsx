@@ -3,6 +3,9 @@ import { Camera, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
+import { Countdown } from "@/components/Countdown";
+import { useCountdown } from "@/hooks/useCountdown";
+import { useTimerStore } from "@/state/timerStore";
 
 interface CaptureResponse {
   ok?: boolean;
@@ -19,6 +22,10 @@ export const ScannerView = () => {
   const [captureTs, setCaptureTs] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { toast } = useToast();
+  const durationMs = useTimerStore((state) => state.durationMs);
+  const startedAt = useTimerStore((state) => state.startedAt);
+  const { remainingMs, mmss, phase } = useCountdown({ durationMs, startedAt });
+  const showCountdown = durationMs > 0 || startedAt !== null;
 
   const imageUrl = useMemo(() => {
     if (!capturePath) {
@@ -91,6 +98,17 @@ export const ScannerView = () => {
 
   return (
     <div className="flex h-full flex-col gap-4 bg-background p-4">
+      {showCountdown && (
+        <div className="flex justify-end">
+          <Countdown
+            remainingMs={remainingMs}
+            mmss={mmss}
+            phase={phase}
+            className="text-5xl font-semibold tracking-tight"
+          />
+        </div>
+      )}
+
       <Card className="flex flex-1 flex-col items-center gap-6 border-primary/40 bg-muted/30 p-6 text-center">
         <div className="max-w-3xl space-y-2">
           <h2 className="text-3xl font-bold">Escáner de alimentos</h2>

@@ -11,6 +11,9 @@ import { storage } from "@/services/storage";
 import { isLocalClient } from "@/lib/network";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
+import { Countdown } from "@/components/Countdown";
+import { useCountdown } from "@/hooks/useCountdown";
+import { useTimerStore } from "@/state/timerStore";
 
 interface ScaleViewProps {
   onNavigate: (view: string) => void;
@@ -30,6 +33,10 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
   const { toast } = useToast();
   const [isTaring, setIsTaring] = useState(false);
   const localClient = isLocalClient();
+  const durationMs = useTimerStore((state) => state.durationMs);
+  const startedAt = useTimerStore((state) => state.startedAt);
+  const { remainingMs, mmss, phase } = useCountdown({ durationMs, startedAt });
+  const showCountdown = durationMs > 0 || startedAt !== null;
 
   const statusLabelMap = {
     connected: "Conectado",
@@ -111,6 +118,17 @@ export const ScaleView = ({ onNavigate }: ScaleViewProps) => {
 
   return (
     <div className="flex h-full flex-col bg-background p-4">
+      {showCountdown && (
+        <div className="mb-4 flex justify-end">
+          <Countdown
+            remainingMs={remainingMs}
+            mmss={mmss}
+            phase={phase}
+            className="text-5xl font-semibold tracking-tight"
+          />
+        </div>
+      )}
+
       {/* Connection Status */}
       {connectionState !== "connected" && (
         <div className="mb-4 rounded-lg border-warning/50 bg-warning/10 p-3 text-center animate-fade-in">
