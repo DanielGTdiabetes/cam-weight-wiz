@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BackendStatePayload } from '@/services/api';
-import { apiWrapper } from '@/services/apiWrapper';
 import { logger } from '@/services/logger';
+
+type ApiWrapper = typeof import('@/services/apiWrapper')['apiWrapper'];
+
+let apiWrapperPromise: Promise<ApiWrapper> | null = null;
+
+const getApiWrapper = (): Promise<ApiWrapper> => {
+  if (apiWrapperPromise === null) {
+    apiWrapperPromise = import('@/services/apiWrapper').then((module) => module.apiWrapper);
+  }
+  return apiWrapperPromise;
+};
 
 interface FailureCounts {
   health: number;
@@ -57,7 +67,8 @@ export const useServiciosState = (): ServiciosStateResult => {
     }
 
     try {
-      const payload = await apiWrapper.request<BackendStatePayload>('/api/state', {
+      const wrapper = await getApiWrapper();
+      const payload = await wrapper.request<BackendStatePayload>('/api/state', {
         timeout: STATE_TIMEOUT_MS,
       });
       if (!mountedRef.current) {
@@ -88,7 +99,8 @@ export const useServiciosState = (): ServiciosStateResult => {
     }
 
     try {
-      await apiWrapper.request<unknown>(endpoint.url, { timeout: CRITICAL_TIMEOUT_MS });
+      const wrapper = await getApiWrapper();
+      await wrapper.request<unknown>(endpoint.url, { timeout: CRITICAL_TIMEOUT_MS });
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'error desconocido';
