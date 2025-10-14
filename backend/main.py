@@ -25,6 +25,7 @@ from typing import Optional, Dict, Any, List, Union, Set
 import argparse
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
@@ -955,6 +956,13 @@ class CalibrationRequest(BaseModel):
 class CalibrationApplyRequest(BaseModel):
     reference_grams: float
 
+
+class PhotoAnalysisRequest(BaseModel):
+    image: str
+    weight: Optional[float] = None
+    filename: Optional[str] = None
+    mime_type: Optional[str] = None
+
 class TimerStart(BaseModel):
     seconds: int
 
@@ -1395,20 +1403,31 @@ async def apply_calibration(data: CalibrationApplyRequest):
 # ============= FOOD SCANNER =============
 
 
-@app.post("/api/scanner/analyze")
-async def analyze_food(image: UploadFile = File(...), weight: float = Form(...)):
-    """Analyze food from a camera image using ChatGPT when available."""
+def _resolve_mime_type(candidate: Optional[str], img) -> str:
+    mime_type = (candidate or "").strip()
+    if not mime_type and getattr(img, "format", None):
+        mime_type = f"image/{img.format.lower()}"
+    if not mime_type:
+        mime_type = "image/jpeg"
+    return mime_type
 
+
+async def _analyze_food_bytes(
+    raw_bytes: bytes,
+    *,
+    weight: float,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Dict[str, Any]:
     if weight <= 0:
         raise HTTPException(status_code=400, detail="El peso debe ser mayor que cero")
 
-    raw_bytes = await image.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="No se recibió imagen para analizar")
 
     try:
         from PIL import Image  # type: ignore
-    except ImportError as exc:
+    except ImportError as exc:  # pragma: no cover - dependency guard
         raise HTTPException(
             status_code=500,
             detail="Pillow no está instalado en el backend. Instala 'pillow' para habilitar el análisis de imágenes.",
@@ -1439,11 +1458,7 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
         "b": round(avg_b, 2),
     }
 
-    mime_type = image.content_type or ""
-    if not mime_type and getattr(img, "format", None):
-        mime_type = f"image/{img.format.lower()}"
-    if not mime_type:
-        mime_type = "image/jpeg"
+    resolved_mime_type = _resolve_mime_type(mime_type, img)
 
     extra_context: Dict[str, Any] = {
         "average_rgb": avg_color,
@@ -1451,8 +1466,8 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
         "weight_grams": weight,
     }
 
-    if image.filename:
-        extra_context["filename"] = image.filename
+    if filename:
+        extra_context["filename"] = filename
     if getattr(img, "format", None):
         extra_context["format"] = img.format
 
@@ -1466,7 +1481,7 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
         raw_bytes,
         weight,
         avg_color,
-        mime_type=mime_type,
+        mime_type=resolved_mime_type,
         extra_context=extra_context,
     )
 
@@ -1500,6 +1515,62 @@ async def analyze_food(image: UploadFile = File(...), weight: float = Form(...))
     raise HTTPException(
         status_code=502,
         detail="El servicio de análisis inteligente no devolvió una respuesta válida",
+    )
+
+
+def _decode_base64_image(image_data: str) -> tuple[bytes, Optional[str]]:
+    if not image_data or not image_data.strip():
+        raise HTTPException(status_code=400, detail="No se recibió imagen para analizar")
+
+    payload = image_data.strip()
+    mime_type: Optional[str] = None
+
+    if payload.startswith("data:"):
+        header, _, b64_data = payload.partition(",")
+        if not b64_data:
+            raise HTTPException(status_code=400, detail="Datos base64 inválidos")
+        mime_section, _, _ = header.partition(";")
+        _, _, maybe_mime = mime_section.partition(":")
+        mime_type = maybe_mime or None
+    else:
+        b64_data = payload
+
+    try:
+        raw_bytes = base64.b64decode(b64_data.strip(), validate=True)
+    except binascii.Error as exc:
+        raise HTTPException(status_code=400, detail="Imagen base64 inválida") from exc
+
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="No se recibió imagen para analizar")
+
+    return raw_bytes, mime_type
+
+
+@app.post("/api/scanner/analyze")
+async def analyze_food(image: UploadFile = File(...), weight: float = Form(...)):
+    """Analyze food from a camera image using ChatGPT when available."""
+
+    raw_bytes = await image.read()
+    return await _analyze_food_bytes(
+        raw_bytes,
+        weight=weight,
+        filename=image.filename,
+        mime_type=image.content_type,
+    )
+
+
+@app.post("/api/scanner/analyze-photo")
+async def analyze_food_photo(payload: PhotoAnalysisRequest):
+    """Analyze food from a base64-encoded photo captured by the frontend."""
+
+    raw_bytes, detected_mime = _decode_base64_image(payload.image)
+    weight = payload.weight if payload.weight is not None else 100.0
+
+    return await _analyze_food_bytes(
+        raw_bytes,
+        weight=weight,
+        filename=payload.filename,
+        mime_type=payload.mime_type or detected_mime,
     )
 
 @app.get("/api/scanner/barcode/{barcode}")
