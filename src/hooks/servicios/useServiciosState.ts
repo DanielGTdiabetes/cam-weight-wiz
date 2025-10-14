@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BackendStatePayload } from '@/services/api';
+import { apiWrapper } from '@/services/apiWrapper';
 import { logger } from '@/services/logger';
 
 interface FailureCounts {
@@ -32,15 +33,6 @@ const DEFAULT_FAILURE_COUNTS: FailureCounts = {
   scale: 0,
 };
 
-const createTimeoutController = (timeoutMs: number): { controller: AbortController; cancel: () => void } => {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  return {
-    controller,
-    cancel: () => window.clearTimeout(timer),
-  };
-};
-
 export interface ServiciosStateResult {
   state: BackendStatePayload | null;
   warning: string | null;
@@ -64,17 +56,10 @@ export const useServiciosState = (): ServiciosStateResult => {
       return;
     }
 
-    const { controller, cancel } = createTimeoutController(STATE_TIMEOUT_MS);
     try {
-      const response = await fetch('/api/state', {
-        method: 'GET',
-        cache: 'no-store',
-        signal: controller.signal,
+      const payload = await apiWrapper.request<BackendStatePayload>('/api/state', {
+        timeout: STATE_TIMEOUT_MS,
       });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const payload = (await response.json()) as BackendStatePayload;
       if (!mountedRef.current) {
         return;
       }
@@ -88,17 +73,12 @@ export const useServiciosState = (): ServiciosStateResult => {
         return;
       }
 
-      if (error instanceof Error) {
-        logger.debug('[ServiciosState] /api/state falló', {
-          message: error.message,
-        });
-      } else {
-        logger.debug('[ServiciosState] /api/state error desconocido');
-      }
+      const message = error instanceof Error ? error.message : 'error desconocido';
+      logger.debug('[ServiciosState] /api/state falló', {
+        message,
+      });
 
       setWarning('No se pudo obtener el estado del sistema (se reintentará).');
-    } finally {
-      cancel();
     }
   }, [warning]);
 
@@ -107,23 +87,13 @@ export const useServiciosState = (): ServiciosStateResult => {
       return true;
     }
 
-    const { controller, cancel } = createTimeoutController(CRITICAL_TIMEOUT_MS);
     try {
-      const response = await fetch(endpoint.url, {
-        method: 'GET',
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        return false;
-      }
+      await apiWrapper.request<unknown>(endpoint.url, { timeout: CRITICAL_TIMEOUT_MS });
       return true;
     } catch (error) {
-      const context = error instanceof Error ? { message: error.message } : {};
-      logger.debug(`[ServiciosState] ping falló ${endpoint.url}`, context);
+      const message = error instanceof Error ? error.message : 'error desconocido';
+      logger.debug(`[ServiciosState] ping falló ${endpoint.url}`, { message });
       return false;
-    } finally {
-      cancel();
     }
   }, []);
 
