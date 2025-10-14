@@ -80,9 +80,7 @@ export const useServiciosState = (): ServiciosStateResult => {
       }
       setState(payload);
       setLastUpdated(Date.now());
-      if (warning !== null) {
-        setWarning(null);
-      }
+      setWarning((prev) => (prev !== null ? null : prev));
     } catch (error) {
       if (!mountedRef.current) {
         return;
@@ -96,11 +94,11 @@ export const useServiciosState = (): ServiciosStateResult => {
         logger.debug('[ServiciosState] /api/state error desconocido');
       }
 
-      setWarning('No se pudo obtener el estado del sistema (se reintentará).');
+      setWarning(() => 'No se pudo obtener el estado del sistema (se reintentará).');
     } finally {
       cancel();
     }
-  }, [warning]);
+  }, []);
 
   const pingEndpoint = useCallback(async (endpoint: CriticalEndpoint): Promise<boolean> => {
     if (typeof window === 'undefined') {

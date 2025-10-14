@@ -31,19 +31,14 @@ const formatTime = (iso: string | null): string => {
 };
 
 export const GlucoseHeaderBadge = () => {
-  const { enabled, nightscoutConnected, mgdl, trend, updatedAt, lowThreshold, lowWarn, highThreshold } =
-    useGlucoseStore((state) => ({
-      enabled: state.enabled,
-      nightscoutConnected: state.nightscoutConnected,
-      mgdl: state.mgdl,
-      trend: state.trend,
-      updatedAt: state.updatedAt,
-      lowThreshold: state.lowThreshold,
-      lowWarn: state.lowWarn,
-      highThreshold: state.highThreshold,
-    }));
-  const loadInitial = useGlucoseStore((state) => state.loadInitial);
-  const applyEvent = useGlucoseStore((state) => state.applyEvent);
+  const enabled = useGlucoseStore((state) => state.enabled);
+  const nightscoutConnected = useGlucoseStore((state) => state.nightscoutConnected);
+  const mgdl = useGlucoseStore((state) => state.mgdl);
+  const trend = useGlucoseStore((state) => state.trend);
+  const updatedAt = useGlucoseStore((state) => state.updatedAt);
+  const lowThreshold = useGlucoseStore((state) => state.lowThreshold);
+  const lowWarn = useGlucoseStore((state) => state.lowWarn);
+  const highThreshold = useGlucoseStore((state) => state.highThreshold);
 
   useEffect(() => {
     let disposed = false;
@@ -51,19 +46,25 @@ export const GlucoseHeaderBadge = () => {
     let staleInterval: number | null = null;
     let pollInterval: number | null = null;
 
-    const start = async () => {
-      await loadInitial();
+    const loadLatest = async () => {
+      await glucoseStore.getState().loadInitial();
+    };
+
+    const setup = async () => {
+      await loadLatest();
       if (disposed || typeof window === "undefined") {
         return;
       }
+
       staleInterval = window.setInterval(() => {
         const state = glucoseStore.getState();
         if (state.lastEventAt && Date.now() - state.lastEventAt > 15000) {
           state.markStale();
         }
       }, 5000);
+
       pollInterval = window.setInterval(() => {
-        void loadInitial();
+        void loadLatest();
       }, 60000);
 
       if (typeof window.EventSource === "undefined") {
@@ -74,20 +75,28 @@ export const GlucoseHeaderBadge = () => {
       if (typeof window !== "undefined" && window.location.protocol === "https:" && url.startsWith("http://")) {
         url = "/api/diabetes/events";
       }
+
       try {
         source = new EventSource(url);
       } catch (error) {
         logger.warn("GLUCOSE badge SSE unavailable", { error, url });
         return;
       }
+
       const handler = (event: MessageEvent<string>) => {
         try {
-          const payload = JSON.parse(event.data) as { type?: string; mgdl?: number | null; trend?: string | null; ts?: string | null };
-          applyEvent(payload);
+          const payload = JSON.parse(event.data) as {
+            type?: string;
+            mgdl?: number | null;
+            trend?: string | null;
+            ts?: string | null;
+          };
+          glucoseStore.getState().applyEvent(payload);
         } catch (error) {
           logger.error("GLUCOSE badge failed to parse event", { error, raw: event.data });
         }
       };
+
       source.addEventListener("glucose_update", handler as EventListener);
       source.onerror = () => {
         logger.warn("GLUCOSE badge SSE disconnected");
@@ -98,9 +107,9 @@ export const GlucoseHeaderBadge = () => {
       };
     };
 
-    let removeHandler: (() => void) | undefined;
-    void start().then((cleanup) => {
-      removeHandler = cleanup;
+    let cleanupHandler: (() => void) | undefined;
+    void setup().then((cleanup) => {
+      cleanupHandler = cleanup;
     });
 
     return () => {
@@ -111,10 +120,10 @@ export const GlucoseHeaderBadge = () => {
       if (pollInterval !== null) {
         window.clearInterval(pollInterval);
       }
-      removeHandler?.();
+      cleanupHandler?.();
       source?.close();
     };
-  }, [applyEvent, loadInitial]);
+  }, []);
 
   const { displayValue, unitLabel, badgeClass, trendSymbol, trendLabel, timeLabel } = useMemo(() => {
     const value = mgdl !== null ? `${mgdl}` : "—";
