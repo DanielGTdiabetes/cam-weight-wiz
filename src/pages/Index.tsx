@@ -12,6 +12,7 @@ import { RecoveryMode } from "@/components/RecoveryMode";
 import { APModeScreen } from "@/components/APModeScreen";
 import { BasculinMascot } from "@/components/BasculinMascot";
 import { useGlucoseMonitor } from "@/hooks/useGlucoseMonitor";
+import { useCountdown } from "@/hooks/useCountdown";
 import { networkDetector, NetworkStatus } from "@/services/networkDetector";
 import { api } from "@/services/api";
 import { apiWrapper } from "@/services/apiWrapper";
@@ -19,6 +20,7 @@ import { storage } from "@/services/storage";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useAudioPref } from "@/state/useAudio";
+import { useTimerStore } from "@/state/timerStore";
 import { AppShell } from "@/layouts/AppShell";
 
 type BasculinMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
@@ -26,7 +28,6 @@ type BasculinMood = "normal" | "happy" | "worried" | "alert" | "sleeping";
 const Index = () => {
   const [currentView, setCurrentView] = useState<string>("menu");
   const [showTimerDialog, setShowTimerDialog] = useState(false);
-  const [timerSeconds, setTimerSeconds] = useState<number | undefined>(undefined);
   const [notification, setNotification] = useState<string>("");
   const [diabetesMode, setDiabetesMode] = useState(true); // Enable by default for demo
   const [show1515Mode, setShow1515Mode] = useState(false);
@@ -38,11 +39,19 @@ const Index = () => {
   >(null);
   const [mascoMsg, setMascoMsg] = useState<string | undefined>();
   const [basculinMood, setBasculinMood] = useState<BasculinMood>("normal");
+  const durationMs = useTimerStore((state) => state.durationMs);
+  const startedAt = useTimerStore((state) => state.startedAt);
+  const startTimer = useTimerStore((state) => state.start);
   const previousNetworkStatus = useRef<NetworkStatus | null>(null);
   const scaleDecimals = useScaleDecimals();
   const { voiceEnabled: isVoiceActive, setEnabled: setVoiceEnabled } = useAudioPref();
   const [conversationHistory, setConversationHistory] = useState<Array<{ role: "user" | "assistant"; text: string }>>([]);
   const lastSpokenRef = useRef<string>("");
+  const handleTimerFinished = useCallback(() => {
+    setMascoMsg("Temporizador finalizado");
+    setBasculinMood("alert");
+  }, []);
+  const countdown = useCountdown({ durationMs, startedAt, onFinished: handleTimerFinished });
 
   const speakResponse = useCallback(
     async (text: string) => {
@@ -213,7 +222,8 @@ const Index = () => {
   }, []);
 
   const handleTimerStart = useCallback(async (seconds: number) => {
-    setTimerSeconds(seconds);
+    const previousState = useTimerStore.getState();
+    startTimer(seconds * 1000);
     setShowTimerDialog(false);
     setMascoMsg("Temporizador iniciado");
     setBasculinMood("happy");
@@ -222,14 +232,15 @@ const Index = () => {
       await api.startTimer(seconds);
     } catch (err) {
       console.error("Failed to start timer:", err);
+      const { hydrate } = useTimerStore.getState();
+      hydrate(previousState.durationMs, previousState.startedAt);
       setBasculinMood("worried");
       setMascoMsg("Error al iniciar temporizador");
     }
-  }, []);
+  }, [startTimer]);
 
   const handleBackToMenu = () => {
     setCurrentView("menu");
-    setTimerSeconds(undefined);
     setBasculinMood("sleeping");
     setMascoMsg(undefined);
   };
@@ -262,6 +273,8 @@ const Index = () => {
   const showTopBar = currentView !== "menu" && currentView !== "timer" && currentView !== "recipes";
   const shouldShowMascot = !showRecovery && !showAPMode;
 
+  const topBarTimerSeconds = durationMs > 0 ? Math.floor(countdown.remainingMs / 1000) : undefined;
+
   const topBarProps = showTopBar
     ? {
         isVoiceActive,
@@ -269,7 +282,7 @@ const Index = () => {
           networkStatusState?.connectivity === "full"
             ? true
             : networkStatusState?.isWifiConnected ?? false,
-        timerSeconds,
+        timerSeconds: topBarTimerSeconds,
         onSettingsClick: () => setCurrentView("settings"),
         onTimerClick: () => setShowTimerDialog(true),
         onVoiceToggle: () => {
