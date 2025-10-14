@@ -1566,12 +1566,35 @@ async def analyze_food_photo(payload: PhotoAnalysisRequest):
     raw_bytes, detected_mime = _decode_base64_image(payload.image)
     weight = payload.weight if payload.weight is not None else 100.0
 
-    return await _analyze_food_bytes(
+    analysis = await _analyze_food_bytes(
         raw_bytes,
         weight=weight,
         filename=payload.filename,
         mime_type=payload.mime_type or detected_mime,
     )
+
+    if isinstance(analysis, dict):
+        nutrition = analysis.get("nutrition") or {}
+
+        carbs = max(0.0, coerce_float(nutrition.get("carbs"), 0.0))
+        proteins = max(0.0, coerce_float(nutrition.get("proteins"), 0.0))
+        fats = max(0.0, coerce_float(nutrition.get("fats"), 0.0))
+        glycemic_index = coerce_float(nutrition.get("glycemic_index"), 50.0)
+        confidence = max(0.0, min(1.0, coerce_float(analysis.get("confidence"), 0.0)))
+
+        kcal = carbs * 4 + proteins * 4 + fats * 9
+
+        return {
+            "name": analysis.get("name", "Alimento no identificado"),
+            "confidence": round(confidence, 2),
+            "carbsPer100g": round(carbs, 2),
+            "proteinsPer100g": round(proteins, 2),
+            "fatsPer100g": round(fats, 2),
+            "kcalPer100g": round(kcal),
+            "glycemicIndex": round(glycemic_index),
+        }
+
+    return analysis
 
 @app.get("/api/scanner/barcode/{barcode}")
 
