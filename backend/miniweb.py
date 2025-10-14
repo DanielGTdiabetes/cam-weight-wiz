@@ -17,6 +17,9 @@ import shlex
 import tempfile
 import traceback
 import re
+import shutil
+import pwd
+import grp
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List, Union, Sequence, Set, AsyncGenerator, Tuple, TYPE_CHECKING
@@ -1256,6 +1259,90 @@ def _run_logged_command(
     return returncode
 
 
+def _current_user_and_group() -> tuple[str, str]:
+    try:
+        username = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        username = os.getenv("USER", "pi") or "pi"
+    try:
+        groupname = grp.getgrgid(os.getgid()).gr_name
+    except KeyError:
+        fallback = os.getenv("GROUP")
+        groupname = fallback or username
+    return username, groupname
+
+
+def _ensure_sudo_ready() -> None:
+    if shutil.which("sudo") is None:
+        raise RuntimeError("sudo no está disponible en el sistema")
+    proc = subprocess.run(
+        ["sudo", "-n", "true"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        details = (proc.stderr or proc.stdout or "").strip()
+        if details:
+            LOG_OTA.warning("[ota] sudo -n true falló: %s", details)
+            try:
+                _append_ota_log(f"[ota] sudo -n true falló: {details}")
+            except Exception:
+                pass
+        raise PermissionError(
+            "sudo no está configurado para ejecutarse sin contraseña para el usuario actual."
+        )
+
+
+def _prepare_ota_workspace() -> None:
+    username, groupname = _current_user_and_group()
+    rc = _run_logged_command(
+        [
+            "sudo",
+            "install",
+            "-d",
+            "-m",
+            "0775",
+            "-o",
+            username,
+            "-g",
+            groupname,
+            str(OTA_RELEASES_DIR),
+        ],
+        check=False,
+    )
+    if rc != 0:
+        LOG_OTA.warning(
+            "[ota] No se pudieron ajustar permisos en %s (exit=%s)",
+            OTA_RELEASES_DIR,
+            rc,
+        )
+        try:
+            _append_ota_log(
+                f"[ota] Advertencia: install -d en {OTA_RELEASES_DIR} devolvió exit={rc}"
+            )
+        except Exception:
+            pass
+    try:
+        OTA_RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise PermissionError(f"No se pudo preparar {OTA_RELEASES_DIR}: {exc}") from exc
+
+    test_path = OTA_RELEASES_DIR / ".ota-permission-test"
+    try:
+        test_path.write_text("ok", encoding="utf-8")
+    except Exception as exc:
+        raise PermissionError(
+            f"No se pudo escribir en {OTA_RELEASES_DIR}: {exc}"
+        ) from exc
+    finally:
+        try:
+            if test_path.exists():
+                test_path.unlink()
+        except Exception:
+            pass
+
+
 def _run_smoke_tests() -> None:
     tests: list[tuple[str, Sequence[str]]] = [
         ("health", ["curl", "-fsS", f"{MINIWEB_BASE_URL}/health"]),
@@ -1316,7 +1403,8 @@ def _ota_worker(target: Optional[str]) -> None:
     release_dir: Optional[Path] = None
 
     try:
-        OTA_RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_sudo_ready()
+        _prepare_ota_workspace()
         release_dir = OTA_RELEASES_DIR / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
         _update_ota_state({"progress": 10, "message": "Clonando repositorio"})
@@ -1384,6 +1472,11 @@ def _ota_worker(target: Optional[str]) -> None:
         _schedule_miniweb_restart()
     except Exception as exc:
         error_message = str(exc)
+        if isinstance(exc, PermissionError):
+            error_message = (
+                f"Permiso denegado: {error_message}. "
+                "Revisa los permisos de /opt/bascula y la configuración sudo (NOPASSWD)."
+            )
         truncated = error_message[:300]
         _append_ota_log(f"[ota] ERROR: {error_message}")
         tb_text = traceback.format_exc()
