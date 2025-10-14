@@ -14,16 +14,13 @@ export const useGlucoseMonitor = (
   highThreshold = 180
 ): UseGlucoseMonitorReturn | null => {
   const { toast } = useToast();
-  const { mgdl, trend, updatedAt, nightscoutConnected, initialized, lowThreshold: storeLow, highThreshold: storeHigh } =
-    useGlucoseStore((state) => ({
-      mgdl: state.mgdl,
-      trend: state.trend,
-      updatedAt: state.updatedAt,
-      nightscoutConnected: state.nightscoutConnected,
-      initialized: state.initialized,
-      lowThreshold: state.lowThreshold,
-      highThreshold: state.highThreshold,
-    }));
+  const mgdl = useGlucoseStore((state) => state.mgdl);
+  const trend = useGlucoseStore((state) => state.trend);
+  const updatedAt = useGlucoseStore((state) => state.updatedAt);
+  const nightscoutConnected = useGlucoseStore((state) => state.nightscoutConnected);
+  const initialized = useGlucoseStore((state) => state.initialized);
+  const storeLow = useGlucoseStore((state) => state.lowThreshold);
+  const storeHigh = useGlucoseStore((state) => state.highThreshold);
 
   const lastAlertRef = useRef<"low" | "high" | null>(null);
 
