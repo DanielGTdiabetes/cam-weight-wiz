@@ -1,0 +1,12 @@
+[Unit]
+Description=Ensure X735 fan/power services
+After=multi-user.target local-fs.target
+ConditionPathExists=!/var/lib/x735-setup.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/x735-ensure.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

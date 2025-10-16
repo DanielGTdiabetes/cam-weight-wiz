@@ -1,0 +1,3255 @@
+"""
+Bascula Backend - Complete FastAPI Server
+Includes: Scale, Camera, OCR, Timer, Nightscout, TTS, Recipes, Settings, OTA
+"""
+
+from fastapi import (
+    Body,
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    UploadFile,
+    File,
+    Form,
+)
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from contextlib import asynccontextmanager
+from copy import deepcopy
+from typing import Optional, Dict, Any, List, Union, Set, Tuple
+import argparse
+import asyncio
+import base64
+import binascii
+import json
+import logging
+import os
+import subprocess
+import time
+import tarfile
+import tempfile
+import shutil
+from io import BytesIO
+from pathlib import Path
+import math
+from uuid import uuid4
+from datetime import datetime, timezone
+import httpx
+import re
+import threading
+import stat
+import pwd
+import grp
+
+from backend.audio_utils import play_audio_file, play_pcm_audio
+from backend.audio import router as audio_router
+from backend.camera import router as camera_router
+from backend.camera_service import list_cameras
+from backend.scale_service import (
+    DEFAULT_CALIBRATION_OFFSET,
+    DEFAULT_CALIBRATION_SCALE,
+    DEFAULT_DEBOUNCE_MS,
+    DEFAULT_EMA_ALPHA,
+    DEFAULT_HYSTERESIS_GRAMS,
+    DEFAULT_MEDIAN_WINDOW,
+    DEFAULT_RECONNECT_MAX_BACKOFF,
+    DEFAULT_VARIANCE_THRESHOLD,
+    DEFAULT_VARIANCE_WINDOW,
+    DEFAULT_WATCHDOG_TIMEOUT,
+    HX711Service,
+)
+from backend.serial_scale_service import SerialScaleService
+from backend.ocr_service import get_ocr_service
+from backend.routers import food as food_router
+from backend.routes.diabetes import router as diabetes_router, glucose_monitor
+from backend.app.services.settings_service import get_settings_service
+from backend.voice import list_voices as list_piper_voices, router as voice_router
+from backend.wake import router as wake_router, init_wake_if_enabled
+
+CAPTURES_DIR = Path(os.getenv("BASCULA_CAPTURES_DIR", "/run/bascula/captures"))
+
+
+CHATGPT_MODELS = [
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-4.1-mini",
+    "gpt-4.1",
+]
+
+
+ASSISTANT_SYSTEM_PROMPT = (
+    "Eres Basculin, la mascota conversacional de la Báscula Digital Pro. "
+    "Hablas con cariño, guías paso a paso la preparación de platos y propones ideas nuevas. "
+    "Además actúas como nutricionista experta: ayudas a contar hidratos, grasas y proteínas y sugieres ajustes equilibrados, "
+    "siempre recordando que la persona debe consultar a profesionales sanitarios antes de cambios importantes. "
+    "No uses emoticonos ni describas emojis; responde en texto natural claro y directo. "
+    "Responde SIEMPRE con un JSON con esta forma exacta: {\"reply\": \"texto corto en español\", \"mood\": \"happy|normal|worried|alert|sleeping\", \"speak\": true/false}. "
+    "Nunca añadas texto fuera del JSON ni otras claves. El campo reply debe ser claro, amable y de máximo 220 caracteres."
+)
+
+ALLOWED_ASSISTANT_MOODS = {"normal", "happy", "worried", "alert", "sleeping"}
+
+
+def _format_assistant_context(context: Optional[Dict[str, Any]]) -> str:
+    if not context:
+        return ""
+    lines: List[str] = []
+    for key, value in context.items():
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            try:
+                value_str = json.dumps(value, ensure_ascii=False)
+            except Exception:
+                value_str = str(value)
+        else:
+            value_str = str(value)
+        if value_str.strip():
+            lines.append(f"{key}: {value_str}")
+    return "\n".join(lines)
+
+
+def get_chatgpt_api_key() -> Optional[str]:
+    """Return the first available ChatGPT/OpenAI API key."""
+    potential_keys = [
+        os.getenv("OPENAI_API_KEY"),
+        os.getenv("CHATGPT_API_KEY"),
+        os.getenv("CHAT_GPT_API_KEY"),
+    ]
+
+    config = load_config()
+    if isinstance(config, dict):
+        potential_keys.append(config.get("openai_api_key"))
+        potential_keys.append(config.get("chatgpt_api_key"))
+        network_cfg = config.get("network")
+        if isinstance(network_cfg, dict):
+            potential_keys.append(network_cfg.get("openai_api_key"))
+        integrations = config.get("integrations", {}) if isinstance(config.get("integrations"), dict) else {}
+    else:
+        integrations = {}
+
+    potential_keys.extend(
+        [
+            integrations.get("openai_api_key"),
+            integrations.get("chatgpt_api_key"),
+        ]
+    )
+
+    for key in potential_keys:
+        if key and key.strip():
+            return key.strip()
+    return None
+
+
+def get_chatgpt_model() -> str:
+    """Return the configured ChatGPT model or a sensible default."""
+    configured_model = os.getenv("OPENAI_MODEL") or os.getenv("CHATGPT_MODEL")
+    if configured_model:
+        return configured_model
+    return CHATGPT_MODELS[0]
+
+
+def _get_nightscout_credentials(config: Dict[str, Any]) -> tuple[str, str]:
+    url = ""
+    token = ""
+
+    nightscout_section = config.get("nightscout")
+    if isinstance(nightscout_section, dict):
+        section_url = nightscout_section.get("url")
+        section_token = nightscout_section.get("token") or nightscout_section.get("api_token")
+        if isinstance(section_url, str):
+            url = section_url.strip()
+        if isinstance(section_token, str):
+            token = section_token.strip()
+
+    if not url:
+        raw_url = config.get("nightscout_url")
+        if isinstance(raw_url, str):
+            url = raw_url.strip()
+
+    if not token:
+        raw_token = config.get("nightscout_token")
+        if isinstance(raw_token, str):
+            token = raw_token.strip()
+
+    diabetes = config.get("diabetes")
+    if isinstance(diabetes, dict):
+        if not url:
+            if isinstance(diabetes.get("nightscout_url"), str):
+                url = diabetes["nightscout_url"].strip()
+            elif isinstance(diabetes.get("ns_url"), str):
+                url = diabetes["ns_url"].strip()
+        if not token:
+            if isinstance(diabetes.get("nightscout_token"), str):
+                token = diabetes["nightscout_token"].strip()
+            elif isinstance(diabetes.get("ns_token"), str):
+                token = diabetes["ns_token"].strip()
+
+    integrations = config.get("integrations")
+    if isinstance(integrations, dict):
+        if not url and isinstance(integrations.get("nightscout_url"), str):
+            url = integrations["nightscout_url"].strip()
+        if not token and isinstance(integrations.get("nightscout_token"), str):
+            token = integrations["nightscout_token"].strip()
+
+    return url, token
+
+
+async def invoke_chatgpt(
+    messages: List[Dict[str, Any]],
+    *,
+    temperature: float = 0.2,
+    response_format: Optional[Dict[str, Any]] = None,
+    max_tokens: Optional[int] = None,
+) -> Optional[str]:
+    """Send a chat completion request and return the assistant message."""
+
+    api_key = get_chatgpt_api_key()
+    if not api_key:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload: Dict[str, Any] = {
+        "model": get_chatgpt_model(),
+        "messages": messages,
+        "temperature": temperature,
+    }
+
+    if response_format is not None:
+        payload["response_format"] = response_format
+    else:
+        payload["response_format"] = {"type": "json_object"}
+
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                os.getenv("OPENAI_API_URL", "https://api.openai.com/v1/chat/completions"),
+                headers=headers,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            choices = data.get("choices", [])
+            if not choices:
+                return None
+            message = choices[0].get("message", {})
+            return message.get("content")
+    except httpx.HTTPError as exc:
+        print(f"ChatGPT request failed: {exc}")
+    except Exception as exc:  # pragma: no cover - defensive log
+        print(f"Unexpected ChatGPT error: {exc}")
+
+    return None
+
+
+def parse_chatgpt_json(content: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse JSON content returned by ChatGPT, tolerating extra text."""
+
+    if not content:
+        return None
+
+    content = content.strip()
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt to extract JSON block
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+
+    return None
+
+
+def coerce_float(value: Any, default: float) -> float:
+    """Convert arbitrary values to float, falling back to a default."""
+
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+async def chatgpt_food_analysis(
+    image_bytes: bytes,
+    weight_grams: float,
+    average_rgb: Dict[str, float],
+    *,
+    mime_type: str = "image/jpeg",
+    extra_context: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Ask ChatGPT to identify a food item directly from an image."""
+
+    if not get_chatgpt_api_key():
+        return None
+
+    try:
+        encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+    except Exception:
+        return None
+
+    system_prompt = (
+        "Eres un asistente experto en nutrición y composición de alimentos. "
+        "Debes analizar imágenes de comida y devolver una respuesta JSON con el "
+        "formato {\"name\": string, \"confidence\": number, \"nutrition\": {\"carbs\": number, "
+        "\"proteins\": number, \"fats\": number, \"glycemic_index\": number}}. "
+        "Los macronutrientes deben corresponder al peso exacto indicado en gramos. "
+        "Si existe incertidumbre, usa valores conservadores y disminuye la confianza."
+    )
+
+    context_lines = [
+        f"Peso medido por la báscula: {weight_grams:.2f} gramos.",
+        "Color promedio aproximado capturado por el sistema: "
+        f"({average_rgb.get('r', 0)}, {average_rgb.get('g', 0)}, {average_rgb.get('b', 0)}).",
+    ]
+
+    if extra_context:
+        try:
+            context_lines.append(
+                "Datos adicionales del sistema: "
+                f"{json.dumps(extra_context, ensure_ascii=False)}"
+            )
+        except (TypeError, ValueError):
+            pass
+
+    prompt_lines = [
+        "Analiza la comida de la imagen adjunta y devuelve exclusivamente el JSON "
+        "con el formato solicitado. Indica la confianza en un rango de 0 a 1.",
+        *context_lines,
+    ]
+
+    user_message = {
+        "role": "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "\n".join(prompt_lines),
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{encoded_image}",
+                },
+            },
+        ],
+    }
+
+    response = await invoke_chatgpt(
+        [
+            {"role": "system", "content": system_prompt},
+            user_message,
+        ]
+    )
+
+    return parse_chatgpt_json(response)
+
+
+async def chatgpt_barcode_lookup(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Request ChatGPT assistance for a barcode that is not in the database."""
+
+    if not get_chatgpt_api_key():
+        return None
+
+    system_prompt = (
+        "Eres un asistente que ayuda con información nutricional de productos "
+        "envasados. Cuando no exista un producto exacto para un código de barras, "
+        "proporciona la mejor estimación posible o recomienda una categoría general. "
+        "Responde solo en JSON con el formato: {\"name\": string, \"confidence\": number, "
+        "\"nutrition\": {\"carbs\": number, \"proteins\": number, \"fats\": number, "
+        "\"glycemic_index\": number}}. Si el producto es desconocido, usa un nombre "
+        "genérico como \"Producto desconocido\", fija la confianza por debajo de 0.4 y "
+        "pon valores de macronutrientes prudentes (por ejemplo 0)."
+    )
+
+    content = json.dumps(payload, ensure_ascii=False)
+
+    response = await invoke_chatgpt(
+        [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": (
+                    "Necesito ayuda con este código de barras. Usa tu conocimiento general "
+                    "para orientar al usuario si es posible y responde en JSON válido:\n"
+                    f"{content}"
+                ),
+            },
+        ]
+    )
+
+    return parse_chatgpt_json(response)
+
+
+async def chatgpt_generate_recipe(prompt: str, servings: int) -> Optional[Dict[str, Any]]:
+    """Ask ChatGPT to craft a step-by-step recipe suited for the smart scale."""
+
+    if not get_chatgpt_api_key():
+        return None
+
+    servings = max(servings, 1)
+
+    schema_description = json.dumps(
+        {
+            "title": "string",
+            "servings": "number",
+            "ingredients": [
+                {
+                    "name": "string",
+                    "quantity": "number",
+                    "unit": "string",
+                    "needs_scale": "boolean",
+                }
+            ],
+            "steps": [
+                {
+                    "instruction": "string",
+                    "needs_scale": "boolean",
+                    "expected_weight": "number or null",
+                    "timer": "number of seconds or null",
+                    "tip": "string optional",
+                    "assistant_message": "string optional",
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    system_prompt = (
+        "Eres un chef profesional que guía a usuarios de una báscula inteligente. "
+        "Debes generar recetas prácticas, breves (4-8 pasos) y devolver exclusivamente JSON válido. "
+        "Sigue exactamente el siguiente esquema: "
+        f"{schema_description}. "
+        "Utiliza gramos o mililitros cuando el ingrediente deba pesarse y marca needs_scale en esos casos. "
+        "Incluye expected_weight en gramos por paso cuando needs_scale sea verdadero. "
+        "Los campos timer deben expresarse en segundos (por ejemplo 300 = 5 minutos). "
+        "assistant_message debe ser un mensaje motivador y breve para leer en voz alta." 
+    )
+
+    user_prompt = (
+        "Genera una receta paso a paso usando el formato indicado. "
+        f"El plato solicitado es: {prompt.strip()}. "
+        f"Adapta cantidades y pesos para {servings} raciones reales. "
+        "Comienza con los ingredientes pesables y describe acciones claras. "
+        "Incluye tiempos aproximados de cocción cuando sea útil y consejos prácticos en 'tip'."
+    )
+
+    response = await invoke_chatgpt(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=900,
+    )
+
+    return parse_chatgpt_json(response)
+
+# Configuration
+CFG_DIR = Path(os.getenv("BASCULA_CFG_DIR", Path.home() / ".bascula"))
+CONFIG_PATH = CFG_DIR / "config.json"
+_settings_service = get_settings_service(CONFIG_PATH)
+_TEST_RATE_LIMIT_SECONDS = 5.0
+_test_rate_limit: Dict[str, float] = {}
+_test_rate_lock = threading.Lock()
+def _enforce_test_rate_limit(ip: str) -> None:
+    now = time.monotonic()
+    with _test_rate_lock:
+        last = _test_rate_limit.get(ip)
+        if last is not None and now - last < _TEST_RATE_LIMIT_SECONDS:
+            raise HTTPException(status_code=429, detail="Demasiadas solicitudes, intenta nuevamente en unos segundos")
+        _test_rate_limit[ip] = now
+
+DEFAULT_DT_PIN = 5
+DEFAULT_SCK_PIN = 6
+DEFAULT_SAMPLE_RATE = 20.0
+DEFAULT_FILTER_WINDOW = 12
+DEFAULT_CALIBRATION_FACTOR = 1.0
+DEFAULT_SERIAL_DEVICE = "/dev/serial0"
+DEFAULT_SERIAL_BAUD = 115200
+_SERIAL_AUTO_TOKENS = {"auto", "detect", "auto_serial", "auto_uart", "auto_usb", "/dev/serial0"}
+_SERIAL_FALLBACKS = [
+    "/dev/serial0",
+    "/dev/ttyAMA0",
+    "/dev/ttyS0",
+    "/dev/ttyUSB0",
+    "/dev/ttyUSB1",
+    "/dev/ttyUSB2",
+    "/dev/ttyACM0",
+    "/dev/ttyACM1",
+    "/dev/ttyACM2",
+]
+
+
+def _serial_env_override() -> Optional[str]:
+    for key in ("BASCULA_SERIAL_DEVICE", "BASCULA_SCALE_SERIAL_DEVICE"):
+        value = os.getenv(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _serial_candidate_paths(preferred: str) -> List[str]:
+    candidates: List[str] = []
+    seen: Set[str] = set()
+
+    def _register(path: Optional[str]) -> None:
+        if not path:
+            return
+        normalized = str(path).strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    if preferred and preferred.strip().lower() not in _SERIAL_AUTO_TOKENS:
+        _register(preferred)
+    for fallback in _SERIAL_FALLBACKS:
+        _register(fallback)
+
+    for usb_path in sorted(Path("/dev").glob("ttyUSB*")):
+        _register(str(usb_path))
+    for acm_path in sorted(Path("/dev").glob("ttyACM*")):
+        _register(str(acm_path))
+    serial_by_id = Path("/dev/serial/by-id")
+    if serial_by_id.exists():
+        for by_id in sorted(serial_by_id.glob("*")):
+            try:
+                resolved = by_id.resolve(strict=False)
+                _register(str(resolved))
+            except OSError:
+                _register(str(by_id))
+    return candidates
+
+
+def _resolve_serial_device(preferred: str) -> tuple[str, List[str]]:
+    permission_issues: List[str] = []
+    for candidate in _serial_candidate_paths(preferred):
+        path = Path(candidate)
+        if not path.exists():
+            continue
+        if os.access(path, os.R_OK | os.W_OK):
+            return str(path), permission_issues
+        if os.access(path, os.R_OK):
+            permission_issues.append(f"{candidate} (sin permiso de escritura)")
+        else:
+            permission_issues.append(f"{candidate} (sin permisos de lectura/escritura)")
+    return preferred, permission_issues
+
+LOG_SCALE = logging.getLogger("bascula.scale")
+LOG_VOICE = logging.getLogger("bascula.voice")
+
+# Global state
+ScaleServiceType = Union[HX711Service, SerialScaleService]
+scale_service: Optional[ScaleServiceType] = None
+active_websockets: list[WebSocket] = []
+timer_task: Optional[asyncio.Task] = None
+timer_state = {"running": False, "remaining": 0, "total": 0}
+
+# WebSocket connections for real-time settings sync
+settings_ws_connections: Set[WebSocket] = set()
+settings_ws_lock = asyncio.Lock()
+
+
+def _coerce_int(value: Any, default: int, label: str) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        LOG_SCALE.warning("Invalid %s value %s; using %s", label, value, default)
+        return default
+
+
+def _coerce_float(value: Any, default: float, label: str) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        LOG_SCALE.warning("Invalid %s value %s; using %s", label, value, default)
+        return default
+
+
+def _create_scale_service() -> ScaleServiceType:
+    config = load_config()
+    backend = str(config.get("scale_backend", "uart")).strip().lower()
+    if backend not in {"gpio", "uart"}:
+        LOG_SCALE.warning("Backend de báscula desconocido '%s'; usando UART", backend)
+        backend = "uart"
+
+    if backend == "gpio":
+        scale_cfg_raw = config.get("scale")
+        scale_cfg = scale_cfg_raw if isinstance(scale_cfg_raw, dict) else {}
+        dt_pin = _coerce_int(scale_cfg.get("dt", DEFAULT_DT_PIN), DEFAULT_DT_PIN, "scale.dt")
+        sck_pin = _coerce_int(scale_cfg.get("sck", DEFAULT_SCK_PIN), DEFAULT_SCK_PIN, "scale.sck")
+        sample_rate = _coerce_float(
+            scale_cfg.get("sample_rate_hz", DEFAULT_SAMPLE_RATE),
+            DEFAULT_SAMPLE_RATE,
+            "scale.sample_rate_hz",
+        )
+        filter_window = _coerce_int(
+            scale_cfg.get("filter_window", DEFAULT_FILTER_WINDOW),
+            DEFAULT_FILTER_WINDOW,
+            "scale.filter_window",
+        )
+        median_window = _coerce_int(
+            scale_cfg.get("median_window", DEFAULT_MEDIAN_WINDOW),
+            DEFAULT_MEDIAN_WINDOW,
+            "scale.median_window",
+        )
+        ema_alpha = _coerce_float(
+            scale_cfg.get("ema_alpha", DEFAULT_EMA_ALPHA),
+            DEFAULT_EMA_ALPHA,
+            "scale.ema_alpha",
+        )
+        hysteresis_grams = _coerce_float(
+            scale_cfg.get("hysteresis_grams", DEFAULT_HYSTERESIS_GRAMS),
+            DEFAULT_HYSTERESIS_GRAMS,
+            "scale.hysteresis_grams",
+        )
+        debounce_ms = _coerce_int(
+            scale_cfg.get("debounce_ms", DEFAULT_DEBOUNCE_MS),
+            DEFAULT_DEBOUNCE_MS,
+            "scale.debounce_ms",
+        )
+        variance_window = _coerce_int(
+            scale_cfg.get("variance_window", DEFAULT_VARIANCE_WINDOW),
+            DEFAULT_VARIANCE_WINDOW,
+            "scale.variance_window",
+        )
+        variance_threshold = _coerce_float(
+            scale_cfg.get("variance_threshold", DEFAULT_VARIANCE_THRESHOLD),
+            DEFAULT_VARIANCE_THRESHOLD,
+            "scale.variance_threshold",
+        )
+        reconnect_max_backoff = _coerce_float(
+            scale_cfg.get("reconnect_max_backoff", DEFAULT_RECONNECT_MAX_BACKOFF),
+            DEFAULT_RECONNECT_MAX_BACKOFF,
+            "scale.reconnect_max_backoff",
+        )
+        watchdog_timeout = _coerce_float(
+            scale_cfg.get("watchdog_timeout", DEFAULT_WATCHDOG_TIMEOUT),
+            DEFAULT_WATCHDOG_TIMEOUT,
+            "scale.watchdog_timeout",
+        )
+        refractory_sec = _coerce_float(
+            scale_cfg.get("refractory_sec", DEFAULT_REFRACTORY_SEC),
+            DEFAULT_REFRACTORY_SEC,
+            "scale.refractory_sec",
+        )
+        calibration_factor = _coerce_float(
+            scale_cfg.get("calibration_factor", DEFAULT_CALIBRATION_FACTOR),
+            DEFAULT_CALIBRATION_FACTOR,
+            "scale.calibration_factor",
+        )
+        calibration_offset = _coerce_float(
+            scale_cfg.get("calibration_offset", DEFAULT_CALIBRATION_OFFSET),
+            DEFAULT_CALIBRATION_OFFSET,
+            "scale.calibration_offset",
+        )
+        calibration_scale = _coerce_float(
+            scale_cfg.get("calibration_scale", DEFAULT_CALIBRATION_SCALE),
+            DEFAULT_CALIBRATION_SCALE,
+            "scale.calibration_scale",
+        )
+        calibration_points_raw = scale_cfg.get("calibration_points")
+        calibration_points: List[Tuple[float, float]] = []
+        if isinstance(calibration_points_raw, list):
+            for point in calibration_points_raw:
+                if isinstance(point, dict):
+                    raw = point.get("raw")
+                    grams = point.get("grams")
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    raw, grams = point[:2]
+                else:
+                    continue
+                try:
+                    calibration_points.append((float(raw), float(grams)))
+                except (TypeError, ValueError):
+                    LOG_SCALE.warning("Punto de calibración inválido: %s", point)
+
+        LOG_SCALE.info(
+            "Inicializando báscula GPIO (dt=%s, sck=%s, rate=%.2f Hz, median=%d, ema=%.2f, var_win=%d, hyst=%.2f g, debounce=%d ms, refractory=%.2f s)",
+            dt_pin,
+            sck_pin,
+            sample_rate,
+            median_window,
+            ema_alpha,
+            variance_window,
+            hysteresis_grams,
+            debounce_ms,
+            refractory_sec,
+        )
+
+        service = HX711Service(
+            dt_pin=dt_pin,
+            sck_pin=sck_pin,
+            sample_rate_hz=sample_rate,
+            filter_window=filter_window,
+            calibration_factor=calibration_factor,
+            calibration_offset=calibration_offset,
+            calibration_scale=calibration_scale,
+            calibration_points=calibration_points,
+            median_window=median_window,
+            ema_alpha=ema_alpha,
+            hysteresis_grams=hysteresis_grams,
+            debounce_ms=debounce_ms,
+            variance_window=variance_window,
+            variance_threshold=variance_threshold,
+            reconnect_max_backoff=reconnect_max_backoff,
+            watchdog_timeout=watchdog_timeout,
+            refractory_sec=refractory_sec,
+        )
+        service.start()
+        return service
+
+    device_env = _serial_env_override()
+    if device_env:
+        LOG_SCALE.info("Usando dispositivo serie desde entorno (%s)", device_env)
+        resolved = device_env
+    else:
+        configured_device = str(config.get("serial_device", DEFAULT_SERIAL_DEVICE) or DEFAULT_SERIAL_DEVICE)
+        resolved, permission_notes = _resolve_serial_device(configured_device)
+        if resolved != configured_device:
+            LOG_SCALE.info("Dispositivo serie auto-detectado: %s (configurado: %s)", resolved, configured_device)
+            config["serial_device"] = resolved
+            try:
+                existing_serial = _settings_service.load().serial_device  # type: ignore[attr-defined]
+            except Exception:
+                existing_serial = None
+            try:
+                # No machacar el valor si el usuario ya lo tenía guardado
+                if not existing_serial or str(existing_serial).strip() in _SERIAL_AUTO_TOKENS:
+                    _settings_service.save({"serial_device": resolved})
+            except Exception as exc:
+                LOG_SCALE.warning("No se pudo persistir el dispositivo serie auto-detectado (%s): %s", resolved, exc)
+        if permission_notes:
+            LOG_SCALE.warning(
+                "Permisos insuficientes para dispositivos serie: %s. Asegura que el usuario esté en dialout/gpio.",
+                "; ".join(permission_notes),
+            )
+    device = resolved
+    if not Path(device).exists():
+        LOG_SCALE.warning(
+            "El dispositivo serie %s no existe actualmente. Verifica el cableado o ajusta la configuración.",
+            device,
+        )
+    baud_value = config.get("serial_baud", DEFAULT_SERIAL_BAUD)
+    baud = _coerce_int(baud_value, DEFAULT_SERIAL_BAUD, "serial_baud")
+
+    LOG_SCALE.info(
+        "Inicializando báscula con backend UART (device=%s, baud=%s)",
+        device,
+        baud,
+    )
+
+    service = SerialScaleService(device=device, baud=baud)
+    service.start()
+    return service
+
+# Recipe knowledge base for deterministic guidance
+RECIPE_DATABASE: List[Dict[str, Any]] = [
+    {
+        "id": "pasta_tomate",
+        "title": "Pasta con salsa de tomate",
+        "keywords": ["pasta", "espagueti", "tomate", "spaghetti", "macarrón"],
+        "default_servings": 2,
+        "ingredients": [
+            {"name": "Pasta seca", "quantity": 200, "unit": "g", "needs_scale": True},
+            {"name": "Tomate triturado", "quantity": 300, "unit": "g", "needs_scale": False},
+            {"name": "Aceite de oliva", "quantity": 15, "unit": "ml", "needs_scale": False},
+            {"name": "Albahaca fresca", "quantity": 10, "unit": "g", "needs_scale": False},
+        ],
+        "steps": [
+            {
+                "instruction": "Llena una olla grande con 2 litros de agua, añade una cucharada de sal y ponla a hervir.",
+                "tip": "Si pones la tapa, el agua hervirá más rápido.",
+            },
+            {
+                "instruction": "Pesa 100 g de pasta por ración en la báscula y agrégala al agua hirviendo.",
+                "needs_scale": True,
+                "expected_weight": 100,
+                "tip": "Remueve al principio para que no se pegue.",
+            },
+            {
+                "instruction": "Cocina la pasta siguiendo el tiempo del paquete (normalmente 8-10 minutos).", 
+                "timer": 600,
+                "tip": "Prueba la pasta un minuto antes para lograr el punto al dente.",
+            },
+            {
+                "instruction": "Calienta el tomate triturado con una pizca de sal, pimienta y un chorrito de aceite.",
+                "tip": "Añade hojas de albahaca al final para mantener su aroma.",
+            },
+            {
+                "instruction": "Escurre la pasta, mezcla con la salsa y sirve inmediatamente.",
+            },
+        ],
+    },
+    {
+        "id": "ensalada_quinoa",
+        "title": "Ensalada templada de quinoa",
+        "keywords": ["quinoa", "ensalada", "vegetariana"],
+        "default_servings": 2,
+        "ingredients": [
+            {"name": "Quinoa", "quantity": 160, "unit": "g", "needs_scale": True},
+            {"name": "Caldo de verduras", "quantity": 320, "unit": "ml", "needs_scale": False},
+            {"name": "Garbanzos cocidos", "quantity": 200, "unit": "g", "needs_scale": True},
+            {"name": "Pimiento rojo", "quantity": 80, "unit": "g", "needs_scale": True},
+            {"name": "Pepino", "quantity": 80, "unit": "g", "needs_scale": True},
+        ],
+        "steps": [
+            {
+                "instruction": "Enjuaga la quinoa bajo el grifo hasta que el agua salga limpia.",
+            },
+            {
+                "instruction": "Pesa 80 g de quinoa por ración y cuécela en el caldo durante 12 minutos.",
+                "needs_scale": True,
+                "expected_weight": 80,
+                "tip": "La quinoa está lista cuando los granos se ven translúcidos.",
+                "timer": 720,
+            },
+            {
+                "instruction": "Corta el pimiento y el pepino en dados pequeños (aprox. 1 cm).",
+            },
+            {
+                "instruction": "Mezcla la quinoa con los garbanzos, el pimiento, el pepino y aliña al gusto.",
+            },
+        ],
+    },
+    {
+        "id": "pollo_asado",
+        "title": "Pechuga de pollo marinada al horno",
+        "keywords": ["pollo", "horno", "pechuga"],
+        "default_servings": 2,
+        "ingredients": [
+            {"name": "Pechuga de pollo", "quantity": 300, "unit": "g", "needs_scale": True},
+            {"name": "Zumo de limón", "quantity": 30, "unit": "ml", "needs_scale": False},
+            {"name": "Aceite de oliva", "quantity": 15, "unit": "ml", "needs_scale": False},
+            {"name": "Ajo picado", "quantity": 5, "unit": "g", "needs_scale": False},
+        ],
+        "steps": [
+            {
+                "instruction": "Precalienta el horno a 200 °C calor arriba y abajo.",
+                "timer": 600,
+            },
+            {
+                "instruction": "Pesa 150 g de pechuga por ración y marínala con aceite, limón, ajo, sal y pimienta.",
+                "needs_scale": True,
+                "expected_weight": 150,
+                "tip": "Deja reposar la marinada al menos 15 minutos.",
+                "timer": 900,
+            },
+            {
+                "instruction": "Coloca el pollo en una bandeja y hornea durante 18-20 minutos.",
+                "timer": 1200,
+                "tip": "El jugo debe salir transparente cuando pinches el pollo.",
+            },
+            {
+                "instruction": "Deja reposar el pollo 5 minutos antes de cortarlo.",
+                "timer": 300,
+            },
+        ],
+    },
+]
+
+
+def _coerce_number(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return float(value)
+    if isinstance(value, str):
+        match = re.search(r"-?\d+(?:[\.,]\d+)?", value)
+        if match:
+            try:
+                return float(match.group(0).replace(",", "."))
+            except ValueError:
+                return None
+    return None
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on", "si", "sí"}:
+            return True
+        if normalized in {"false", "0", "no", "off", "n"}:
+            return False
+    return None
+
+
+def _coerce_timer(value: Any) -> Optional[int]:
+    if isinstance(value, (int, float)):
+        seconds = int(value)
+        return seconds if seconds > 0 else None
+    if isinstance(value, str):
+        text = value.strip().lower()
+        total_seconds = 0
+        matches = re.findall(
+            r"(-?\d+(?:[\.,]\d+)?)\s*(segundos?|secs?|s|minutos?|mins?|m|horas?|hrs?|h)",
+            text,
+        )
+        if matches:
+            for amount_text, unit in matches:
+                try:
+                    amount = float(amount_text.replace(",", "."))
+                except ValueError:
+                    continue
+                if "hora" in unit or unit.startswith("h"):
+                    total_seconds += int(amount * 3600)
+                elif "min" in unit or unit.startswith("m"):
+                    total_seconds += int(amount * 60)
+                else:
+                    total_seconds += int(amount)
+            return total_seconds or None
+        numeric = _coerce_number(text)
+        if numeric is not None:
+            if "hora" in text or "hr" in text or text.endswith("h"):
+                return int(numeric * 3600)
+            if "min" in text:
+                return int(numeric * 60)
+            return int(numeric)
+    return None
+
+
+def _normalize_ai_recipe(ai_recipe: Dict[str, Any], prompt: str, servings: int) -> Dict[str, Any]:
+    title_raw = ai_recipe.get("title")
+    title = str(title_raw).strip() if isinstance(title_raw, str) and title_raw.strip() else f"Receta para {prompt}".strip()
+
+    servings_value = _coerce_number(ai_recipe.get("servings"))
+    normalized_servings = servings
+    if servings_value is not None and servings_value > 0:
+        normalized_servings = max(int(round(servings_value)), 1)
+
+    ingredients: List[Dict[str, Any]] = []
+    raw_ingredients = ai_recipe.get("ingredients")
+    if isinstance(raw_ingredients, list):
+        for entry in raw_ingredients:
+            if not isinstance(entry, dict):
+                continue
+            name_raw = entry.get("name")
+            if not isinstance(name_raw, str):
+                continue
+            name = name_raw.strip()
+            if not name:
+                continue
+            quantity_value = _coerce_number(entry.get("quantity"))
+            unit_raw = entry.get("unit")
+            unit = unit_raw.strip() if isinstance(unit_raw, str) and unit_raw.strip() else "g"
+            needs_scale_raw = entry.get("needs_scale")
+            if needs_scale_raw is None:
+                needs_scale_raw = entry.get("needsScale")
+            needs_scale_value = _coerce_bool(needs_scale_raw)
+            if needs_scale_value is None:
+                needs_scale_value = unit.lower() in {"g", "gramos", "kg", "ml", "mililitros"}
+            ingredients.append(
+                {
+                    "name": name,
+                    "quantity": quantity_value if (quantity_value is not None and quantity_value > 0) else None,
+                    "unit": unit,
+                    "needs_scale": bool(needs_scale_value),
+                }
+            )
+
+    raw_steps = ai_recipe.get("steps")
+    steps: List[Dict[str, Any]] = []
+    total_timer = 0
+    if isinstance(raw_steps, list):
+        for idx, entry in enumerate(raw_steps, start=1):
+            if not isinstance(entry, dict):
+                continue
+            instruction_raw = entry.get("instruction") or entry.get("step") or entry.get("action")
+            if not isinstance(instruction_raw, str):
+                continue
+            instruction = instruction_raw.strip()
+            if not instruction:
+                continue
+
+            needs_scale_raw = entry.get("needs_scale")
+            if needs_scale_raw is None:
+                needs_scale_raw = entry.get("needsScale")
+            needs_scale_value = _coerce_bool(needs_scale_raw)
+            if needs_scale_value is None:
+                lowered = instruction.lower()
+                needs_scale_value = any(keyword in lowered for keyword in ["pesa", "gram", "balanza", "báscula"])
+
+            expected_weight_value = _coerce_number(entry.get("expected_weight") or entry.get("expectedWeight"))
+            if not needs_scale_value:
+                expected_weight = None
+            else:
+                expected_weight = (
+                    expected_weight_value if (expected_weight_value is not None and expected_weight_value > 0) else None
+                )
+
+            timer_value = _coerce_timer(entry.get("timer") or entry.get("duration_seconds") or entry.get("duration"))
+            if timer_value:
+                total_timer += timer_value
+
+            tip_raw = entry.get("tip") or entry.get("note") or entry.get("advice")
+            tip = tip_raw.strip() if isinstance(tip_raw, str) and tip_raw.strip() else None
+
+            assistant_raw = entry.get("assistant_message") or entry.get("assistantMessage")
+            assistant_message = (
+                assistant_raw.strip() if isinstance(assistant_raw, str) and assistant_raw.strip() else tip
+            )
+
+            steps.append(
+                {
+                    "index": idx,
+                    "instruction": instruction,
+                    "needsScale": bool(needs_scale_value),
+                    "expectedWeight": expected_weight,
+                    "tip": tip,
+                    "timer": timer_value,
+                    "assistantMessage": assistant_message,
+                }
+            )
+
+    max_steps = 12
+    if len(steps) > max_steps:
+        steps = steps[:max_steps]
+        for idx, step in enumerate(steps, start=1):
+            step["index"] = idx
+
+    estimated_time = math.ceil(total_timer / 60) if total_timer else None
+
+    return {
+        "title": title,
+        "servings": normalized_servings,
+        "ingredients": ingredients,
+        "steps": steps,
+        "estimated_time": estimated_time,
+    }
+
+
+active_recipes: Dict[str, Dict[str, Any]] = {}
+
+
+GITHUB_REPO = "DanielGTdiabetes/bascula-ui"
+RELEASES_DIR = Path(os.getenv("BASCULA_RELEASES_DIR", Path.home() / ".bascula" / "releases"))
+DOWNLOADS_DIR = Path(os.getenv("BASCULA_DOWNLOADS_DIR", Path.home() / ".bascula" / "downloads"))
+CURRENT_SYMLINK = RELEASES_DIR / "current"
+VERSION_FILE = Path(os.getenv("BASCULA_VERSION_FILE", Path.home() / ".bascula" / "VERSION"))
+
+
+# ============= MODELS =============
+
+class CalibrationPointPayload(BaseModel):
+    raw: float
+    kg: Optional[float] = None
+    grams: Optional[float] = None
+
+
+class CalibrationRequest(BaseModel):
+    raw1: float
+    kg1: float
+    raw2: float
+    kg2: float
+    unit: Optional[str] = "kg"
+    extra_points: Optional[List[CalibrationPointPayload]] = None
+
+
+class CalibrationApplyRequest(BaseModel):
+    reference_grams: float
+
+
+class PhotoAnalysisRequest(BaseModel):
+    image: str
+    weight: Optional[float] = None
+    filename: Optional[str] = None
+    mime_type: Optional[str] = None
+
+class TimerStart(BaseModel):
+    seconds: int
+
+class BolusData(BaseModel):
+    carbs: float
+    insulin: float
+    timestamp: str
+
+class SpeakRequest(BaseModel):
+    text: str
+    voice: Optional[str] = "es_ES-mls_10246-medium"
+
+class RecipeRequest(BaseModel):
+    prompt: str
+    servings: Optional[int] = None
+
+
+class RecipeNext(BaseModel):
+    recipeId: str
+    currentStep: int
+    userResponse: Optional[str] = None
+
+
+class AssistantChatRequest(BaseModel):
+    text: str
+    context: Optional[Dict[str, Any]] = None
+
+# ============= CONFIG HELPERS =============
+
+
+def _default_config() -> Dict[str, Any]:
+    return {
+        "general": {"sound_enabled": True, "volume": 70, "tts_enabled": True},
+        "scale": {
+            "dt": DEFAULT_DT_PIN,
+            "sck": DEFAULT_SCK_PIN,
+            "calibration_factor": DEFAULT_CALIBRATION_FACTOR,
+            "calibration_offset": DEFAULT_CALIBRATION_OFFSET,
+            "calibration_scale": DEFAULT_CALIBRATION_SCALE,
+            "calibration_points": [],
+            "sample_rate_hz": DEFAULT_SAMPLE_RATE,
+            "filter_window": DEFAULT_FILTER_WINDOW,
+            "median_window": DEFAULT_MEDIAN_WINDOW,
+            "ema_alpha": DEFAULT_EMA_ALPHA,
+            "hysteresis_grams": DEFAULT_HYSTERESIS_GRAMS,
+            "debounce_ms": DEFAULT_DEBOUNCE_MS,
+            "variance_window": DEFAULT_VARIANCE_WINDOW,
+            "variance_threshold": DEFAULT_VARIANCE_THRESHOLD,
+            "reconnect_max_backoff": DEFAULT_RECONNECT_MAX_BACKOFF,
+            "watchdog_timeout": DEFAULT_WATCHDOG_TIMEOUT,
+            "refractory_sec": DEFAULT_REFRACTORY_SEC,
+        },
+        "scale_backend": "uart",
+        "serial_device": DEFAULT_SERIAL_DEVICE,
+        "serial_baud": DEFAULT_SERIAL_BAUD,
+        "network": {"miniweb_enabled": True, "miniweb_port": 8080, "openai_api_key": ""},
+        "diabetes": {
+            "diabetes_enabled": False,
+            "ns_url": "",
+            "ns_token": "",
+            "nightscout_url": "",
+            "nightscout_token": "",
+        },
+        "nightscout": {"url": "", "token": ""},
+        "openai_api_key": "",
+        "nightscout_url": "",
+        "nightscout_token": "",
+        "integrations": {
+            "openai_api_key": "",
+            "chatgpt_api_key": "",
+            "nightscout_url": "",
+            "nightscout_token": "",
+        },
+    }
+
+
+def _migrate_legacy_nightscout(config: Dict[str, Any]) -> bool:
+    def _first_non_empty(values: list[Any]) -> str:
+        for value in values:
+            if isinstance(value, str):
+                trimmed = value.strip()
+                if trimmed:
+                    return trimmed
+        return ""
+
+    changed = False
+
+    existing_url = config.get("nightscout_url")
+    existing_token = config.get("nightscout_token")
+    current_url = existing_url.strip() if isinstance(existing_url, str) else ""
+    current_token = existing_token.strip() if isinstance(existing_token, str) else ""
+
+    legacy_urls: list[str] = []
+    legacy_tokens: list[str] = []
+
+    network_cfg = config.get("network")
+    if isinstance(network_cfg, dict):
+        nested = network_cfg.get("nightscout")
+        if isinstance(nested, dict):
+            for candidate in (
+                nested.get("url"),
+                nested.get("nightscout_url"),
+                nested.get("ns_url"),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    legacy_urls.append(candidate.strip())
+            for candidate in (
+                nested.get("token"),
+                nested.get("nightscout_token"),
+                nested.get("ns_token"),
+                nested.get("api_token"),
+            ):
+                if isinstance(candidate, str) and candidate.strip():
+                    legacy_tokens.append(candidate.strip())
+
+        for key in ("nightscout_url", "ns_url", "url"):
+            value = network_cfg.get(key)
+            if isinstance(value, str) and value.strip():
+                legacy_urls.append(value.strip())
+        for key in ("nightscout_token", "ns_token", "token"):
+            value = network_cfg.get(key)
+            if isinstance(value, str) and value.strip():
+                legacy_tokens.append(value.strip())
+
+        removed_any = False
+        if "nightscout" in network_cfg:
+            network_cfg.pop("nightscout", None)
+            removed_any = True
+        for key in ("nightscout_url", "nightscout_token", "ns_url", "ns_token", "url", "token"):
+            if key in network_cfg:
+                network_cfg.pop(key, None)
+                removed_any = True
+        if removed_any:
+            changed = True
+
+    current_section = config.get("nightscout")
+    section_url = ""
+    section_token = ""
+    if isinstance(current_section, dict):
+        raw_section_url = current_section.get("url")
+        raw_section_token = current_section.get("token") or current_section.get("api_token")
+        if isinstance(raw_section_url, str) and raw_section_url.strip():
+            section_url = raw_section_url.strip()
+            legacy_urls.insert(0, section_url)
+        if isinstance(raw_section_token, str) and raw_section_token.strip():
+            section_token = raw_section_token.strip()
+            legacy_tokens.insert(0, section_token)
+
+    final_url = _first_non_empty([current_url, section_url, *legacy_urls])
+    final_token = _first_non_empty([current_token, section_token, *legacy_tokens])
+
+    if config.get("nightscout_url") != final_url:
+        config["nightscout_url"] = final_url
+        changed = True
+    if config.get("nightscout_token") != final_token:
+        config["nightscout_token"] = final_token
+        changed = True
+
+    nightscout_cfg = current_section if isinstance(current_section, dict) else {}
+    api_token = nightscout_cfg.get("api_token") if isinstance(nightscout_cfg, dict) else None
+    if nightscout_cfg.get("url") != final_url:
+        nightscout_cfg["url"] = final_url
+        changed = True
+    if nightscout_cfg.get("token") != final_token:
+        nightscout_cfg["token"] = final_token
+        changed = True
+    if api_token is not None and nightscout_cfg.get("token") == final_token:
+        nightscout_cfg.pop("api_token", None)
+        changed = True
+    config["nightscout"] = nightscout_cfg
+
+    diabetes_cfg = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
+    removed_diabetes = False
+    for legacy_key in ("nightscout_url", "nightscout_token", "ns_url", "ns_token"):
+        if legacy_key in diabetes_cfg:
+            diabetes_cfg.pop(legacy_key, None)
+            removed_diabetes = True
+    if removed_diabetes:
+        changed = True
+    desired_enabled = bool(final_url)
+    if diabetes_cfg.get("diabetes_enabled") != desired_enabled:
+        diabetes_cfg["diabetes_enabled"] = desired_enabled
+        changed = True
+    config["diabetes"] = diabetes_cfg
+
+    integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
+    removed_integrations = False
+    for legacy_key in ("nightscout_url", "nightscout_token"):
+        if legacy_key in integrations_cfg:
+            integrations_cfg.pop(legacy_key, None)
+            removed_integrations = True
+    if removed_integrations:
+        changed = True
+    config["integrations"] = integrations_cfg
+
+    return changed
+
+
+def load_config() -> Dict[str, Any]:
+    """Load configuration ensuring required keys exist."""
+    settings = _settings_service.load()
+    config = settings.dict()
+
+    changed = False
+    defaults = _default_config()
+    for key, value in defaults.items():
+        if key not in config:
+            config[key] = json.loads(json.dumps(value)) if isinstance(value, dict) else value
+            changed = True
+        elif isinstance(value, dict):
+            current_section = config.get(key)
+            if not isinstance(current_section, dict):
+                config[key] = json.loads(json.dumps(value))
+                changed = True
+            else:
+                for sub_key, sub_value in value.items():
+                    if sub_key not in current_section:
+                        current_section[sub_key] = sub_value
+                        changed = True
+
+    if _migrate_legacy_nightscout(config):
+        changed = True
+
+    if changed:
+        save_config(config)
+    return config
+
+
+def save_config(config: Dict[str, Any]) -> None:
+    """Save configuration to JSON file."""
+    _settings_service.save(config)
+
+# ============= SERIAL/SCALE =============
+
+async def init_scale() -> None:
+    """Initialize scale service."""
+    global scale_service
+    if scale_service is not None:
+        return
+    try:
+        scale_service = _create_scale_service()
+    except Exception as exc:
+        LOG_SCALE.error("Failed to start scale service: %s", exc)
+        scale_service = None
+
+
+async def close_scale() -> None:
+    """Stop scale service."""
+    global scale_service
+    if scale_service is None:
+        return
+    try:
+        scale_service.stop()
+    except Exception as exc:
+        LOG_SCALE.error("Failed to stop scale service: %s", exc)
+    finally:
+        scale_service = None
+
+# ============= APP LIFECYCLE =============
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown events"""
+    await init_scale()
+    yield
+    await close_scale()
+
+app = FastAPI(title="Bascula Backend API", version="1.0", lifespan=lifespan)
+
+try:
+    CAPTURES_DIR.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+app.mount("/captures", StaticFiles(directory=str(CAPTURES_DIR)), name="captures")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+init_wake_if_enabled(app)
+
+app.include_router(voice_router)
+app.include_router(wake_router)
+app.include_router(camera_router)
+app.include_router(audio_router)
+app.include_router(food_router.router, prefix="/api/food", tags=["food"])
+app.include_router(diabetes_router)
+
+
+@app.get("/api/voices", include_in_schema=False)
+def list_voices_legacy() -> Dict[str, object]:
+    """Compatibilidad para clientes que aún consultan /api/voices."""
+    return list_piper_voices()
+
+# ============= SCALE ENDPOINTS =============
+
+@app.websocket("/ws/scale")
+async def websocket_scale(websocket: WebSocket):
+    """WebSocket endpoint for real-time weight data"""
+    await websocket.accept()
+    active_websockets.append(websocket)
+
+    try:
+        while True:
+            service = scale_service
+            if service is None:
+                await websocket.send_json({"ok": False, "reason": "service_not_initialized"})
+                await asyncio.sleep(1.0)
+                continue
+
+            data = service.get_reading()
+            if data.get("ok"):
+                grams = data.get("grams")
+                instant = data.get("instant")
+                if instant is None and grams is not None:
+                    instant = grams
+                stable_value = data.get("stable")
+                if stable_value is None and grams is not None and instant is not None:
+                    stable_value = abs(instant - grams) <= 1.0
+                stable = bool(stable_value) if stable_value is not None else False
+                payload = {
+                    **data,
+                    "weight": grams if grams is not None else 0.0,
+                    "unit": "g",
+                    "stable": stable,
+                }
+                await websocket.send_json(payload)
+            else:
+                await websocket.send_json(data)
+
+            if isinstance(service, HX711Service):
+                interval = max(0.05, 1.0 / service.sample_rate_hz)
+            else:
+                interval = 0.1
+            await asyncio.sleep(interval)
+
+    except WebSocketDisconnect:
+        active_websockets.remove(websocket)
+    except Exception as exc:
+        LOG_SCALE.error("WebSocket error: %s", exc)
+        if websocket in active_websockets:
+            active_websockets.remove(websocket)
+
+@app.get("/api/scale/status")
+async def scale_status():
+    service = scale_service
+    if service is None:
+        config = load_config()
+        backend = str(config.get("scale_backend", "uart")).strip().lower()
+        if backend not in {"gpio", "uart"}:
+            backend = "uart"
+        return {"ok": False, "backend": backend, "reason": "service_not_initialized", "success": False}
+    status = dict(service.get_status())
+    if "backend" not in status:
+        status["backend"] = "gpio" if isinstance(service, HX711Service) else "uart"
+    status["success"] = status.get("ok", False)
+    return status
+
+
+@app.get("/api/scale/read")
+async def scale_read():
+    service = scale_service
+    if service is None:
+        return {"ok": False, "reason": "service_not_initialized"}
+    data = service.get_reading()
+    data["success"] = data.get("ok", False)
+    return data
+
+
+@app.get("/api/scale/weight")
+async def scale_weight():
+    return await scale_read()
+
+
+@app.get("/api/scale/events")
+async def scale_events(request: Request):
+    service = scale_service
+
+    async def gen():
+        last = None
+
+        if service is None:
+            payload = {"ok": False, "reason": "service_not_initialized"}
+            yield f"data: {json.dumps(payload)}\n\n"
+            return
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            data = await asyncio.to_thread(service.get_reading)
+            if data != last:
+                yield f"data: {json.dumps(data)}\n\n"
+                last = data
+
+            await asyncio.sleep(0.2)
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@app.post("/api/scale/tare")
+async def scale_tare():
+    service = scale_service
+    if service is None:
+        return {"ok": False, "success": False, "reason": "service_not_initialized"}
+    result = service.tare()
+    result["success"] = result.get("ok", False)
+    return result
+
+
+@app.post("/api/scale/zero")
+async def scale_zero():
+    """Backward-compatible endpoint mapped to tare."""
+    result = await scale_tare()
+    result.setdefault("message", "Zero command mapped to tare")
+    return result
+
+
+@app.post("/api/scale/calibrate")
+async def set_calibration(data: CalibrationRequest):
+    service = scale_service
+    if service is None:
+        return {"ok": False, "success": False, "reason": "service_not_initialized"}
+
+    try:
+        raw1 = float(data.raw1)
+        raw2 = float(data.raw2)
+        kg1 = float(data.kg1)
+        kg2 = float(data.kg2)
+    except (TypeError, ValueError):
+        return {"ok": False, "success": False, "reason": "invalid_input"}
+
+    unit = (data.unit or "kg").strip().lower()
+    if unit not in {"kg", "g"}:
+        unit = "kg"
+    factor = 1000.0 if unit == "kg" else 1.0
+
+    grams1 = kg1 * factor
+    grams2 = kg2 * factor
+    if not math.isfinite(grams1) or not math.isfinite(grams2):
+        return {"ok": False, "success": False, "reason": "invalid_weight"}
+
+    extra_points: List[Tuple[float, float]] = []
+    if data.extra_points:
+        for idx, point in enumerate(data.extra_points, start=1):
+            try:
+                raw_extra = float(point.raw)
+            except (TypeError, ValueError):
+                return {"ok": False, "success": False, "reason": f"invalid_extra_raw_{idx}"}
+            weight = point.grams
+            if weight is None and point.kg is not None:
+                weight = point.kg * factor
+            if weight is None:
+                return {"ok": False, "success": False, "reason": f"missing_extra_weight_{idx}"}
+            try:
+                grams_extra = float(weight)
+            except (TypeError, ValueError):
+                return {"ok": False, "success": False, "reason": f"invalid_extra_weight_{idx}"}
+            extra_points.append((raw_extra, grams_extra))
+
+    points: List[Tuple[float, float]] = [(raw1, grams1), (raw2, grams2)]
+    points.extend(extra_points)
+
+    calibrate_method = getattr(service, "calibrate_from_points", None)
+    if not callable(calibrate_method):
+        return {
+            "ok": False,
+            "success": False,
+            "reason": "calibration_points_not_supported",
+        }
+
+    result = calibrate_method(points)
+    success = result.get("ok", False)
+
+    if success:
+        try:
+            config = load_config()
+            scale_section = config.get("scale")
+            if not isinstance(scale_section, dict):
+                scale_section = {}
+            scale_section["calibration_scale"] = result.get("calibration_scale")
+            scale_section["calibration_offset"] = result.get("calibration_offset")
+            scale_section["calibration_factor"] = result.get("calibration_factor")
+            scale_section["calibration_points"] = result.get("points", [])
+            config["scale"] = scale_section
+            save_config(config)
+            result["config_saved"] = True
+        except Exception as exc:
+            LOG_SCALE.error("No se pudo persistir la calibración: %s", exc)
+            result["config_saved"] = False
+            result["config_error"] = str(exc)
+    result["success"] = success
+    return result
+
+
+@app.post("/api/scale/calibrate/apply")
+async def apply_calibration(data: CalibrationApplyRequest):
+    service = scale_service
+    if service is None:
+        return {"ok": True, "success": True, "message": "scale service not configured"}
+
+    calibrate_apply = getattr(service, "calibrate_apply", None)
+    if callable(calibrate_apply):
+        result = calibrate_apply(data.reference_grams)
+    else:
+        result = service.calibrate(data.reference_grams)
+
+    result.setdefault("message", "Calibración aplicada")
+    result["success"] = result.get("ok", False)
+    return result
+
+# ============= FOOD SCANNER =============
+
+
+def _resolve_mime_type(candidate: Optional[str], img) -> str:
+    mime_type = (candidate or "").strip()
+    if not mime_type and getattr(img, "format", None):
+        mime_type = f"image/{img.format.lower()}"
+    if not mime_type:
+        mime_type = "image/jpeg"
+    return mime_type
+
+
+async def _analyze_food_bytes(
+    raw_bytes: bytes,
+    *,
+    weight: float,
+    filename: Optional[str] = None,
+    mime_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    if weight <= 0:
+        raise HTTPException(status_code=400, detail="El peso debe ser mayor que cero")
+
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="No se recibió imagen para analizar")
+
+    try:
+        from PIL import Image  # type: ignore
+    except ImportError as exc:  # pragma: no cover - dependency guard
+        raise HTTPException(
+            status_code=500,
+            detail="Pillow no está instalado en el backend. Instala 'pillow' para habilitar el análisis de imágenes.",
+        ) from exc
+
+    try:
+        img = Image.open(BytesIO(raw_bytes))
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Imagen inválida: {exc}") from exc
+
+    pixels = list(img.getdata())
+    if not pixels:
+        raise HTTPException(status_code=400, detail="No se pudieron leer los píxeles de la imagen")
+
+    max_samples = 50000
+    step = max(len(pixels) // max_samples, 1)
+    sampled = pixels[::step] or pixels
+
+    avg_r = sum(p[0] for p in sampled) / len(sampled)
+    avg_g = sum(p[1] for p in sampled) / len(sampled)
+    avg_b = sum(p[2] for p in sampled) / len(sampled)
+
+    avg_color = {
+        "r": round(avg_r, 2),
+        "g": round(avg_g, 2),
+        "b": round(avg_b, 2),
+    }
+
+    resolved_mime_type = _resolve_mime_type(mime_type, img)
+
+    extra_context: Dict[str, Any] = {
+        "average_rgb": avg_color,
+        "dimensions": {"width": img.width, "height": img.height},
+        "weight_grams": weight,
+    }
+
+    if filename:
+        extra_context["filename"] = filename
+    if getattr(img, "format", None):
+        extra_context["format"] = img.format
+
+    if not get_chatgpt_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="No hay una API key configurada para ChatGPT. Configura OPENAI_API_KEY o CHATGPT_API_KEY para habilitar el análisis automático.",
+        )
+
+    chatgpt_response = await chatgpt_food_analysis(
+        raw_bytes,
+        weight,
+        avg_color,
+        mime_type=resolved_mime_type,
+        extra_context=extra_context,
+    )
+
+    if isinstance(chatgpt_response, dict):
+        nutrition_defaults = {
+            "carbs": 0.0,
+            "proteins": 0.0,
+            "fats": 0.0,
+            "glycemic_index": 50.0,
+        }
+
+        nutrition: Dict[str, float] = {}
+        gpt_nutrition = chatgpt_response.get("nutrition", {}) or {}
+        for key, default in nutrition_defaults.items():
+            digits = 2 if key != "glycemic_index" else 0
+            value = coerce_float(gpt_nutrition.get(key), default)
+            if key != "glycemic_index":
+                value = max(0.0, value)
+            nutrition[key] = round(value, digits)
+
+        confidence_value = coerce_float(chatgpt_response.get("confidence"), 0.5)
+        confidence_value = max(0.0, min(1.0, confidence_value))
+
+        return {
+            "name": chatgpt_response.get("name", "Alimento no identificado"),
+            "confidence": round(confidence_value, 2),
+            "avg_color": avg_color,
+            "nutrition": nutrition,
+        }
+
+    raise HTTPException(
+        status_code=502,
+        detail="El servicio de análisis inteligente no devolvió una respuesta válida",
+    )
+
+
+def _decode_base64_image(image_data: str) -> tuple[bytes, Optional[str]]:
+    if not image_data or not image_data.strip():
+        raise HTTPException(status_code=400, detail="No se recibió imagen para analizar")
+
+    payload = image_data.strip()
+    mime_type: Optional[str] = None
+
+    if payload.startswith("data:"):
+        header, _, b64_data = payload.partition(",")
+        if not b64_data:
+            raise HTTPException(status_code=400, detail="Datos base64 inválidos")
+        mime_section, _, _ = header.partition(";")
+        _, _, maybe_mime = mime_section.partition(":")
+        mime_type = maybe_mime or None
+    else:
+        b64_data = payload
+
+    try:
+        raw_bytes = base64.b64decode(b64_data.strip(), validate=True)
+    except binascii.Error as exc:
+        raise HTTPException(status_code=400, detail="Imagen base64 inválida") from exc
+
+    if not raw_bytes:
+        raise HTTPException(status_code=400, detail="No se recibió imagen para analizar")
+
+    return raw_bytes, mime_type
+
+
+@app.post("/api/scanner/analyze")
+async def analyze_food(image: UploadFile = File(...), weight: float = Form(...)):
+    """Analyze food from a camera image using ChatGPT when available."""
+
+    raw_bytes = await image.read()
+    return await _analyze_food_bytes(
+        raw_bytes,
+        weight=weight,
+        filename=image.filename,
+        mime_type=image.content_type,
+    )
+
+
+@app.post("/api/scanner/analyze-photo")
+async def analyze_food_photo(payload: PhotoAnalysisRequest):
+    """Analyze food from a base64-encoded photo captured by the frontend."""
+
+    raw_bytes, detected_mime = _decode_base64_image(payload.image)
+    weight = payload.weight if payload.weight is not None else 100.0
+
+    return await _analyze_food_bytes(
+        raw_bytes,
+        weight=weight,
+        filename=payload.filename,
+        mime_type=payload.mime_type or detected_mime,
+    )
+
+@app.get("/api/scanner/barcode/{barcode}")
+
+async def scan_barcode(barcode: str):
+    """Get food info from barcode using OpenFoodFacts API"""
+    status_code = 404
+    error_detail = "Product not found"
+    chatgpt_context: Dict[str, Any] = {"barcode": barcode}
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(
+                f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json"
+            )
+            response.raise_for_status()
+            data = response.json()
+            chatgpt_context["openfoodfacts_status"] = {
+                "status": data.get("status"),
+                "status_verbose": data.get("status_verbose"),
+            }
+
+            if data.get("status") == 1:
+                product = data["product"]
+                nutriments = product.get("nutriments", {})
+
+                return {
+                    "name": product.get("product_name", "Producto desconocido"),
+                    "confidence": 1.0,
+                    "nutrition": {
+                        "carbs": nutriments.get("carbohydrates_100g", 0),
+                        "proteins": nutriments.get("proteins_100g", 0),
+                        "fats": nutriments.get("fat_100g", 0),
+                        "glycemic_index": nutriments.get("glycemic_index", 50),
+                    },
+                }
+
+            status_code = 404
+            error_detail = data.get("status_verbose", "Product not found")
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        error_detail = f"OpenFoodFacts error: {exc.response.text[:200]}"
+        chatgpt_context["error"] = error_detail
+    except Exception as exc:  # pragma: no cover - safety net
+        status_code = 500
+        error_detail = str(exc)
+        chatgpt_context["error"] = error_detail
+
+    chatgpt_response = await chatgpt_barcode_lookup(chatgpt_context)
+    if isinstance(chatgpt_response, dict):
+        nutrition_defaults = {"carbs": 0.0, "proteins": 0.0, "fats": 0.0, "glycemic_index": 50}
+        nutrition = {}
+        gpt_nutrition = chatgpt_response.get("nutrition", {})
+        for key, default in nutrition_defaults.items():
+            digits = 2 if key != "glycemic_index" else 0
+            nutrition[key] = round(coerce_float(gpt_nutrition.get(key), default), digits)
+
+        confidence_value = round(
+            coerce_float(chatgpt_response.get("confidence"), 0.35),
+            2,
+        )
+
+        return {
+            "name": chatgpt_response.get("name", "Producto desconocido"),
+            "confidence": confidence_value,
+            "nutrition": nutrition,
+        }
+
+    raise HTTPException(status_code=status_code, detail=error_detail)
+
+# ============= TIMER =============
+
+async def timer_countdown(seconds: int):
+    """Background task for countdown"""
+    global timer_state
+    timer_state["running"] = True
+    timer_state["total"] = seconds
+    timer_state["remaining"] = seconds
+    
+    while timer_state["remaining"] > 0 and timer_state["running"]:
+        await asyncio.sleep(1)
+        timer_state["remaining"] -= 1
+    
+    if timer_state["running"]:
+        # Timer finished, play sound
+        try:
+            await asyncio.to_thread(
+                play_audio_file, Path("/usr/share/sounds/alsa/Front_Center.wav")
+            )
+        except Exception:
+            pass
+
+    timer_state["running"] = False
+    timer_state["remaining"] = 0
+
+@app.post("/api/timer/start")
+async def start_timer(data: TimerStart):
+    """Start countdown timer"""
+    global timer_task
+    
+    if timer_task and not timer_task.done():
+        timer_task.cancel()
+    
+    timer_task = asyncio.create_task(timer_countdown(data.seconds))
+    return {"success": True, "seconds": data.seconds}
+
+@app.post("/api/timer/stop")
+async def stop_timer():
+    """Stop running timer"""
+    global timer_state, timer_task
+    
+    timer_state["running"] = False
+    if timer_task and not timer_task.done():
+        timer_task.cancel()
+    
+    return {"success": True}
+
+@app.get("/api/timer/status")
+async def get_timer_status():
+    """Get current timer status"""
+    return {
+        "running": timer_state["running"],
+        "remaining": timer_state["remaining"]
+    }
+
+# ============= NIGHTSCOUT =============
+
+@app.get("/api/nightscout/glucose")
+async def get_glucose():
+    """Get current glucose using the diabetes monitor cache."""
+    status = await glucose_monitor.get_snapshot(force_refresh=True)
+    if not status.enabled:
+        raise HTTPException(status_code=400, detail="Nightscout not configured")
+    if not status.nightscout_connected or status.mgdl is None:
+        raise HTTPException(status_code=404, detail="No glucose data")
+
+    if status.updated_at is None:
+        timestamp = datetime.now(timezone.utc)
+    else:
+        timestamp = status.updated_at.astimezone(timezone.utc)
+
+    trend_map = {
+        "up": "up",
+        "up_slow": "up",
+        "flat": "stable",
+        "down_slow": "down",
+        "down": "down",
+    }
+
+    return {
+        "glucose": float(status.mgdl),
+        "trend": trend_map.get(status.trend or "flat", "stable"),
+        "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
+    }
+
+@app.post("/api/nightscout/bolus")
+async def export_bolus(data: BolusData):
+    """Export bolus to Nightscout"""
+    config = load_config()
+    ns_url, ns_token = _get_nightscout_credentials(config)
+    
+    if not ns_url:
+        raise HTTPException(status_code=400, detail="Nightscout not configured")
+    
+    try:
+        treatment = {
+            "eventType": "Meal Bolus",
+            "carbs": data.carbs,
+            "insulin": data.insulin,
+            "created_at": data.timestamp,
+            "enteredBy": "Bascula Digital"
+        }
+        
+        async with httpx.AsyncClient() as client:
+            headers = {"API-SECRET": ns_token, "Content-Type": "application/json"} if ns_token else {}
+            response = await client.post(f"{ns_url}/api/v1/treatments", json=treatment, headers=headers)
+            
+            if response.status_code in [200, 201]:
+                return {"success": True}
+            else:
+                raise HTTPException(status_code=500, detail="Failed to export")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============= VOICE/TTS =============
+
+
+def _detect_piper_sample_rate(model_path: str) -> int:
+    sample_rate = 22050
+    json_path = Path(f"{model_path}.json")
+    if json_path.exists():
+        try:
+            with json_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                rate = data.get("sample_rate")
+                if isinstance(rate, (int, float)):
+                    sample_rate = int(rate)
+                else:
+                    audio_cfg = data.get("audio")
+                    if isinstance(audio_cfg, dict):
+                        audio_rate = audio_cfg.get("sample_rate")
+                        if isinstance(audio_rate, (int, float)):
+                            sample_rate = int(audio_rate)
+        except Exception:
+            pass
+    return sample_rate
+
+
+def _synthesize_with_piper_raw(model_path: str, text: str) -> bytes:
+    cmd = ["piper", "--model", model_path, "--output-raw"]
+    proc = subprocess.run(
+        cmd,
+        input=text.encode("utf-8"),
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    return proc.stdout
+
+
+@app.post("/api/voice/speak")
+async def speak_text(data: SpeakRequest):
+    """Convert text to speech using Piper TTS"""
+    try:
+        # Sanitize text to prevent command injection
+        safe_text = data.text.replace('"', '\\"').replace('$', '\\$').replace('`', '\\`')
+
+        # Use Piper TTS if installed
+        piper_binary = "/usr/local/bin/piper"
+        if os.path.exists(piper_binary):
+            voice_model = f"/opt/piper/models/{data.voice}.onnx"
+            if os.path.exists(voice_model):
+                sample_rate = _detect_piper_sample_rate(voice_model)
+                try:
+                    pcm_audio = await asyncio.to_thread(
+                        _synthesize_with_piper_raw,
+                        voice_model,
+                        data.text,
+                    )
+                    await asyncio.to_thread(
+                        play_pcm_audio,
+                        pcm_audio,
+                        sample_rate=sample_rate,
+                        channels=1,
+                    )
+                    return {"success": True}
+                except Exception as exc:
+                    LOG_VOICE.warning(
+                        "Piper playback failed for %s: %s",
+                        voice_model,
+                        exc,
+                    )
+
+        # Fallback to espeak (already safe with list)
+        subprocess.Popen(["espeak", "-v", "es", safe_text])
+        return {"success": True, "fallback": "espeak"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/assistant/chat")
+async def assistant_chat(payload: AssistantChatRequest) -> Dict[str, Any]:
+    text = (payload.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text_required")
+
+    if not get_chatgpt_api_key():
+        raise HTTPException(status_code=503, detail="chatgpt_not_configured")
+
+    context_text = _format_assistant_context(payload.context)
+    user_parts = [f"Usuario: {text}"]
+    if context_text:
+        user_parts.append("Contexto adicional:")
+        user_parts.append(context_text)
+
+    messages = [
+        {"role": "system", "content": ASSISTANT_SYSTEM_PROMPT},
+        {"role": "user", "content": "\n".join(user_parts)},
+    ]
+
+    raw_response = await invoke_chatgpt(messages, temperature=0.55)
+    if not raw_response:
+        raise HTTPException(status_code=503, detail="assistant_unavailable")
+
+    parsed = parse_chatgpt_json(raw_response)
+
+    if parsed and isinstance(parsed, dict):
+        reply_text = str(parsed.get("reply", "")).strip()
+        mood = str(parsed.get("mood", "normal")).lower()
+        speak_flag = bool(parsed.get("speak", True))
+    else:
+        reply_text = raw_response.strip()
+        mood = "normal"
+        speak_flag = True
+
+    if not reply_text:
+        reply_text = "Lo siento, no entendí la petición."
+
+    if mood not in ALLOWED_ASSISTANT_MOODS:
+        mood = "normal"
+
+    return {"ok": True, "reply": reply_text, "mood": mood, "speak": speak_flag}
+
+
+# ============= RECIPES (AI) =============
+
+@app.get("/api/recipes/status")
+async def recipes_status() -> Dict[str, Any]:
+    api_key = get_chatgpt_api_key()
+    if not api_key:
+        return {
+            "enabled": False,
+            "reason": "Configura una clave de OpenAI para habilitar el asistente de recetas.",
+        }
+    return {"enabled": True, "model": get_chatgpt_model()}
+
+
+@app.post("/api/recipes/generate")
+async def generate_recipe(data: RecipeRequest):
+    """Generate a recipe through ChatGPT tailored to the requested prompt."""
+
+    prompt = data.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Debes indicar qué receta deseas preparar")
+
+    if not get_chatgpt_api_key():
+        raise HTTPException(
+            status_code=503,
+            detail="El asistente de recetas requiere una clave de OpenAI configurada en Ajustes.",
+        )
+
+    try:
+        requested_servings = int(data.servings) if data.servings else 2
+    except (TypeError, ValueError):
+        requested_servings = 2
+    servings = max(requested_servings, 1)
+
+    ai_recipe = await chatgpt_generate_recipe(prompt, servings)
+    if not isinstance(ai_recipe, dict):
+        raise HTTPException(
+            status_code=502,
+            detail="No se pudo generar la receta con el asistente de IA. Intenta nuevamente en unos segundos.",
+        )
+
+    normalized = _normalize_ai_recipe(ai_recipe, prompt, servings)
+    if not normalized["steps"]:
+        raise HTTPException(
+            status_code=502,
+            detail="La receta proporcionada por el asistente de IA no contiene pasos válidos.",
+        )
+
+    recipe_id = str(uuid4())
+    model_id = get_chatgpt_model()
+
+    active_recipes[recipe_id] = {
+        "id": recipe_id,
+        "title": normalized["title"],
+        "servings": normalized["servings"],
+        "steps": normalized["steps"],
+        "raw_steps": ai_recipe.get("steps", []),
+        "prompt": prompt,
+        "model": model_id,
+    }
+
+    return {
+        "id": recipe_id,
+        "title": normalized["title"],
+        "servings": normalized["servings"],
+        "ingredients": normalized["ingredients"],
+        "steps": normalized["steps"],
+        "estimatedTime": normalized["estimated_time"],
+        "model": model_id,
+    }
+
+
+def _extract_weight(response: str | None) -> float | None:
+    if not response:
+        return None
+    match = re.search(r"(\d+[\.,]?\d*)", response)
+    if not match:
+        return None
+    value = match.group(1).replace(',', '.')
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+@app.post("/api/recipes/next")
+async def next_recipe_step(data: RecipeNext):
+    """Return guidance for the next recipe step and evaluate user response."""
+    recipe = active_recipes.get(data.recipeId)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Receta no encontrada o finalizada")
+
+    steps = recipe["steps"]
+    if data.currentStep >= len(steps):
+        active_recipes.pop(data.recipeId, None)
+        return {
+            "isLast": True,
+            "assistantMessage": "Receta finalizada. ¡Buen provecho!",
+        }
+
+    step = steps[data.currentStep]
+    expected_weight = step.get("expectedWeight")
+    measured_weight = _extract_weight(data.userResponse)
+
+    assistant_message = step.get("assistantMessage") or step.get("tip")
+    if step.get("needsScale") and expected_weight is not None:
+        if measured_weight is None:
+            assistant_message = assistant_message or "Recuerda confirmar el peso en gramos para ajustar la receta."
+        else:
+            diff = abs(measured_weight - expected_weight)
+            tolerance = max(5, expected_weight * 0.1)
+            if diff <= tolerance:
+                assistant_message = "Peso correcto, podemos continuar con la receta."
+            elif measured_weight < expected_weight:
+                assistant_message = (
+                    f"Solo registraste {measured_weight:.0f} g. Añade {expected_weight - measured_weight:.0f} g para llegar a la cantidad recomendada."
+                )
+            else:
+                assistant_message = (
+                    f"Has sobrepasado el peso objetivo en {measured_weight - expected_weight:.0f} g. Ajusta o tenlo en cuenta para el resto de ingredientes."
+                )
+    elif data.userResponse and not assistant_message:
+        assistant_message = f"Anotado: {data.userResponse.strip()}"
+
+    is_last = data.currentStep == len(steps) - 1
+    if is_last:
+        active_recipes.pop(data.recipeId, None)
+
+    response_step = dict(step)
+    if assistant_message is not None:
+        response_step["assistantMessage"] = assistant_message
+
+    return {
+        "step": response_step,
+        "isLast": is_last,
+        "assistantMessage": assistant_message,
+    }
+
+
+# ============= SETTINGS =============
+
+class SettingsTestOpenAIRequest(BaseModel):
+    openai_api_key: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
+
+
+class SettingsTestNightscoutRequest(BaseModel):
+    url: Optional[str] = None
+    token: Optional[str] = None
+    nightscout_url: Optional[str] = None
+    nightscout_token: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
+
+
+_SECRET_PLACEHOLDER = "__stored__"
+
+
+def _resolve_secret(value: Any, current: Any) -> Any:
+    if isinstance(value, str) and value.strip() == _SECRET_PLACEHOLDER:
+        return current
+    return value
+
+
+def _deep_merge_dict(target: Dict[str, Any], updates: Dict[str, Any]) -> None:
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _deep_merge_dict(target[key], value)
+        else:
+            target[key] = value
+
+
+def _build_settings_diff(changed_fields: Set[str], sanitized: Dict[str, Any]) -> Dict[str, Any]:
+    diff: Dict[str, Any] = {}
+    for field in changed_fields:
+        if field in sanitized:
+            diff[field] = sanitized[field]
+        else:
+            # Campo eliminado; representarlo como None para los clientes
+            diff[field] = None
+
+    if "meta" in sanitized:
+        diff["meta"] = sanitized["meta"]
+
+    return diff
+
+
+async def _broadcast_settings_change(fields: Set[str], diff: Dict[str, Any], version: int) -> None:
+    if not fields:
+        return
+
+    message = json.dumps(
+        {
+            "type": "settings.changed",
+            "version": version,
+            "fields": sorted(fields),
+            "diff": diff,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    async with settings_ws_lock:
+        if not settings_ws_connections:
+            return
+
+        disconnected: List[WebSocket] = []
+
+        for ws in list(settings_ws_connections):
+            try:
+                await ws.send_text(message)
+            except Exception:
+                disconnected.append(ws)
+
+        for ws in disconnected:
+            settings_ws_connections.discard(ws)
+
+
+def _normalize_settings_payload(payload: Dict[str, Any], existing: Dict[str, Any]) -> Dict[str, Any]:
+    normalized: Dict[str, Any] = {}
+
+    existing_network = existing.get("network") if isinstance(existing.get("network"), dict) else {}
+    existing_diabetes = existing.get("diabetes") if isinstance(existing.get("diabetes"), dict) else {}
+
+    if isinstance(payload.get("network"), dict):
+        network_updates: Dict[str, Any] = {}
+        for key, value in payload["network"].items():
+            if key == "openai_api_key":
+                network_updates[key] = _resolve_secret(value, existing_network.get("openai_api_key"))
+            else:
+                network_updates[key] = value
+        if network_updates:
+            normalized["network"] = network_updates
+
+    if isinstance(payload.get("diabetes"), dict):
+        diabetes_updates: Dict[str, Any] = {}
+        for key, value in payload["diabetes"].items():
+            if key in {"nightscout_url", "nightscout_token"}:
+                diabetes_updates[key] = _resolve_secret(value, existing_diabetes.get(key))
+            else:
+                diabetes_updates[key] = value
+        if diabetes_updates:
+            normalized["diabetes"] = diabetes_updates
+
+    if isinstance(payload.get("openai"), dict):
+        api_key = payload["openai"].get("apiKey")
+        normalized.setdefault("network", {})["openai_api_key"] = _resolve_secret(
+            api_key, existing_network.get("openai_api_key")
+        )
+
+    if "openai_api_key" in payload:
+        normalized.setdefault("network", {})["openai_api_key"] = _resolve_secret(
+            payload.get("openai_api_key"), existing_network.get("openai_api_key")
+        )
+
+    nightscout_payload = payload.get("nightscout")
+    if isinstance(nightscout_payload, dict):
+        if "url" in nightscout_payload:
+            normalized.setdefault("diabetes", {})["nightscout_url"] = _resolve_secret(
+                nightscout_payload.get("url"), existing_diabetes.get("nightscout_url")
+            )
+        if "token" in nightscout_payload:
+            normalized.setdefault("diabetes", {})["nightscout_token"] = _resolve_secret(
+                nightscout_payload.get("token"), existing_diabetes.get("nightscout_token")
+            )
+
+    if "nightscout_url" in payload:
+        normalized.setdefault("diabetes", {})["nightscout_url"] = _resolve_secret(
+            payload.get("nightscout_url"), existing_diabetes.get("nightscout_url")
+        )
+
+    if "nightscout_token" in payload:
+        normalized.setdefault("diabetes", {})["nightscout_token"] = _resolve_secret(
+            payload.get("nightscout_token"), existing_diabetes.get("nightscout_token")
+        )
+
+    for key, value in payload.items():
+        if key in {"openai", "nightscout", "openai_api_key", "nightscout_url", "nightscout_token"}:
+            continue
+        if key in {"network", "diabetes"}:
+            continue  # Already handled above
+        normalized[key] = value
+
+    return normalized
+
+
+def _synchronize_secret_aliases(config: Dict[str, Any]) -> None:
+    network_cfg = config.get("network") if isinstance(config.get("network"), dict) else {}
+    diabetes_cfg = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
+
+    openai_value = network_cfg.get("openai_api_key") if isinstance(network_cfg, dict) else None
+    openai_str = openai_value.strip() if isinstance(openai_value, str) else ""
+    config["openai_api_key"] = openai_str
+    integrations_cfg = config.get("integrations") if isinstance(config.get("integrations"), dict) else {}
+    integrations_cfg["openai_api_key"] = openai_str
+    config["integrations"] = integrations_cfg
+
+    nightscout_url_candidates = [
+        diabetes_cfg.get("nightscout_url") if isinstance(diabetes_cfg, dict) else None,
+        diabetes_cfg.get("ns_url") if isinstance(diabetes_cfg, dict) else None,
+        config.get("nightscout_url"),
+        (config.get("nightscout", {}).get("url") if isinstance(config.get("nightscout"), dict) else None),
+    ]
+    nightscout_token_candidates = [
+        diabetes_cfg.get("nightscout_token") if isinstance(diabetes_cfg, dict) else None,
+        diabetes_cfg.get("ns_token") if isinstance(diabetes_cfg, dict) else None,
+        config.get("nightscout_token"),
+        (config.get("nightscout", {}).get("token") if isinstance(config.get("nightscout"), dict) else None),
+    ]
+
+    final_ns_url = next(
+        (value.strip() for value in nightscout_url_candidates if isinstance(value, str) and value.strip()),
+        "",
+    )
+    final_ns_token = next(
+        (value.strip() for value in nightscout_token_candidates if isinstance(value, str) and value.strip()),
+        "",
+    )
+
+    if isinstance(diabetes_cfg, dict):
+        diabetes_cfg["nightscout_url"] = final_ns_url
+        diabetes_cfg["nightscout_token"] = final_ns_token
+        diabetes_cfg["ns_url"] = final_ns_url
+        diabetes_cfg["ns_token"] = final_ns_token
+        diabetes_cfg["diabetes_enabled"] = bool(final_ns_url)
+        config["diabetes"] = diabetes_cfg
+
+    config["nightscout_url"] = final_ns_url
+    config["nightscout_token"] = final_ns_token
+
+    nightscout_cfg = config.get("nightscout") if isinstance(config.get("nightscout"), dict) else {}
+    if isinstance(nightscout_cfg, dict):
+        nightscout_cfg["url"] = final_ns_url
+        nightscout_cfg["token"] = final_ns_token
+        config["nightscout"] = nightscout_cfg
+
+
+async def _handle_settings_update(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        existing = load_config()
+        normalized_updates = _normalize_settings_payload(payload, existing)
+
+        merged = deepcopy(existing)
+        _deep_merge_dict(merged, normalized_updates)
+        _synchronize_secret_aliases(merged)
+
+        _, changed_fields = _settings_service.save(merged)
+        sanitized = _settings_service.get_for_client(include_secrets=False)
+
+        changed_fields_set = set(changed_fields)
+        if changed_fields_set:
+            fields_for_broadcast = set(changed_fields_set)
+            if "meta" in sanitized:
+                fields_for_broadcast.add("meta")
+
+            meta = sanitized.get("meta")
+            version = 0
+            if isinstance(meta, dict):
+                try:
+                    version = int(meta.get("version") or 0)
+                except (TypeError, ValueError):
+                    version = 0
+
+            diff = _build_settings_diff(fields_for_broadcast, sanitized)
+            asyncio.create_task(_broadcast_settings_change(fields_for_broadcast, diff, version))
+
+        return sanitized
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get current settings"""
+    return _settings_service.get_for_client(include_secrets=False)
+
+
+@app.options("/api/settings")
+async def options_settings() -> Response:
+    """Handle preflight requests for settings endpoint."""
+    allowed = "GET, POST, OPTIONS"
+    response = Response(status_code=204)
+    response.headers["Allow"] = allowed
+    response.headers["Access-Control-Allow-Methods"] = allowed
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Vary"] = "Origin"
+    return response
+
+
+@app.put("/api/settings")
+async def put_settings_not_allowed() -> JSONResponse:
+    """Explicitly reject PUT requests with clear guidance."""
+    allowed = "GET, POST, OPTIONS"
+    response = JSONResponse(
+        status_code=405,
+        content={"detail": "Method not allowed. Use POST /api/settings."},
+    )
+    response.headers["Allow"] = allowed
+    response.headers["Access-Control-Allow-Methods"] = allowed
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Vary"] = "Origin"
+    return response
+
+
+@app.post("/api/settings")
+async def update_settings(settings: Dict[str, Any]):
+    """Update settings"""
+    return await _handle_settings_update(settings)
+
+
+@app.websocket("/ws/updates")
+async def websocket_settings_updates(websocket: WebSocket):
+    """Sincronización en tiempo real de configuración"""
+    await websocket.accept()
+
+    async with settings_ws_lock:
+        settings_ws_connections.add(websocket)
+
+    try:
+        initial_payload = _settings_service.get_for_client(include_secrets=False)
+        await websocket.send_json({"type": "settings.initial", "data": initial_payload})
+
+        while True:
+            try:
+                message = await websocket.receive_text()
+                if message.strip().lower() == "ping":
+                    await websocket.send_text("pong")
+            except WebSocketDisconnect:
+                break
+            except Exception:
+                break
+    finally:
+        async with settings_ws_lock:
+            settings_ws_connections.discard(websocket)
+
+
+@app.post("/api/settings/test/openai")
+async def settings_test_openai(
+    request: Request,
+    payload: SettingsTestOpenAIRequest = Body(default_factory=SettingsTestOpenAIRequest),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        _enforce_test_rate_limit(client_ip)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"ok": False, "message": str(exc.detail)})
+
+    candidate_key = (payload.openai_api_key or "").strip() if payload else ""
+    if not candidate_key:
+        resolved = get_chatgpt_api_key()
+        candidate_key = (resolved or "").strip()
+
+    if not candidate_key:
+        return JSONResponse(status_code=400, content={"ok": False, "message": "No hay una API key configurada."})
+
+    headers = {"Authorization": f"Bearer {candidate_key}"}
+    models_url = os.getenv("OPENAI_MODELS_URL", "https://api.openai.com/v1/models")
+    response: Optional[httpx.Response] = None
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(models_url, headers=headers, params={"limit": 1})
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        message = f"OpenAI respondió con {exc.response.status_code}"
+        try:
+            error_data = exc.response.json()
+            if isinstance(error_data, dict):
+                error_info = error_data.get("error")
+                if isinstance(error_info, dict):
+                    error_message = error_info.get("message")
+                    if error_message:
+                        message = str(error_message)
+        except Exception:
+            pass
+        return JSONResponse(status_code=exc.response.status_code, content={"ok": False, "message": message})
+    except httpx.TimeoutException:
+        return JSONResponse(status_code=504, content={"ok": False, "message": "Tiempo de espera agotado al contactar OpenAI."})
+    except httpx.RequestError as exc:
+        return JSONResponse(status_code=502, content={"ok": False, "message": f"No se pudo conectar a OpenAI: {exc}"})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"ok": False, "message": f"Error inesperado: {exc}"})
+
+    message = "Conexión con OpenAI verificada."
+    if response is not None:
+        try:
+            data = response.json()
+            if isinstance(data, dict):
+                models = data.get("data")
+                if isinstance(models, list) and models:
+                    first = models[0]
+                    if isinstance(first, dict):
+                        model_id = first.get("id")
+                        if isinstance(model_id, str) and model_id:
+                            message = f"OpenAI disponible (ej. modelo {model_id})"
+        except Exception:
+            pass
+
+    return {"ok": True, "message": message}
+
+
+@app.post("/api/settings/test/nightscout")
+async def settings_test_nightscout(
+    request: Request,
+    payload: SettingsTestNightscoutRequest = Body(default_factory=SettingsTestNightscoutRequest),
+):
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        _enforce_test_rate_limit(client_ip)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"ok": False, "message": str(exc.detail)})
+
+    config = load_config()
+    current_url, current_token = _get_nightscout_credentials(config)
+    candidate_url = payload.url or payload.nightscout_url or current_url or ""
+    candidate_token = payload.token or payload.nightscout_token or current_token or ""
+    target_url = candidate_url.strip()
+    target_token = candidate_token.strip()
+
+    if not target_url:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "message": "missing_url", "status": 400},
+        )
+
+    normalized_url = target_url.rstrip("/")
+    headers = {"API-SECRET": target_token} if target_token else {}
+
+    response: Optional[httpx.Response] = None
+    used_endpoint = "status"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0, follow_redirects=True) as client:
+            try:
+                response = await client.get(f"{normalized_url}/api/v1/status", headers=headers)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as status_error:
+                if status_error.response.status_code in {404, 405}:
+                    used_endpoint = "entries"
+                    response = await client.get(
+                        f"{normalized_url}/api/v1/entries",
+                        headers=headers,
+                        params={"count": 1},
+                    )
+                    response.raise_for_status()
+                else:
+                    raise
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        try:
+            error_payload = exc.response.json()
+        except Exception:
+            error_payload = exc.response.text
+        message = "unauthorized"
+        if status_code not in {401, 403}:
+            text = str(error_payload).lower()
+            if "unauthorized" not in text and "not authorized" not in text and "forbidden" not in text:
+                message = "http_error"
+        return JSONResponse(
+            status_code=status_code,
+            content={"ok": False, "message": message, "status": status_code, "details": error_payload},
+        )
+    except httpx.TimeoutException:
+        return JSONResponse(
+            status_code=504,
+            content={"ok": False, "message": "timeout", "status": 504},
+        )
+    except httpx.RequestError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"ok": False, "message": str(exc), "status": 502},
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=500,
+            content={"ok": False, "message": str(exc), "status": 500},
+        )
+
+    details: Any = None
+    try:
+        data = response.json()
+        if isinstance(data, dict):
+            details = data
+        else:
+            details = data
+    except Exception:
+        details = response.text
+
+    return {
+        "ok": True,
+        "message": "authorized",
+        "status": response.status_code,
+        "endpoint": used_endpoint,
+        "details": details,
+    }
+
+
+@app.get("/api/settings/health")
+async def settings_health():
+    config_path = CONFIG_PATH
+    config_dir = config_path.parent
+
+    dir_exists = False
+    dir_mode = "---"
+    dir_owner = "desconocido"
+    dir_mode_ok = False
+
+    file_exists = False
+    file_mode = "---"
+    file_owner = "desconocido"
+    file_mode_ok = False
+
+    can_read = False
+    can_write = False
+
+    message_parts: List[str] = []
+
+    try:
+        dir_stat = config_dir.stat()
+        dir_exists = True
+        dir_mode_val = stat.S_IMODE(dir_stat.st_mode)
+        dir_mode = f"{dir_mode_val:03o}"
+        dir_mode_ok = dir_mode_val == 0o700
+        try:
+            dir_user = pwd.getpwuid(dir_stat.st_uid).pw_name
+        except KeyError:
+            dir_user = str(dir_stat.st_uid)
+        try:
+            dir_group = grp.getgrgid(dir_stat.st_gid).gr_name
+        except KeyError:
+            dir_group = str(dir_stat.st_gid)
+        dir_owner = f"{dir_user}:{dir_group}"
+    except FileNotFoundError:
+        message_parts.append("El directorio de configuración no existe.")
+    except Exception as exc:
+        message_parts.append(f"No se pudo obtener metadatos del directorio: {exc}")
+
+    try:
+        file_stat = config_path.stat()
+        file_exists = True
+        file_mode_val = stat.S_IMODE(file_stat.st_mode)
+        file_mode = f"{file_mode_val:03o}"
+        file_mode_ok = file_mode_val == 0o600
+        try:
+            file_user = pwd.getpwuid(file_stat.st_uid).pw_name
+        except KeyError:
+            file_user = str(file_stat.st_uid)
+        try:
+            file_group = grp.getgrgid(file_stat.st_gid).gr_name
+        except KeyError:
+            file_group = str(file_stat.st_gid)
+        file_owner = f"{file_user}:{file_group}"
+    except FileNotFoundError:
+        message_parts.append("El archivo de configuración no existe.")
+    except Exception as exc:
+        message_parts.append(f"No se pudo obtener metadatos del archivo: {exc}")
+
+    if file_exists:
+        try:
+            with config_path.open("r", encoding="utf-8"):
+                pass
+            can_read = True
+        except Exception as exc:
+            message_parts.append(f"No se pudo leer: {exc}")
+
+    tmp_path = config_dir / f"{config_path.name}.tmp.health"
+    probe_path = config_dir / f"{config_path.name}.tmp.health.check"
+    if dir_exists:
+        try:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                handle.write("{}")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, probe_path)
+            os.remove(probe_path)
+            can_write = True
+        except Exception as exc:
+            message_parts.append(f"No se pudo escribir: {exc}")
+        finally:
+            for candidate in (tmp_path, probe_path):
+                try:
+                    if candidate.exists():
+                        candidate.unlink()
+                except Exception:
+                    pass
+    else:
+        message_parts.append("No se pudo escribir: el directorio de configuración no existe.")
+
+    message = " ".join(message_parts).strip() or "OK"
+
+    ok = can_read and can_write and dir_mode_ok and (not file_exists or file_mode_ok)
+
+    return {
+        "ok": ok,
+        "can_read": can_read,
+        "can_write": can_write,
+        "config_path": str(config_path),
+        "config_exists": file_exists,
+        "config_owner": file_owner,
+        "config_mode": file_mode,
+        "config_mode_ok": file_mode_ok,
+        "config_dir": str(config_dir),
+        "config_dir_exists": dir_exists,
+        "config_dir_owner": dir_owner,
+        "config_dir_mode": dir_mode,
+        "config_dir_mode_ok": dir_mode_ok,
+        "message": message,
+    }
+
+
+# ============= NETWORK MANAGEMENT =============
+
+@app.get("/api/network/status")
+async def network_status():
+    """Get current network status"""
+    try:
+        # Check if connected to WiFi
+        result = subprocess.run(
+            ["nmcli", "-t", "-f", "DEVICE,STATE,CONNECTION", "dev", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        
+        lines = result.stdout.strip().splitlines()
+        connected = False
+        ssid = None
+        ip = None
+        
+        for line in lines:
+            parts = line.split(':')
+            if len(parts) >= 3 and parts[1] == 'connected':
+                connected = True
+                ssid = parts[2] if parts[2] else None
+                
+                # Get IP address
+                try:
+                    ip_result = subprocess.run(
+                        ["ip", "-4", "addr", "show", parts[0]],
+                        capture_output=True,
+                        text=True,
+                        timeout=3
+                    )
+                    for ip_line in ip_result.stdout.splitlines():
+                        if 'inet ' in ip_line:
+                            ip = ip_line.strip().split()[1].split('/')[0]
+                            break
+                except:
+                    pass
+                break
+        
+        return {
+            "connected": connected,
+            "ssid": ssid,
+            "ip": ip
+        }
+    except Exception as e:
+        print(f"Error getting network status: {e}")
+        return {"connected": False}
+
+@app.post("/api/network/enable-ap")
+async def enable_ap_mode():
+    """Enable Access Point mode"""
+    try:
+        # Start hostapd and dnsmasq
+        subprocess.run(["sudo", "systemctl", "start", "hostapd"], check=True)
+        subprocess.run(["sudo", "systemctl", "start", "dnsmasq"], check=True)
+        
+        print("📡 AP mode enabled")
+        return {"success": True}
+    except Exception as e:
+        print(f"Error enabling AP mode: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/network/disable-ap")
+async def disable_ap_mode():
+    """Disable Access Point mode"""
+    try:
+        # Stop hostapd and dnsmasq
+        subprocess.run(["sudo", "systemctl", "stop", "hostapd"])
+        subprocess.run(["sudo", "systemctl", "stop", "dnsmasq"])
+        
+        print("📡 AP mode disabled")
+        return {"success": True}
+    except Exception as e:
+        print(f"Error disabling AP mode: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ============= OTA UPDATES =============
+
+@app.get("/api/updates/check")
+async def check_updates():
+    """Check for available updates from GitHub"""
+    try:
+        # Get current version
+        current_version = "desconocido"
+        if VERSION_FILE.exists():
+            try:
+                current_version = VERSION_FILE.read_text(encoding="utf-8").strip() or "desconocido"
+            except Exception:
+                current_version = "desconocido"
+
+        # Check GitHub for latest release
+        async with httpx.AsyncClient() as client:
+
+            response = await client.get("https://api.github.com/repos/DanielGTdiabetes/bascula-ui/releases/latest")
+            if response.status_code == 200:
+                latest = response.json()
+                latest_version = latest.get("tag_name", "")
+                
+                return {
+                    "available": latest_version != current_version,
+                    "version": latest_version
+                }
+        
+        return {"available": False}
+    except Exception as e:
+        return {"available": False, "error": str(e)}
+
+def _safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
+    """Safely extract a tar archive preventing path traversal and symlinks."""
+
+    destination = destination.resolve()
+    members: List[tarfile.TarInfo] = []
+
+    for member in archive.getmembers():
+        if member.issym() or member.islnk():
+            raise HTTPException(status_code=400, detail="El paquete contiene enlaces inseguros")
+
+        member_path = (destination / member.name).resolve()
+        try:
+            member_path.relative_to(destination)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="El paquete intenta escribir fuera del directorio destino") from exc
+
+        members.append(member)
+
+    archive.extractall(destination, members=members)
+
+
+@app.post("/api/updates/install")
+async def install_update():
+    """Download and unpack the latest release from GitHub"""
+    download_path: Optional[Path] = None
+    try:
+        DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            release_resp = await client.get(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest")
+            release_resp.raise_for_status()
+            release = release_resp.json()
+
+        tag = release.get("tag_name")
+        tarball_url = release.get("tarball_url")
+        if not tag or not tarball_url:
+            raise HTTPException(status_code=404, detail="No se encontró una release válida")
+
+        download_path = DOWNLOADS_DIR / f"{tag}.tar.gz"
+        async with httpx.AsyncClient(timeout=120) as client:
+            async with client.stream("GET", tarball_url) as download:
+                download.raise_for_status()
+                with open(download_path, "wb") as file_stream:
+                    async for chunk in download.aiter_bytes():
+                        file_stream.write(chunk)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with tarfile.open(download_path, "r:gz") as archive:
+                _safe_extract_tar(archive, Path(temp_dir))
+
+            temp_path = Path(temp_dir)
+            extracted_dirs = [item for item in temp_path.iterdir() if item.is_dir()]
+            if not extracted_dirs:
+                raise HTTPException(status_code=500, detail="El paquete descargado está vacío")
+            extracted_root = extracted_dirs[0]
+
+            target_dir = RELEASES_DIR / tag
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            shutil.copytree(extracted_root, target_dir)
+
+        try:
+            VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+            VERSION_FILE.write_text(tag, encoding="utf-8")
+        except Exception as exc:
+            print(f"No se pudo actualizar VERSION local: {exc}")
+
+        try:
+            if CURRENT_SYMLINK.is_symlink() or CURRENT_SYMLINK.exists():
+                CURRENT_SYMLINK.unlink()
+            CURRENT_SYMLINK.symlink_to(target_dir, target_is_directory=True)
+            symlink_message = "symlink actualizado"
+        except (OSError, NotImplementedError) as exc:
+            symlink_message = f"no se pudo crear symlink: {exc}"
+            pointer_file = RELEASES_DIR / "current_path.txt"
+            pointer_file.write_text(str(target_dir), encoding="utf-8")
+
+        return {
+            "success": True,
+            "version": tag,
+            "release_dir": str(target_dir),
+            "message": symlink_message,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Instalación falló: {exc}")
+    finally:
+        if download_path and download_path.exists():
+            try:
+                download_path.unlink()
+            except OSError:
+                pass
+
+# ============= HEALTH CHECK =============
+
+
+@app.get("/ocr/health")
+async def ocr_health_check():
+    """Return OCR readiness without breaking the backend when models are missing."""
+    service = get_ocr_service()
+    status_value = service.health_status()
+    if status_value == "ready":
+        return {"ocr": "ready"}
+    return JSONResponse(status_code=503, content={"ocr": status_value})
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    scale_connected = False
+    scale_backend = None
+    scale_status: dict[str, object] | None = None
+    if scale_service is not None:
+        status_payload = dict(scale_service.get_status())
+        scale_status = status_payload
+        scale_connected = bool(status_payload.get("ok"))
+        backend_name = status_payload.get("backend")
+        if isinstance(backend_name, str):
+            scale_backend = backend_name
+
+    return {
+        "status": "ok",
+        "scale_connected": scale_connected,
+        "scale_backend": scale_backend,
+        "scale_status": scale_status,
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
+@app.get("/api/health")
+async def api_health_alias():
+    return await health_check()
+
+
+async def _probe_miniweb_status() -> tuple[str, Dict[str, Any]]:
+    """Return miniweb reachability status and payload without raising."""
+
+    base_url = os.getenv("BASCULA_MINIWEB_INTERNAL_URL")
+    if base_url:
+        url = base_url.rstrip("/") + "/api/miniweb/status"
+    else:
+        host = os.getenv("BASCULA_MINIWEB_HOST", "127.0.0.1")
+        port = os.getenv("BASCULA_MINIWEB_PORT", "8080")
+        url = f"http://{host}:{port}/api/miniweb/status"
+
+    status = "unknown"
+    payload: Dict[str, Any] = {}
+
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            response = await client.get(url)
+        if response.status_code == 200:
+            status = "up"
+            try:
+                data = response.json()
+                if isinstance(data, dict):
+                    payload = data
+            except Exception:
+                payload = {}
+        elif response.status_code >= 400:
+            status = "down"
+    except httpx.TimeoutException:
+        status = "unknown"
+    except httpx.RequestError:
+        status = "unknown"
+    except Exception:
+        status = "unknown"
+
+    return status, payload
+
+
+async def _resolve_tts_status(voice_enabled: bool) -> str:
+    """Best-effort detection of TTS availability."""
+
+    if not voice_enabled:
+        return "down"
+
+    try:
+        voices = await asyncio.to_thread(list_piper_voices)
+    except Exception:
+        return "down"
+
+    if isinstance(voices, dict):
+        models = voices.get("piper_models")
+        espeak_available = voices.get("espeak_available")
+        has_models = isinstance(models, list) and len(models) > 0
+        if has_models or bool(espeak_available):
+            return "up"
+
+    return "down"
+
+
+async def _resolve_camera_status() -> str:
+    """Check if a camera is detected without raising exceptions."""
+
+    try:
+        cameras = await asyncio.to_thread(list_cameras)
+    except Exception:
+        return "down"
+
+    if isinstance(cameras, list) and cameras:
+        return "up"
+    return "down"
+
+
+@app.get("/api/state")
+async def get_state() -> Dict[str, Any]:
+    """Aggregate lightweight system status without failing on partial data."""
+
+    try:
+        config = load_config()
+    except Exception:
+        config = {}
+
+    general_cfg = config.get("general") if isinstance(config.get("general"), dict) else {}
+    ui_cfg = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+    voice_cfg = config.get("voice") if isinstance(config.get("voice"), dict) else {}
+    diabetes_cfg = config.get("diabetes") if isinstance(config.get("diabetes"), dict) else {}
+
+    sound_enabled = bool(general_cfg.get("sound_enabled", True))
+    voice_enabled = bool(
+        voice_cfg.get("speech_enabled")
+        if isinstance(voice_cfg.get("speech_enabled"), bool)
+        else general_cfg.get("tts_enabled", True)
+    )
+    offline_mode = bool(ui_cfg.get("offline_mode", False))
+
+    diabetes_enabled = bool(
+        diabetes_cfg.get("enabled")
+        if isinstance(diabetes_cfg.get("enabled"), bool)
+        else diabetes_cfg.get("diabetes_enabled", False)
+    )
+
+    nightscout_connected = False
+    try:
+        snapshot = await glucose_monitor.get_snapshot()
+        diabetes_enabled = bool(snapshot.enabled)
+        nightscout_connected = bool(snapshot.nightscout_connected)
+    except Exception:
+        pass
+
+    miniweb_status, miniweb_payload = await _probe_miniweb_status()
+
+    network_online = False
+    ap_mode = False
+    app_mode = os.getenv("BASCULA_APP_MODE") or "unknown"
+
+    if isinstance(miniweb_payload, dict) and miniweb_payload:
+        connectivity = str(miniweb_payload.get("connectivity", ""))
+        internet_available = miniweb_payload.get("internet") is True
+        online_flag = miniweb_payload.get("online")
+        network_online = bool(
+            internet_available
+            or (isinstance(connectivity, str) and connectivity.lower() == "full")
+            or online_flag is True
+        )
+        ap_mode = bool(
+            miniweb_payload.get("ap_active")
+            or (str(miniweb_payload.get("effective_mode", "")).lower() == "ap")
+        )
+        effective_mode = miniweb_payload.get("effective_mode")
+        if isinstance(effective_mode, str) and effective_mode.strip():
+            app_mode = effective_mode.strip()
+    else:
+        network_online = not offline_mode
+        if offline_mode:
+            app_mode = "offline"
+        elif app_mode == "unknown":
+            app_mode = "kiosk"
+
+    app_version = (
+        os.getenv("BASCULA_APP_VERSION")
+        or os.getenv("BASCULA_VERSION")
+        or app.version
+        or "unknown"
+    )
+
+    tts_status = await _resolve_tts_status(voice_enabled)
+    camera_status = await _resolve_camera_status()
+
+    return {
+        "app": {
+            "version": app_version,
+            "mode": app_mode,
+        },
+        "services": {
+            "backend": "up",
+            "miniweb": miniweb_status,
+            "tts": tts_status,
+            "camera": camera_status,
+            "network": {
+                "online": network_online,
+                "ap_mode": ap_mode,
+            },
+        },
+        "diabetes": {
+            "enabled": diabetes_enabled,
+            "nightscout_connected": nightscout_connected,
+        },
+        "ui": {
+            "sound_enabled": sound_enabled,
+            "voice_enabled": voice_enabled,
+        },
+    }
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "Bascula Backend API", "version": "1.0"}
+
+
+def _coerce_port(value: str | None, fallback: int) -> int:
+    """Parse a port number from a string, returning fallback on errors."""
+
+    if not value:
+        return fallback
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        logging.getLogger("bascula.backend").warning(
+            "Invalid BASCULA_BACKEND_PORT=%r provided; falling back to %s", value, fallback
+        )
+        return fallback
+    if port <= 0 or port > 65535:
+        logging.getLogger("bascula.backend").warning(
+            "Out-of-range BASCULA_BACKEND_PORT=%r provided; falling back to %s", value, fallback
+        )
+        return fallback
+    return port
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    """Entry point executed by ``python -m backend.main``."""
+
+    default_host = os.getenv("BASCULA_BACKEND_HOST", "0.0.0.0")
+    default_port = _coerce_port(os.getenv("BASCULA_BACKEND_PORT"), 8081)
+
+    parser = argparse.ArgumentParser(description="Bascula backend server")
+    parser.add_argument("--host", default=default_host, help="Interface to bind the API server")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=default_port,
+        help="TCP port for the API server",
+    )
+    args = parser.parse_args(argv)
+
+    import uvicorn
+
+    uvicorn.run(
+        "backend.main:app",
+        host=args.host,
+        port=int(args.port),
+        reload=False,
+        log_level="info",
+        factory=False,
+    )
+
+
+if __name__ == "__main__":
+    main()

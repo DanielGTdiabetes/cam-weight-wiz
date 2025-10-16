@@ -1,0 +1,40 @@
+# Dependencias críticas para los servicios Python de Báscula
+# En Raspberry Pi (Bookworm) estos vienen de APT, no pip.
+# No añadir numpy/simplejpeg/picamera2 aquí: se proporcionan vía paquetes del sistema.
+aiofiles
+click>=8.1
+# FastAPI >=0.116 arrastra versiones nuevas de pydantic-core sin wheel en PiWheels (requiere Rust).
+fastapi==0.115.6
+httpcore>=1.0.0,<2.0.0
+httpx==0.28.1
+opencv-python
+piper-tts
+pillow
+# pydantic 2.7.4 sigue teniendo wheel para aarch64 en PiWheels.
+pydantic==2.7.4
+# pydantic-core 2.18.4 (wheel en piwheels y en PyPI aarch64) requerido por pydantic.
+pydantic-core==2.18.4
+# typing_extensions requerido por pydantic; se fija a versión con wheel en PiWheels.
+typing_extensions==4.12.2
+# annotated-types necesario para Pydantic, wheel universal.
+annotated-types==0.7.0
+# uvicorn depende de h11 para HTTP/1 y Starlette >=0.40 de anyio/sniffio.
+h11==0.14.0
+anyio==4.4.0
+sniffio==1.3.1
+python-multipart
+pyserial
+pyzbar
+rapidfuzz>=3.0,<4.0
+rapidocr-onnxruntime==1.4.4
+onnxruntime>=1.16,<1.19
+pyclipper>=1.3.0
+shapely!=2.0.4,>=2.0.1
+requests
+sounddevice
+# FastAPI 0.115.6 requiere Starlette >=0.40,<0.42 (hay wheel en PiWheels).
+starlette>=0.40,<0.41
+# Evitamos extras ([standard]) para no arrastrar watchfiles (requiere Rust en Pi).
+uvicorn>=0.30,<1.0
+vosk
+websockets

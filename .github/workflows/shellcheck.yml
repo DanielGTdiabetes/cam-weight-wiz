@@ -1,0 +1,52 @@
+name: Shellcheck
+
+on:
+  push:
+    paths:
+      - 'scripts/install-all.sh'
+      - '.github/workflows/shellcheck.yml'
+  pull_request:
+    paths:
+      - 'scripts/install-all.sh'
+      - '.github/workflows/shellcheck.yml'
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck nginx
+      - name: Run shellcheck
+        run: |
+          set -o pipefail
+          shellcheck -x scripts/install-all.sh | tee shellcheck.log
+          status=$?
+          if grep -Eq 'SC1009|SC1046|SC1047' shellcheck.log; then
+            echo 'Critical shell syntax issue detected (SC1009/SC1046/SC1047)'
+            exit 1
+          fi
+          exit $status
+      - name: Validate nginx configuration
+        run: |
+          set -euo pipefail
+          tmpdir=$(mktemp -d)
+          cat <<EOF >"${tmpdir}/nginx.conf"
+events {}
+http {
+    include "${GITHUB_WORKSPACE}/nginx/bascula.conf";
+}
+EOF
+          cat <<'EOF' >"${tmpdir}/proxy_params"
+proxy_set_header Host $host;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+EOF
+          nginx -t -c "${tmpdir}/nginx.conf" -p "${tmpdir}"
+      - name: Verify audio environment defaults
+        run: |
+          grep -q 'Environment=BASCULA_AUDIO_DEVICE=bascula_out' systemd/bascula-miniweb.service

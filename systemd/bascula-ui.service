@@ -1,0 +1,36 @@
+[Unit]
+Description=Bascula Digital Pro - UI (Chromium kiosk)
+After=network-online.target bascula-backend.service bascula-miniweb.service bascula-health-wait.service
+Wants=network-online.target
+Requires=bascula-health-wait.service
+Conflicts=getty@tty1.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/bascula/current
+Environment=HOME=/home/pi
+Environment=USER=pi
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+Environment=KIOSK_MINIWEB_READY_URL=http://127.0.0.1:8080/api/miniweb/status
+Environment=KIOSK_WAIT_SECS=60
+StandardOutput=journal
+StandardError=journal
+PermissionsStartOnly=yes
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+ExecStartPre=/bin/sh -c 'install -d -m0700 -o pi -g pi /run/user/1000'
+ExecStartPre=/bin/sh -c 'install -d -m0755 -o pi -g pi /var/log/bascula && install -o pi -g pi -m0644 /dev/null /var/log/bascula/ui.log && rm -f /tmp/.X0-lock'
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 ${KIOSK_WAIT_SECS}); do curl -fsS "${KIOSK_MINIWEB_READY_URL}" >/dev/null && exit 0; sleep 1; done; echo "miniweb no responde" >&2; exit 1 || true'
+ExecStart=/usr/bin/startx /home/pi/.xinitrc -- :0 vt1 -keeptty -nocursor
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

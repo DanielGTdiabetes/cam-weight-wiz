@@ -1,0 +1,6 @@
+[Allow WiFi Scan]
+Identity=unix-user:pi
+Action=org.freedesktop.NetworkManager.wifi.scan
+ResultActive=yes
+ResultAny=yes
+ResultInactive=yes

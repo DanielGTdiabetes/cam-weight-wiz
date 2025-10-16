@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+
+# Node/Frontend
+node_modules/
+dist/
+build/
+*.map
+
+# Logs & backups & runtime
+*.log
+logs/
+*.bak*
+*.bak.*
+*.old
+.coverage
+coverage/
+.DS_Store
+
+# Deploy/OTA locales (no versionar)
+releases/
+opt/
+var/
+run/
+tmp/

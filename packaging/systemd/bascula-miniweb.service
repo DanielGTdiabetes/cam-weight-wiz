@@ -1,0 +1,34 @@
+[Unit]
+Description=Bascula Mini-Web Backend
+After=NetworkManager.service NetworkManager-wait-online.service bascula-ap-ensure.service
+Wants=NetworkManager-wait-online.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/opt/bascula/current
+Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/etc/default/bascula
+EnvironmentFile=-/etc/default/bascula-audio
+Environment=BASCULA_AUDIO_DEVICE=bascula_out
+Environment=BASCULA_MIC_DEVICE=bascula_mix_in
+Environment=BASCULA_SAMPLE_RATE=16000
+Environment=BASCULA_CFG_DIR=/home/pi/.bascula
+Environment=BASCULA_CAPTURES_DIR=/run/bascula/captures
+Environment=BACKEND_BASE_URL=http://127.0.0.1:8081
+Environment=BASCULA_MINIWEB_HOST=127.0.0.1
+Environment=BASCULA_MINIWEB_PORT=8080
+Environment=MINIWEB_BASE_URL=http://127.0.0.1:8080
+SupplementaryGroups=audio video render dialout gpio
+ExecStartPre=-/usr/bin/nm-online -s -q -t 25
+ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 02770 /run/bascula
+ExecStartPre=/usr/bin/install -d -o pi -g www-data -m 02770 /run/bascula/captures
+ExecStartPre=/bin/chmod g+s /run/bascula /run/bascula/captures
+ExecStart=/opt/bascula/current/.venv/bin/python -m uvicorn backend.miniweb:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target
