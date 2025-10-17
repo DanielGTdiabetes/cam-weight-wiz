@@ -49,11 +49,23 @@ class SettingsSchema(BaseModel):
     
     class ScaleSettings(BaseModel):
         calibration_factor: float = 1.0
+        calibration_offset: float = 0.0
+        calibration_scale: float = 1.0
+        calibration_points: list[Dict[str, float]] = Field(default_factory=list)
         decimals: int = 1
         dt_pin: int = 5
         sck_pin: int = 6
         sample_rate_hz: float = 20.0
         filter_window: int = 12
+        median_window: int = 5
+        ema_alpha: float = 0.2
+        hysteresis_grams: float = 2.0
+        debounce_ms: int = 100
+        variance_window: int = 10
+        variance_threshold: float = 1.0
+        reconnect_max_backoff: float = 30.0
+        watchdog_timeout: float = 5.0
+        refractory_sec: float = 0.3
     
     class MetaSettings(BaseModel):
         version: int = 1

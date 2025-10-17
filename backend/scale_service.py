@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import statistics
 import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Deque, Dict, Optional
+from typing import Deque, Dict, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - optional dependency
     import lgpio  # type: ignore
@@ -19,7 +21,19 @@ except ImportError:  # pragma: no cover - handled dynamically
 LOG_DIR = Path("/var/log/bascula")
 STATE_PATH = Path(os.getenv("BASCULA_SCALE_STATE", "/var/lib/bascula/scale.json"))
 DEFAULT_CALIBRATION = 1.0
+DEFAULT_CALIBRATION_OFFSET = 0.0
+DEFAULT_CALIBRATION_SCALE = 1.0
 DEFAULT_TARE = 0.0
+DEFAULT_MEDIAN_WINDOW = 5
+DEFAULT_EMA_ALPHA = 0.2
+DEFAULT_HYSTERESIS_GRAMS = 2.0
+DEFAULT_DEBOUNCE_MS = 100
+DEFAULT_VARIANCE_WINDOW = 10
+DEFAULT_VARIANCE_THRESHOLD = 1.0
+DEFAULT_RECONNECT_MAX_BACKOFF = 30.0
+DEFAULT_WATCHDOG_TIMEOUT = 5.0
+DEFAULT_REFRACTORY_SEC = 0.3
+EMA_EPSILON = 1e-6
 
 
 def _setup_logger() -> logging.Logger:
@@ -238,20 +252,45 @@ class HX711Service:
         sck_pin: int,
         *,
         calibration_factor: float = DEFAULT_CALIBRATION,
+        calibration_offset: float = DEFAULT_CALIBRATION_OFFSET,
+        calibration_scale: float = DEFAULT_CALIBRATION_SCALE,
+        calibration_points: Optional[Sequence[Tuple[float, float]]] = None,
         tare_offset: float = DEFAULT_TARE,
         sample_rate_hz: float = 20.0,
         filter_window: int = 10,
+        median_window: int = DEFAULT_MEDIAN_WINDOW,
+        ema_alpha: float = DEFAULT_EMA_ALPHA,
+        hysteresis_grams: float = DEFAULT_HYSTERESIS_GRAMS,
+        debounce_ms: int = DEFAULT_DEBOUNCE_MS,
+        variance_window: int = DEFAULT_VARIANCE_WINDOW,
+        variance_threshold: float = DEFAULT_VARIANCE_THRESHOLD,
+        reconnect_max_backoff: float = DEFAULT_RECONNECT_MAX_BACKOFF,
+        watchdog_timeout: float = DEFAULT_WATCHDOG_TIMEOUT,
+        refractory_sec: float = DEFAULT_REFRACTORY_SEC,
         persist_path: Path = STATE_PATH,
     ) -> None:
         self._dt_pin = int(dt_pin)
         self._sck_pin = int(sck_pin)
         self._sample_rate_hz = float(max(10.0, min(sample_rate_hz, 80.0)))
         self._filter_window = max(1, min(int(filter_window), 200))
+        self._median_window = max(1, min(int(median_window), 251))
+        self._variance_window = max(1, min(int(variance_window), 500))
+        self._ema_alpha = float(ema_alpha)
+        if not (EMA_EPSILON < self._ema_alpha <= 1.0):
+            self._ema_alpha = DEFAULT_EMA_ALPHA
+        self._ema_one_minus_alpha = 1.0 - self._ema_alpha
+        self._hysteresis_grams = max(0.0, float(hysteresis_grams))
+        self._debounce_seconds = max(0.0, float(debounce_ms) / 1000.0)
+        self._refractory_seconds = max(0.0, float(refractory_sec))
+        self._variance_threshold = max(0.0, float(variance_threshold))
+        self._reconnect_max_backoff = max(1.0, float(reconnect_max_backoff))
+        self._watchdog_timeout = max(0.0, float(watchdog_timeout))
         self._persist_path = persist_path
 
         self._driver: Optional[object] = None
         self._driver_name: Optional[str] = None
         self._driver_retry_at: Dict[str, float] = {"lgpio": 0.0, "pigpio": 0.0, "RPi.GPIO": 0.0}
+        self._driver_backoff: Dict[str, float] = {"lgpio": 1.0, "pigpio": 1.0, "RPi.GPIO": 1.0}
         self._driver_errors: Dict[str, str] = {}
         self._last_driver_error: Optional[str] = None
 
@@ -259,19 +298,42 @@ class HX711Service:
         self._stop_event = threading.Event()
         self._lock = threading.RLock()
 
-        self._raw_samples: Deque[float] = deque(maxlen=self._filter_window)
-        self._raw_sum = 0.0
+        self._median_samples: Deque[float] = deque(maxlen=self._median_window)
+        self._var_win: Deque[float] = deque(maxlen=self._variance_window)
+        self._ema_value: Optional[float] = None
         self._last_raw: Optional[float] = None
-        self._last_avg: Optional[float] = None
+        self._last_filtered_raw: Optional[float] = None
+        self._last_avg: Optional[float] = None  # Backwards compatibility alias for filtered raw
         self._last_grams: Optional[float] = None
         self._last_instant_grams: Optional[float] = None
+        self._candidate_grams: Optional[float] = None
         self._last_timestamp: Optional[float] = None
+        self._last_publish_ts: Optional[float] = None
+        self._last_change_ts: Optional[float] = None
+        self._current_variance: Optional[float] = None
+        self._is_stable = False
+        self._last_sample_monotonic: Optional[float] = None
 
         self._status_ok = False
         self._status_reason = "Service not started"
 
+        self._calibration_offset = float(calibration_offset) if calibration_offset is not None else DEFAULT_CALIBRATION_OFFSET
+        self._calibration_scale = float(calibration_scale) if calibration_scale else DEFAULT_CALIBRATION_SCALE
+        if abs(self._calibration_scale) < EMA_EPSILON:
+            self._calibration_scale = DEFAULT_CALIBRATION_SCALE
+        self._calibration_points: List[Tuple[float, float]] = []
+        if calibration_points:
+            self._calibration_points = [(float(raw), float(grams)) for raw, grams in calibration_points]
         self._calibration_factor = float(calibration_factor) if calibration_factor else DEFAULT_CALIBRATION
+        self._calibration_from_config = (
+            bool(calibration_points)
+            or abs(self._calibration_offset) > EMA_EPSILON
+            or abs(self._calibration_scale - DEFAULT_CALIBRATION_SCALE) > EMA_EPSILON
+            or abs(self._calibration_factor - DEFAULT_CALIBRATION) > EMA_EPSILON
+        )
         self._tare_offset = float(tare_offset) if tare_offset else DEFAULT_TARE
+
+        self._sync_calibration_factor()
 
         self._load_persisted_state()
 
@@ -285,21 +347,127 @@ class HX711Service:
         if not self._persist_path.exists():
             return
         try:
-            data = json.loads(self._persist_path.read_text())
-            self._calibration_factor = float(data.get("calibration_factor", self._calibration_factor))
-            self._tare_offset = float(data.get("tare_offset", self._tare_offset))
+            raw_text = self._persist_path.read_text()
+        except Exception as exc:
+            LOGGER.error("Failed to read scale state: %s", exc)
+            return
+
+        try:
+            data = json.loads(raw_text)
         except Exception as exc:
             LOGGER.error("Failed to load scale state: %s", exc)
+            return
+
+        tare_value = data.get("tare_offset")
+        if tare_value is not None:
+            try:
+                self._tare_offset = float(tare_value)
+            except (TypeError, ValueError):
+                LOGGER.warning("Invalid tare_offset in persisted state: %s", tare_value)
+
+        if not self._calibration_from_config:
+            offset_value = data.get("calibration_offset")
+            scale_value = data.get("calibration_scale")
+            factor_value = data.get("calibration_factor")
+            points_value = data.get("calibration_points")
+
+            if offset_value is not None:
+                try:
+                    self._calibration_offset = float(offset_value)
+                except (TypeError, ValueError):
+                    LOGGER.warning("Invalid calibration_offset in persisted state: %s", offset_value)
+            if scale_value is not None:
+                try:
+                    candidate_scale = float(scale_value)
+                    if abs(candidate_scale) >= EMA_EPSILON:
+                        self._calibration_scale = candidate_scale
+                except (TypeError, ValueError):
+                    LOGGER.warning("Invalid calibration_scale in persisted state: %s", scale_value)
+            if factor_value is not None:
+                try:
+                    self._calibration_factor = float(factor_value)
+                except (TypeError, ValueError):
+                    LOGGER.warning("Invalid calibration_factor in persisted state: %s", factor_value)
+            if isinstance(points_value, list):
+                cleaned: List[Tuple[float, float]] = []
+                for point in points_value:
+                    if isinstance(point, dict):
+                        raw = point.get("raw")
+                        grams = point.get("grams")
+                    elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                        raw, grams = point[:2]
+                    else:
+                        continue
+                    try:
+                        cleaned.append((float(raw), float(grams)))
+                    except (TypeError, ValueError):
+                        continue
+                if cleaned:
+                    self._calibration_points = cleaned
+
+        self._sync_calibration_factor()
 
     def _persist_state(self) -> None:
+        points_payload = [
+            {"raw": raw, "grams": grams} for raw, grams in self._calibration_points
+        ]
         payload = {
             "calibration_factor": self._calibration_factor,
+            "calibration_offset": self._calibration_offset,
+            "calibration_scale": self._calibration_scale,
+            "calibration_points": points_payload,
             "tare_offset": self._tare_offset,
         }
         try:
             self._persist_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
         except Exception as exc:
             LOGGER.error("Failed to persist scale state: %s", exc)
+
+    def _sync_calibration_factor(self) -> None:
+        if abs(self._calibration_scale) >= EMA_EPSILON:
+            self._calibration_factor = 1.0 / self._calibration_scale
+        elif abs(self._calibration_factor) >= EMA_EPSILON:
+            self._calibration_scale = 1.0 / self._calibration_factor
+        else:
+            self._calibration_scale = DEFAULT_CALIBRATION_SCALE
+            self._calibration_factor = DEFAULT_CALIBRATION
+
+    def _convert_raw_to_grams(self, raw_value: Optional[float]) -> Optional[float]:
+        if raw_value is None:
+            return None
+        if abs(self._calibration_scale) < EMA_EPSILON:
+            return None
+        adjusted = raw_value - self._calibration_offset
+        net = adjusted - self._tare_offset
+        return net * self._calibration_scale
+
+    def _ensure_var_window_capacity(self) -> None:
+        if self._var_win.maxlen != self._variance_window:
+            self._var_win = deque(self._var_win, maxlen=self._variance_window)
+
+    def _evaluate_stability(self) -> Tuple[bool, Optional[float]]:
+        samples = list(self._var_win)
+        if self._variance_window <= 0 or len(samples) < self._variance_window:
+            return False, None
+        variance = statistics.pvariance(samples)
+        return variance <= self._variance_threshold, variance
+
+    def _reset_after_calibration(self) -> None:
+        self._median_samples.clear()
+        self._var_win = deque(maxlen=self._variance_window)
+        self._ema_value = None
+        self._last_filtered_raw = None
+        self._last_avg = None
+        self._last_grams = None
+        self._last_instant_grams = None
+        self._candidate_grams = None
+        self._last_raw = None
+        self._last_timestamp = None
+        self._last_publish_ts = None
+        self._last_change_ts = None
+        self._current_variance = None
+        self._is_stable = False
+        self._last_sample_monotonic = None
 
     # ------------------------------------------------------------------
     # Lifecycle management
@@ -313,11 +481,13 @@ class HX711Service:
             self._status_ok = False
             self._status_reason = "Initializing"
             LOGGER.info(
-                "HX711 service starting (DT=%s, SCK=%s, rate=%.2f Hz, filter=%d)",
+                "HX711 service starting (DT=%s, SCK=%s, rate=%.2f Hz, median=%d, ema=%.2f, variance_window=%d)",
                 self._dt_pin,
                 self._sck_pin,
                 self._sample_rate_hz,
-                self._filter_window,
+                self._median_window,
+                self._ema_alpha,
+                self._variance_window,
             )
 
     def stop(self) -> None:
@@ -347,7 +517,22 @@ class HX711Service:
         interval = 1.0 / self._sample_rate_hz
         while not self._stop_event.is_set():
             if not self._ensure_driver():
-                time.sleep(2.0)
+                time.sleep(min(interval, 0.5))
+                continue
+            monotonic_now = time.monotonic()
+            if (
+                self._watchdog_timeout > 0.0
+                and self._driver is not None
+                and self._last_sample_monotonic is not None
+                and monotonic_now - self._last_sample_monotonic > self._watchdog_timeout
+            ):
+                LOGGER.warning(
+                    "HX711 watchdog triggered after %.2fs without samples; resetting driver",
+                    monotonic_now - self._last_sample_monotonic,
+                )
+                self._disconnect()
+                self._set_status(False, "watchdog_reset")
+                time.sleep(min(interval, 0.5))
                 continue
             try:
                 raw = self._read_from_driver()
@@ -382,7 +567,7 @@ class HX711Service:
         if self._driver is not None:
             return True
 
-        now = time.time()
+        now = time.monotonic()
         reasons = []
         for kind in ("lgpio", "pigpio", "RPi.GPIO"):
             retry_at = self._driver_retry_at.get(kind, 0.0)
@@ -396,20 +581,26 @@ class HX711Service:
                 message = f"{kind} unavailable: {exc}"
                 LOGGER.error(message)
                 self._driver_errors[kind] = message
-                self._driver_retry_at[kind] = now + 60.0
+                backoff = min(self._driver_backoff.get(kind, 1.0) * 2.0, self._reconnect_max_backoff)
+                self._driver_backoff[kind] = backoff
+                self._driver_retry_at[kind] = now + backoff
                 reasons.append(message)
                 continue
             except Exception as exc:
                 message = f"{kind} init failed: {exc}"
                 LOGGER.error(message)
                 self._driver_errors[kind] = message
-                self._driver_retry_at[kind] = now + 15.0
+                backoff = min(self._driver_backoff.get(kind, 1.0) * 2.0, self._reconnect_max_backoff)
+                self._driver_backoff[kind] = backoff
+                self._driver_retry_at[kind] = now + backoff
                 reasons.append(message)
                 continue
 
             self._driver = driver
             self._driver_name = kind
             self._driver_errors.pop(kind, None)
+            self._driver_backoff[kind] = 1.0
+            self._driver_retry_at[kind] = now
             LOGGER.info("HX711 driver initialized using %s", kind)
             self._last_driver_error = None
             return True
@@ -430,26 +621,70 @@ class HX711Service:
         return float(read_raw())
 
     def _record_sample(self, raw: float) -> None:
+        monotonic_now = time.monotonic()
+        wall_now = time.time()
         with self._lock:
             self._last_raw = raw
-            self._last_timestamp = time.time()
-            if len(self._raw_samples) == self._raw_samples.maxlen:
-                removed = self._raw_samples.popleft()
-                self._raw_sum -= removed
-            self._raw_samples.append(raw)
-            self._raw_sum += raw
-            avg = self._raw_sum / len(self._raw_samples)
-            self._last_avg = avg
+            self._last_timestamp = wall_now
+            self._last_sample_monotonic = monotonic_now
 
-            net = avg - self._tare_offset
-            grams = None
-            if self._calibration_factor:
-                grams = net / self._calibration_factor
-            self._last_grams = grams
-            instant = None
-            if self._calibration_factor:
-                instant = (raw - self._tare_offset) / self._calibration_factor
-            self._last_instant_grams = instant
+            # Filtering pipeline: median smoothing followed by EMA low-pass
+            self._median_samples.append(raw)
+            if len(self._median_samples) <= 1:
+                median_value = raw
+            else:
+                median_value = statistics.median(self._median_samples)
+
+            if self._ema_value is None:
+                ema_value = median_value
+            else:
+                ema_value = (self._ema_alpha * median_value) + (self._ema_one_minus_alpha * self._ema_value)
+            self._ema_value = ema_value
+            self._last_filtered_raw = ema_value
+            self._last_avg = ema_value
+
+            instant_grams = self._convert_raw_to_grams(raw)
+            filtered_grams = self._convert_raw_to_grams(ema_value)
+            self._last_instant_grams = instant_grams
+            self._candidate_grams = filtered_grams
+
+            self._ensure_var_window_capacity()
+            if filtered_grams is None:
+                self._current_variance = None
+                self._is_stable = False
+                self._last_change_ts = None
+                return
+
+            self._var_win.append(filtered_grams)
+            stable, variance_value = self._evaluate_stability()
+            self._current_variance = variance_value
+            self._is_stable = stable
+
+            current = filtered_grams
+
+            if self._last_grams is None:
+                self._last_grams = current
+                self._last_publish_ts = wall_now
+                self._last_change_ts = wall_now
+                return
+
+            delta = abs(current - self._last_grams)
+            if delta < self._hysteresis_grams:
+                self._last_change_ts = None
+                return
+
+            if self._last_change_ts is None:
+                self._last_change_ts = wall_now
+
+            if (wall_now - self._last_change_ts) < self._debounce_seconds:
+                return
+
+            if self._last_publish_ts is not None and (wall_now - self._last_publish_ts) < self._refractory_seconds:
+                return
+
+            self._last_grams = current
+            self._last_publish_ts = wall_now
+            self._last_change_ts = wall_now
 
     def _set_status(self, ok: bool, reason: Optional[str]) -> None:
         with self._lock:
@@ -465,9 +700,19 @@ class HX711Service:
                 "backend": "gpio",
                 "sampling_hz": self._sample_rate_hz,
                 "calibration_factor": self._calibration_factor,
+                "calibration_scale": self._calibration_scale,
+                "calibration_offset": self._calibration_offset,
+                "calibration_points": [{"raw": raw, "grams": grams} for raw, grams in self._calibration_points],
                 "tare_offset": self._tare_offset,
                 "pins": {"dt": self._dt_pin, "sck": self._sck_pin},
                 "driver": self._driver_name,
+                "variance_window": self._variance_window,
+                "variance_threshold": self._variance_threshold,
+                "variance": self._current_variance,
+                "stable": self._is_stable,
+                "hysteresis_grams": self._hysteresis_grams,
+                "debounce_ms": int(self._debounce_seconds * 1000),
+                "refractory_sec": self._refractory_seconds,
             }
             if not self._status_ok:
                 status["reason"] = self._status_reason or "not_ready"
@@ -481,15 +726,24 @@ class HX711Service:
                 return {"ok": False, "reason": self._status_reason or "not_ready"}
             if self._last_raw is None or self._last_timestamp is None:
                 return {"ok": False, "reason": "no_data"}
-            if self._calibration_factor == 0:
-                return {"ok": False, "reason": "calibration_factor_zero"}
+            if abs(self._calibration_scale) < EMA_EPSILON:
+                return {"ok": False, "reason": "calibration_scale_zero"}
             ts_iso = datetime.fromtimestamp(self._last_timestamp, tz=timezone.utc).isoformat()
+            self._ensure_var_window_capacity()
+            stable, variance = self._evaluate_stability()
+            self._current_variance = variance
+            self._is_stable = stable
+            grams_value = self._last_grams if self._last_grams is not None else self._candidate_grams
             return {
                 "ok": True,
-                "grams": self._last_grams,
+                "grams": grams_value,
                 "raw": self._last_raw,
+                "filtered_raw": self._last_filtered_raw,
                 "avg": self._last_avg,
                 "instant": self._last_instant_grams,
+                "candidate": self._candidate_grams,
+                "stable": self._is_stable,
+                "variance": self._current_variance,
                 "ts": ts_iso,
             }
 
@@ -501,51 +755,152 @@ class HX711Service:
         with self._lock:
             if instant:
                 return self._last_instant_grams
-            return self._last_grams
+            if self._last_grams is not None:
+                return self._last_grams
+            return self._candidate_grams
 
     def tare(self) -> dict:
         with self._lock:
-            if self._last_avg is None:
+            if self._last_filtered_raw is None:
                 return {"ok": False, "reason": "no_data"}
-            self._tare_offset = self._last_avg
-            self._raw_samples.clear()
-            self._raw_sum = 0.0
+            self._tare_offset = self._last_filtered_raw - self._calibration_offset
+            self._median_samples.clear()
+            self._var_win = deque(maxlen=self._variance_window)
+            self._ema_value = None
+            self._last_filtered_raw = None
             self._last_avg = None
             self._last_grams = None
             self._last_instant_grams = None
             self._last_raw = None
             self._last_timestamp = None
+            self._last_publish_ts = None
+            self._last_change_ts = None
+            self._candidate_grams = None
+            self._current_variance = None
+            self._is_stable = False
+            self._last_sample_monotonic = None
             self._persist_state()
-            LOGGER.info("Tare set to %.3f", self._tare_offset)
+            LOGGER.info("Tare set (raw offset %.6f)", self._tare_offset)
             return {"ok": True, "tare_offset": self._tare_offset}
 
     def calibrate(self, known_grams: float) -> dict:
         if known_grams <= 0:
             return {"ok": False, "reason": "known_grams_invalid"}
         with self._lock:
-            reference = self._last_avg if self._last_avg is not None else self._last_raw
-            if reference is None:
+            reference_raw = self._last_filtered_raw if self._last_filtered_raw is not None else self._last_raw
+            if reference_raw is None:
                 return {"ok": False, "reason": "no_data"}
-            net = reference - self._tare_offset
-            if abs(net) < 1e-6:
+            adjusted = reference_raw - self._calibration_offset
+            net_raw = adjusted - self._tare_offset
+            if abs(net_raw) < EMA_EPSILON:
                 return {"ok": False, "reason": "net_zero"}
-            self._calibration_factor = net / known_grams
+            scale = known_grams / net_raw
+            if abs(scale) < EMA_EPSILON:
+                return {"ok": False, "reason": "scale_zero"}
+            self._calibration_scale = scale
+            self._sync_calibration_factor()
+            self._calibration_points = [(reference_raw, known_grams)]
+            self._calibration_from_config = False
+            self._reset_after_calibration()
             self._persist_state()
             LOGGER.info(
-                "Calibration updated: known=%.3f g -> factor=%.6f", known_grams, self._calibration_factor
+                "Calibration updated (single-point): known=%.3f g -> scale=%.6f, offset=%.6f",
+                known_grams,
+                self._calibration_scale,
+                self._calibration_offset,
             )
             return {
                 "ok": True,
                 "calibration_factor": self._calibration_factor,
+                "calibration_scale": self._calibration_scale,
+                "calibration_offset": self._calibration_offset,
                 "tare_offset": self._tare_offset,
+                "points": [{"raw": reference_raw, "grams": known_grams}],
             }
+
+    def calibrate_from_points(self, points: Sequence[Tuple[float, float]]) -> dict:
+        cleaned: List[Tuple[float, float]] = []
+        for raw, grams in points:
+            if raw is None or grams is None:
+                continue
+            if not (math.isfinite(raw) and math.isfinite(grams)):
+                continue
+            cleaned.append((float(raw), float(grams)))
+
+        if len(cleaned) < 2:
+            return {"ok": False, "reason": "not_enough_points"}
+
+        sum_x = sum(raw for raw, _ in cleaned)
+        sum_y = sum(grams for _, grams in cleaned)
+        sum_x2 = sum(raw * raw for raw, _ in cleaned)
+        sum_xy = sum(raw * grams for raw, grams in cleaned)
+        n = len(cleaned)
+        denominator = n * sum_x2 - (sum_x * sum_x)
+        if abs(denominator) < EMA_EPSILON:
+            return {"ok": False, "reason": "points_collinear"}
+
+        slope = (n * sum_xy - sum_x * sum_y) / denominator
+        if abs(slope) < EMA_EPSILON:
+            return {"ok": False, "reason": "scale_zero"}
+        intercept = (sum_y - slope * sum_x) / n
+        offset = -intercept / slope
+
+        residuals = [grams - (slope * raw + intercept) for raw, grams in cleaned]
+        mse = sum(residual * residual for residual in residuals) / n
+        rmse = math.sqrt(mse)
+
+        with self._lock:
+            self._calibration_scale = slope
+            self._calibration_offset = offset
+            self._sync_calibration_factor()
+            self._calibration_points = cleaned
+            self._calibration_from_config = False
+            self._reset_after_calibration()
+            self._persist_state()
+            LOGGER.info(
+                "Calibration updated from %d points: scale=%.6f, offset=%.6f, rmse=%.6f",
+                n,
+                self._calibration_scale,
+                self._calibration_offset,
+                rmse,
+            )
+
+            return {
+                "ok": True,
+                "calibration_factor": self._calibration_factor,
+                "calibration_scale": self._calibration_scale,
+                "calibration_offset": self._calibration_offset,
+                "tare_offset": self._tare_offset,
+                "points": [{"raw": raw, "grams": grams} for raw, grams in cleaned],
+                "rmse": rmse,
+            }
+
+    def calibrate_two_point(
+        self,
+        raw1: float,
+        grams1: float,
+        raw2: float,
+        grams2: float,
+        extra_points: Optional[Sequence[Tuple[float, float]]] = None,
+    ) -> dict:
+        base_points: List[Tuple[float, float]] = [(float(raw1), float(grams1)), (float(raw2), float(grams2))]
+        if extra_points:
+            for raw, grams in extra_points:
+                base_points.append((float(raw), float(grams)))
+        return self.calibrate_from_points(base_points)
 
     def read_raw_value(self) -> dict:
         with self._lock:
             if self._last_raw is None or self._last_timestamp is None:
                 return {"ok": False, "reason": "no_data"}
             ts_iso = datetime.fromtimestamp(self._last_timestamp, tz=timezone.utc).isoformat()
-            return {"ok": True, "raw": self._last_raw, "avg": self._last_avg, "ts": ts_iso}
+            return {
+                "ok": True,
+                "raw": self._last_raw,
+                "filtered_raw": self._last_filtered_raw,
+                "avg": self._last_avg,
+                "ts": ts_iso,
+            }
 
     @property
     def sample_rate_hz(self) -> float:

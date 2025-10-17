@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 from copy import deepcopy
-from typing import Optional, Dict, Any, List, Union, Set
+from typing import Optional, Dict, Any, List, Union, Set, Tuple
 import argparse
 import asyncio
 import base64
@@ -50,7 +50,19 @@ from backend.audio_utils import play_audio_file, play_pcm_audio
 from backend.audio import router as audio_router
 from backend.camera import router as camera_router
 from backend.camera_service import list_cameras
-from backend.scale_service import HX711Service
+from backend.scale_service import (
+    DEFAULT_CALIBRATION_OFFSET,
+    DEFAULT_CALIBRATION_SCALE,
+    DEFAULT_DEBOUNCE_MS,
+    DEFAULT_EMA_ALPHA,
+    DEFAULT_HYSTERESIS_GRAMS,
+    DEFAULT_MEDIAN_WINDOW,
+    DEFAULT_RECONNECT_MAX_BACKOFF,
+    DEFAULT_VARIANCE_THRESHOLD,
+    DEFAULT_VARIANCE_WINDOW,
+    DEFAULT_WATCHDOG_TIMEOUT,
+    HX711Service,
+)
 from backend.serial_scale_service import SerialScaleService
 from backend.ocr_service import get_ocr_service
 from backend.routers import food as food_router
@@ -594,17 +606,93 @@ def _create_scale_service() -> ScaleServiceType:
             DEFAULT_FILTER_WINDOW,
             "scale.filter_window",
         )
+        median_window = _coerce_int(
+            scale_cfg.get("median_window", DEFAULT_MEDIAN_WINDOW),
+            DEFAULT_MEDIAN_WINDOW,
+            "scale.median_window",
+        )
+        ema_alpha = _coerce_float(
+            scale_cfg.get("ema_alpha", DEFAULT_EMA_ALPHA),
+            DEFAULT_EMA_ALPHA,
+            "scale.ema_alpha",
+        )
+        hysteresis_grams = _coerce_float(
+            scale_cfg.get("hysteresis_grams", DEFAULT_HYSTERESIS_GRAMS),
+            DEFAULT_HYSTERESIS_GRAMS,
+            "scale.hysteresis_grams",
+        )
+        debounce_ms = _coerce_int(
+            scale_cfg.get("debounce_ms", DEFAULT_DEBOUNCE_MS),
+            DEFAULT_DEBOUNCE_MS,
+            "scale.debounce_ms",
+        )
+        variance_window = _coerce_int(
+            scale_cfg.get("variance_window", DEFAULT_VARIANCE_WINDOW),
+            DEFAULT_VARIANCE_WINDOW,
+            "scale.variance_window",
+        )
+        variance_threshold = _coerce_float(
+            scale_cfg.get("variance_threshold", DEFAULT_VARIANCE_THRESHOLD),
+            DEFAULT_VARIANCE_THRESHOLD,
+            "scale.variance_threshold",
+        )
+        reconnect_max_backoff = _coerce_float(
+            scale_cfg.get("reconnect_max_backoff", DEFAULT_RECONNECT_MAX_BACKOFF),
+            DEFAULT_RECONNECT_MAX_BACKOFF,
+            "scale.reconnect_max_backoff",
+        )
+        watchdog_timeout = _coerce_float(
+            scale_cfg.get("watchdog_timeout", DEFAULT_WATCHDOG_TIMEOUT),
+            DEFAULT_WATCHDOG_TIMEOUT,
+            "scale.watchdog_timeout",
+        )
+        refractory_sec = _coerce_float(
+            scale_cfg.get("refractory_sec", DEFAULT_REFRACTORY_SEC),
+            DEFAULT_REFRACTORY_SEC,
+            "scale.refractory_sec",
+        )
         calibration_factor = _coerce_float(
             scale_cfg.get("calibration_factor", DEFAULT_CALIBRATION_FACTOR),
             DEFAULT_CALIBRATION_FACTOR,
             "scale.calibration_factor",
         )
+        calibration_offset = _coerce_float(
+            scale_cfg.get("calibration_offset", DEFAULT_CALIBRATION_OFFSET),
+            DEFAULT_CALIBRATION_OFFSET,
+            "scale.calibration_offset",
+        )
+        calibration_scale = _coerce_float(
+            scale_cfg.get("calibration_scale", DEFAULT_CALIBRATION_SCALE),
+            DEFAULT_CALIBRATION_SCALE,
+            "scale.calibration_scale",
+        )
+        calibration_points_raw = scale_cfg.get("calibration_points")
+        calibration_points: List[Tuple[float, float]] = []
+        if isinstance(calibration_points_raw, list):
+            for point in calibration_points_raw:
+                if isinstance(point, dict):
+                    raw = point.get("raw")
+                    grams = point.get("grams")
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    raw, grams = point[:2]
+                else:
+                    continue
+                try:
+                    calibration_points.append((float(raw), float(grams)))
+                except (TypeError, ValueError):
+                    LOG_SCALE.warning("Punto de calibración inválido: %s", point)
 
         LOG_SCALE.info(
-            "Inicializando báscula con backend GPIO (dt=%s, sck=%s, sample_rate=%.2f)",
+            "Inicializando báscula GPIO (dt=%s, sck=%s, rate=%.2f Hz, median=%d, ema=%.2f, var_win=%d, hyst=%.2f g, debounce=%d ms, refractory=%.2f s)",
             dt_pin,
             sck_pin,
             sample_rate,
+            median_window,
+            ema_alpha,
+            variance_window,
+            hysteresis_grams,
+            debounce_ms,
+            refractory_sec,
         )
 
         service = HX711Service(
@@ -613,6 +701,18 @@ def _create_scale_service() -> ScaleServiceType:
             sample_rate_hz=sample_rate,
             filter_window=filter_window,
             calibration_factor=calibration_factor,
+            calibration_offset=calibration_offset,
+            calibration_scale=calibration_scale,
+            calibration_points=calibration_points,
+            median_window=median_window,
+            ema_alpha=ema_alpha,
+            hysteresis_grams=hysteresis_grams,
+            debounce_ms=debounce_ms,
+            variance_window=variance_window,
+            variance_threshold=variance_threshold,
+            reconnect_max_backoff=reconnect_max_backoff,
+            watchdog_timeout=watchdog_timeout,
+            refractory_sec=refractory_sec,
         )
         service.start()
         return service
@@ -950,8 +1050,19 @@ VERSION_FILE = Path(os.getenv("BASCULA_VERSION_FILE", Path.home() / ".bascula" /
 
 # ============= MODELS =============
 
+class CalibrationPointPayload(BaseModel):
+    raw: float
+    kg: Optional[float] = None
+    grams: Optional[float] = None
+
+
 class CalibrationRequest(BaseModel):
-    known_grams: float
+    raw1: float
+    kg1: float
+    raw2: float
+    kg2: float
+    unit: Optional[str] = "kg"
+    extra_points: Optional[List[CalibrationPointPayload]] = None
 
 
 class CalibrationApplyRequest(BaseModel):
@@ -1001,8 +1112,20 @@ def _default_config() -> Dict[str, Any]:
             "dt": DEFAULT_DT_PIN,
             "sck": DEFAULT_SCK_PIN,
             "calibration_factor": DEFAULT_CALIBRATION_FACTOR,
+            "calibration_offset": DEFAULT_CALIBRATION_OFFSET,
+            "calibration_scale": DEFAULT_CALIBRATION_SCALE,
+            "calibration_points": [],
             "sample_rate_hz": DEFAULT_SAMPLE_RATE,
             "filter_window": DEFAULT_FILTER_WINDOW,
+            "median_window": DEFAULT_MEDIAN_WINDOW,
+            "ema_alpha": DEFAULT_EMA_ALPHA,
+            "hysteresis_grams": DEFAULT_HYSTERESIS_GRAMS,
+            "debounce_ms": DEFAULT_DEBOUNCE_MS,
+            "variance_window": DEFAULT_VARIANCE_WINDOW,
+            "variance_threshold": DEFAULT_VARIANCE_THRESHOLD,
+            "reconnect_max_backoff": DEFAULT_RECONNECT_MAX_BACKOFF,
+            "watchdog_timeout": DEFAULT_WATCHDOG_TIMEOUT,
+            "refractory_sec": DEFAULT_REFRACTORY_SEC,
         },
         "scale_backend": "uart",
         "serial_device": DEFAULT_SERIAL_DEVICE,
@@ -1380,8 +1503,75 @@ async def set_calibration(data: CalibrationRequest):
     service = scale_service
     if service is None:
         return {"ok": False, "success": False, "reason": "service_not_initialized"}
-    result = service.calibrate(data.known_grams)
-    result["success"] = result.get("ok", False)
+
+    try:
+        raw1 = float(data.raw1)
+        raw2 = float(data.raw2)
+        kg1 = float(data.kg1)
+        kg2 = float(data.kg2)
+    except (TypeError, ValueError):
+        return {"ok": False, "success": False, "reason": "invalid_input"}
+
+    unit = (data.unit or "kg").strip().lower()
+    if unit not in {"kg", "g"}:
+        unit = "kg"
+    factor = 1000.0 if unit == "kg" else 1.0
+
+    grams1 = kg1 * factor
+    grams2 = kg2 * factor
+    if not math.isfinite(grams1) or not math.isfinite(grams2):
+        return {"ok": False, "success": False, "reason": "invalid_weight"}
+
+    extra_points: List[Tuple[float, float]] = []
+    if data.extra_points:
+        for idx, point in enumerate(data.extra_points, start=1):
+            try:
+                raw_extra = float(point.raw)
+            except (TypeError, ValueError):
+                return {"ok": False, "success": False, "reason": f"invalid_extra_raw_{idx}"}
+            weight = point.grams
+            if weight is None and point.kg is not None:
+                weight = point.kg * factor
+            if weight is None:
+                return {"ok": False, "success": False, "reason": f"missing_extra_weight_{idx}"}
+            try:
+                grams_extra = float(weight)
+            except (TypeError, ValueError):
+                return {"ok": False, "success": False, "reason": f"invalid_extra_weight_{idx}"}
+            extra_points.append((raw_extra, grams_extra))
+
+    points: List[Tuple[float, float]] = [(raw1, grams1), (raw2, grams2)]
+    points.extend(extra_points)
+
+    calibrate_method = getattr(service, "calibrate_from_points", None)
+    if not callable(calibrate_method):
+        return {
+            "ok": False,
+            "success": False,
+            "reason": "calibration_points_not_supported",
+        }
+
+    result = calibrate_method(points)
+    success = result.get("ok", False)
+
+    if success:
+        try:
+            config = load_config()
+            scale_section = config.get("scale")
+            if not isinstance(scale_section, dict):
+                scale_section = {}
+            scale_section["calibration_scale"] = result.get("calibration_scale")
+            scale_section["calibration_offset"] = result.get("calibration_offset")
+            scale_section["calibration_factor"] = result.get("calibration_factor")
+            scale_section["calibration_points"] = result.get("points", [])
+            config["scale"] = scale_section
+            save_config(config)
+            result["config_saved"] = True
+        except Exception as exc:
+            LOG_SCALE.error("No se pudo persistir la calibración: %s", exc)
+            result["config_saved"] = False
+            result["config_error"] = str(exc)
+    result["success"] = success
     return result
 
 

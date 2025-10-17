@@ -240,8 +240,19 @@ _last_weight_value: Optional[float] = None
 _last_weight_ts: Optional[datetime] = None
 
 # ---------- Modelos ----------
+class CalibrationPointPayload(BaseModel):
+    raw: float
+    kg: Optional[float] = None
+    grams: Optional[float] = None
+
+
 class CalibrationPayload(BaseModel):
-    known_grams: float
+    raw1: float
+    kg1: float
+    raw2: float
+    kg2: float
+    unit: Optional[str] = "kg"
+    extra_points: Optional[List[CalibrationPointPayload]] = None
 
 
 class CalibrationApplyPayload(BaseModel):
@@ -4022,9 +4033,9 @@ async def api_scale_calibrate(payload: CalibrationPayload):
         result = await _backend_scale_request("POST", "/api/scale/calibrate", json_body=payload_data)
         if result.get("ok"):
             LOG_SCALE.info(
-                "Remote calibration updated: factor=%s tare=%s",
-                result.get("calibration_factor"),
-                result.get("tare_offset"),
+                "Remote calibration updated: scale=%s offset=%s",
+                result.get("calibration_scale"),
+                result.get("calibration_offset"),
             )
         else:
             LOG_SCALE.warning("Remote calibration failed: %s", result.get("reason"))
@@ -4033,15 +4044,71 @@ async def api_scale_calibrate(payload: CalibrationPayload):
     service = _get_scale_service()
     if service is None:
         return {"ok": False, "reason": "service_not_initialized"}
-    result = service.calibrate(payload.known_grams)
+
+    unit = (payload.unit or "kg").strip().lower()
+    if unit not in {"kg", "g"}:
+        unit = "kg"
+    factor = 1000.0 if unit == "kg" else 1.0
+
+    try:
+        raw1 = float(payload.raw1)
+        raw2 = float(payload.raw2)
+        grams1 = float(payload.kg1) * factor
+        grams2 = float(payload.kg2) * factor
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "invalid_input"}
+
+    extra_points: List[Tuple[float, float]] = []
+    if payload.extra_points:
+        for idx, point in enumerate(payload.extra_points, start=1):
+            try:
+                raw_extra = float(point.raw)
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": f"invalid_extra_raw_{idx}"}
+            weight = point.grams
+            if weight is None and point.kg is not None:
+                weight = point.kg * factor
+            if weight is None:
+                return {"ok": False, "reason": f"missing_extra_weight_{idx}"}
+            try:
+                grams_extra = float(weight)
+            except (TypeError, ValueError):
+                return {"ok": False, "reason": f"invalid_extra_weight_{idx}"}
+            extra_points.append((raw_extra, grams_extra))
+
+    points: List[Tuple[float, float]] = [(raw1, grams1), (raw2, grams2)]
+    points.extend(extra_points)
+
+    calibrate_method = getattr(service, "calibrate_from_points", None)
+    if not callable(calibrate_method):
+        return {"ok": False, "reason": "calibration_points_not_supported"}
+
+    result = calibrate_method(points)
     if result.get("ok"):
         LOG_SCALE.info(
-            "Calibration updated via API: factor=%s tare=%s",
-            result.get("calibration_factor"),
-            result.get("tare_offset"),
+            "Calibration updated via API: scale=%s offset=%s",
+            result.get("calibration_scale"),
+            result.get("calibration_offset"),
         )
+        try:
+            config = _load_config()
+            scale_section = config.get("scale")
+            if not isinstance(scale_section, dict):
+                scale_section = {}
+            scale_section["calibration_scale"] = result.get("calibration_scale")
+            scale_section["calibration_offset"] = result.get("calibration_offset")
+            scale_section["calibration_factor"] = result.get("calibration_factor")
+            scale_section["calibration_points"] = result.get("points", [])
+            config["scale"] = scale_section
+            _save_json(CONFIG_PATH, config)
+            result["config_saved"] = True
+        except Exception as exc:
+            LOG_SCALE.error("Failed to persist calibration (miniweb): %s", exc)
+            result["config_saved"] = False
+            result["config_error"] = str(exc)
     else:
         LOG_SCALE.warning("Calibration failed: %s", result.get("reason"))
+    result["success"] = result.get("ok", False)
     return result
 
 
