@@ -1,0 +1,95 @@
+Objetivo general:
+- Dejar la app Bascula estable y funcional: peso estable y lineal, timers correctos, cámara/escáner OK, voz OK, OTA/recovery OK, Nightscout visible y clientes remotos sincronizados en tiempo real.
+
+Contexto:
+- Proyecto en /opt/bascula/current
+- Backend FastAPI (p.ej. backend/)
+- UI web (p.ej. ui/ o bascula-ui/)
+- Servicios: bascula-miniweb, bascula-ui, camera-service (si existe)
+- Pi ARM64 con Picamera2 y (opcional) HiFiBerry
+
+Política de cambios:
+- Haz copia de seguridad por archivo que modifiques (.bak con timestamp).
+- Commits atómicos por bloque de cambios.
+- Añade tests rápidos donde toques lógica.
+- Si un cambio rompe healthchecks, revierte y reporta.
+
+Tareas:
+
+1) Peso estable y lineal
+- Ubicar driver de báscula (ej.: backend/sensors/hx711.py o scale.py).
+- Implementar pipeline:
+  - Filtro mediana ventana 5.
+  - EMA con α=0.2 (configurable).
+  - Histeresis +/- 2 g (configurable).
+  - Debounce 100 ms (configurable).
+  - Publicar valor solo si varianza ventana 10 < umbral.
+- Añadir calibración 2 puntos (offset/scale) y opción multi-punto (regresión).
+- Exponer /api/scale/calibrate {raw1,kg1,raw2,kg2} y persistir en backend/config.json.
+- Añadir reconexión al ADC con backoff (hasta 30 s) y watchdog.
+- Tests: generar serie con ruido/espigas y verificar suavizado y linealidad.
+
+2) UI: Timer único y visibilidad correcta
+- Localizar duplicados del temporizador en la pantalla de peso.
+- Eliminar el duplicado y dejar SOLO el superior.
+- Componente Timer:
+  - Si inactive → NO renderizar (return null).
+  - En modo escáner, al llegar a 0 → ocultar y resetear.
+- Añadir prueba de render: cuando inactive, no existe en DOM.
+
+3) Modo escáner + cámara
+- Backend: crear/asegurar endpoints:
+  - GET /api/camera/health → 200 si ready, 503 si no.
+  - POST /api/camera/start → inicia preview/stream (no bloquear thread).
+  - POST /api/camera/stop
+- Implementar con Picamera2 (si disponible) y manejo de errores.
+- UI: botón "Activar cámara" llama /api/camera/start; manejar estados y errores.
+- Test: script smoke_camera.sh que prueba health/start/stop y devuelve exit 0 si OK.
+
+4) Voz / micrófono para recetas
+- Crear endpoint GET /api/voice/health que verifica dispositivo ALSA por defecto y librerías de TTS.
+- Si no hay default, crear ~/.asoundrc o /etc/asound.conf con tarjeta detectada por arecord -l.
+- Asegurar dependencia de piper/tts instalada y ruta de modelos; descargar si faltan.
+- UI: mostrar estado del mic y mensajes claros si no conectado.
+
+5) OTA y Recovery
+- Implementar /api/ota/check: leer versión local (VERSION o package.json) y comparar con remoto (index.json).
+- Manejar semver correctamente (> , < , =).
+- /api/ota/update: descarga release, verifica hash, despliega a /opt/bascula/releases/<ver>, ejecuta install-all.sh y healthchecks; si falla → rollback.
+- Recovery: permitir subir un .tar.gz manual y repetir proceso.
+- Añadir logs en /var/log/bascula/codex/ota.log y estados detallados.
+
+6) Nightscout (glucosa)
+- Config: NIGHTSCOUT_URL y token.
+- Backend: cliente con retries; endpoint /api/diabetes/current → último valor y timestamp.
+- UI: cuando diabeticMode ON y hay dato <10 min → mostrar tarjeta de glucosa; si no, ocultar.
+- Soportar mg/dL y mmol/L.
+
+7) Sincronización clientes remotos
+- Backend: Socket.IO o WebSocket nativo:
+  - Emitir "weight", "status", "config" ante cambios.
+  - Aceptar cambios de configuración y reemitir a todos.
+- UI clientes: suscribirse y reflejar estado de la Pi (SSR: Pi como fuente única).
+- Verificar que un cliente remoto ve el mismo peso y ajustes.
+
+8) Configuración de servidor
+- Revisar uvicorn/gunicorn timeouts, Nginx proxy_read_timeout (>= 120s), WebSocket pings.
+- Asegurar CORS adecuado para clientes remotos.
+
+9) Scripts y pruebas
+- Crear scripts:
+  - scripts/smoke_camera.sh
+  - scripts/health_all.sh → verifica scale, camera, voice, ui, ota
+- Añadir GitHub Actions local (si aplica) o script de CI en /scripts/ci_local.sh.
+
+10) Despliegue y validación
+- Ejecutar install-all.sh si existe; reiniciar servicios.
+- Comprobar /api/health, /api/camera/health, /api/voice/health, /api/ota/check.
+- Entregar reporte final con:
+  - Cambios aplicados.
+  - Tests pasados.
+  - Cómo calibrar la báscula (dos puntos).
+  - Cómo activar modo diabético y Nightscout.
+  - Cómo usar el escáner y la cámara.
+
+Fin de tareas.

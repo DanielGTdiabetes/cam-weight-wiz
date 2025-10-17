@@ -44,7 +44,7 @@ echo "  Log: ${BASCULA_LOG_FILE}"
 echo "=================================================================="
 
 # --- Frontend/WWW ---
-export WWW_ROOT="${WWW_ROOT:-/opt/bascula/www}"
+export WWW_ROOT="${WWW_ROOT:-/opt/bascula/current/dist}"
 # Si el usuario fija FRONTEND_DIR, lo respetamos; si no, autodetección.
 export FRONTEND_DIR="${FRONTEND_DIR:-}"
 
@@ -1861,6 +1861,224 @@ ensure_www_root() {
   chown -R "${DEFAULT_USER}:${WWW_GROUP}" "${WWW_ROOT}"
 }
 
+install_bascula_ota_script() {
+  log_step "Instalando script OTA bascula-ota"
+  install -d -m 0755 -o root -g root /usr/local/bin
+  local tmp
+  tmp="$(mktemp)"
+  cat <<'EOF' > "${tmp}"
+#!/bin/bash
+set -euo pipefail
+
+if [[ ${EUID} -ne 0 ]]; then
+  exec sudo "$0" "$@"
+fi
+
+OTA_ROOT="/opt/bascula"
+REL_DIR="${OTA_ROOT}/releases"
+CUR_LINK="${OTA_ROOT}/current"
+STATE_DIR="/var/lib/bascula/ota-prev"
+PREV_FILE="${STATE_DIR}/last"
+LOG_TAG="bascula-ota"
+
+mkdir -p "${STATE_DIR}"
+chown pi:pi "${STATE_DIR}" >/dev/null 2>&1 || true
+chmod 755 "${STATE_DIR}"
+
+log() {
+  local msg="$1"
+  local ts
+  ts="$(date --iso-8601=seconds)"
+  printf '%s %s\n' "${ts}" "${msg}"
+  logger -t "${LOG_TAG}" -- "${msg}" || true
+}
+
+die() {
+  log "ERROR: $*"
+  exit 1
+}
+
+current_release() {
+  if [[ -L "${CUR_LINK}" ]]; then
+    readlink -f "${CUR_LINK}"
+  else
+    echo ""
+  fi
+}
+
+validate_release_path() {
+  local path="$1"
+  [[ -d "${path}" ]] || die "Release ${path} no encontrada"
+}
+
+release_label() {
+  local path="$1"
+  basename "${path}"
+}
+
+list_releases() {
+  find "${REL_DIR}" -maxdepth 1 -mindepth 1 -type d -printf '%f\n' | sort
+}
+
+health_check() {
+  local name="$1"
+  local url="$2"
+  local attempts=15
+  local delay=2
+  local i
+
+  for ((i=1; i<=attempts; i++)); do
+    if curl -fsS "${url}" >/dev/null 2>&1; then
+      log "${name} health check passed on attempt ${i}"
+      return 0
+    fi
+    sleep "${delay}"
+  done
+  log "${name} health check failed after ${attempts} attempts"
+  return 1
+}
+
+restart_stack() {
+  systemctl daemon-reload
+
+  log "Restarting bascula-backend"
+  systemctl restart bascula-backend
+  sleep 2
+  health_check "backend" "http://127.0.0.1:8081/health" || return 1
+
+  log "Restarting bascula-miniweb"
+  systemctl restart bascula-miniweb
+  sleep 2
+  if ! health_check "miniweb" "http://127.0.0.1:8080/health"; then
+    health_check "miniweb" "http://127.0.0.1:8080/" || return 1
+  fi
+
+  log "Restarting bascula-ui"
+  systemctl restart bascula-ui || true
+  return 0
+}
+
+record_previous() {
+  local prev="$1"
+  if [[ -n "${prev}" ]]; then
+    printf '%s\n' "${prev}" > "${PREV_FILE}"
+    chown pi:pi "${PREV_FILE}" >/dev/null 2>&1 || true
+  fi
+}
+
+switch_release() {
+  local target="$1"
+  local previous
+
+  previous="$(current_release)"
+  validate_release_path "${target}"
+
+  if [[ "${target}" == "${previous}" ]]; then
+    log "Target $(release_label "${target}") already active"
+    return 0
+  fi
+
+  record_previous "${previous}"
+  log "Switching from $(release_label "${previous}") to $(release_label "${target}")"
+  ln -sfn "${target}" "${CUR_LINK}"
+
+  if restart_stack; then
+    log "Switch successful"
+    return 0
+  fi
+
+  log "Switch failed; initiating rollback"
+  rollback_internal || die "Automatic rollback failed"
+  die "Switch failed; rolled back to $(release_label "$(current_release)")"
+}
+
+rollback_internal() {
+  if [[ ! -f "${PREV_FILE}" ]]; then
+    log "No previous release recorded"
+    return 1
+  fi
+  local target
+  target="$(cat "${PREV_FILE}")"
+  validate_release_path "${target}"
+  log "Rolling back to $(release_label "${target}")"
+  ln -sfn "${target}" "${CUR_LINK}"
+  restart_stack || die "Rollback restart sequence failed"
+  log "Rollback completed"
+  return 0
+}
+
+cmd_status() {
+  local current
+  current="$(current_release)"
+  if [[ -z "${current}" ]]; then
+    echo "current symlink missing"
+  else
+    echo "current -> ${current}"
+  fi
+  if [[ -f "${PREV_FILE}" ]]; then
+    echo "previous -> $(cat "${PREV_FILE}")"
+  else
+    echo "previous -> (none)"
+  fi
+}
+
+cmd_list() {
+  list_releases
+}
+
+cmd_switch() {
+  local version="$1"
+  local target
+  if [[ -d "${version}" ]]; then
+    target="$(readlink -f "${version}")"
+  else
+    target="${REL_DIR}/${version}"
+  fi
+  validate_release_path "${target}"
+  switch_release "${target}"
+}
+
+cmd_rollback() {
+  rollback_internal || die "Rollback not possible"
+}
+
+usage() {
+  cat <<USAGE
+Usage: bascula-ota <command> [args]
+Commands:
+  status                Show current and previous releases
+  list                  List available releases
+  switch <release>      Activate release (name or absolute path)
+  rollback              Return to the previously active release
+USAGE
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "${cmd}" in
+    status) cmd_status "$@" ;;
+    list) cmd_list "$@" ;;
+    switch)
+      [[ $# -eq 1 ]] || die "switch requires a release name"
+      cmd_switch "$1"
+      ;;
+    rollback) cmd_rollback "$@" ;;
+    *)
+      usage
+      [[ -z "${cmd}" ]] && exit 0 || exit 1
+      ;;
+  esac
+}
+
+main "$@"
+EOF
+  install -m 0755 -o root -g root "${tmp}" /usr/local/bin/bascula-ota
+  rm -f "${tmp}"
+
+  install -d -m 0755 -o root -g root /var/lib/bascula
+  install -d -m 0755 -o pi -g pi /var/lib/bascula/ota-prev
+}
+
 ensure_log_dir() {
   install -d -m 0755 -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" /var/log/bascula
 }
@@ -2326,6 +2544,8 @@ main() {
   systemd-tmpfiles --create "${TMPFILES_DEST}/bascula.conf"
   ensure_log_dir
   ensure_capture_dirs
+
+  install_bascula_ota_script
 
   log_step "Instalando unidades systemd"
   install_systemd_units

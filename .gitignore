@@ -1,29 +1,29 @@
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
-
-node_modules
-dist
-!backend/dist/
-!backend/dist/**
-dist-ssr
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+# Python
+__pycache__/
+*.pyc
+.venv/
 .env
-/opt/bascula/voices/
-voices/
+.env.*
+
+# Node/Frontend
+node_modules/
+dist/
+build/
+*.map
+
+# Logs & backups & runtime
+*.log
+logs/
+*.bak*
+*.bak.*
+*.old
+.coverage
+coverage/
+.DS_Store
+
+# Deploy/OTA locales (no versionar)
+releases/
+opt/
+var/
+run/
+tmp/

@@ -169,9 +169,14 @@ class GlucoseMonitor:
                 return new_status
 
             diabetes = settings.diabetes
-            ns_url = (diabetes.nightscout_url or "").strip()
-            ns_token = (diabetes.nightscout_token or "").strip()
-            enabled = bool(diabetes.enabled and ns_url)
+            ns_url = (getattr(diabetes, 'nightscout_url', '') or '').strip()
+            ns_token = (getattr(diabetes, 'nightscout_token', '') or '').strip()
+            raw_enabled = getattr(diabetes, 'enabled', None)
+            if raw_enabled is None:
+                raw_enabled = getattr(diabetes, 'diabetes_enabled', None)
+            if raw_enabled is None:
+                raw_enabled = getattr(diabetes, 'nightscout_enabled', None)
+            enabled = bool((raw_enabled if raw_enabled is not None else False) and ns_url)
             if not enabled:
                 new_status = GlucoseStatus(
                     enabled=False,
