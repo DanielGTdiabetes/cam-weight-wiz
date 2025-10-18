@@ -1,3 +1,5 @@
+import { storage } from "@/services/storage";
+
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const configuredHosts = (() => {
@@ -25,6 +27,15 @@ const configuredHosts = (() => {
 export const isLocalClient = (): boolean => {
   if (typeof window === "undefined") {
     return true;
+  }
+
+  try {
+    const settings = storage.getSettings();
+    if (settings.ui?.flags?.remoteMirror) {
+      return true;
+    }
+  } catch {
+    // Ignore storage access issues and fall back to host-based detection
   }
 
   const hostname = window.location.hostname || "";

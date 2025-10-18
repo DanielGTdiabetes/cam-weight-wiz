@@ -46,6 +46,11 @@ export const FEATURE_FLAG_DEFINITIONS: Array<{
     description: 'Permite lanzar la aplicación de actualizaciones OTA.',
   },
   {
+    key: 'remoteMirror',
+    title: 'Acceso remoto completo',
+    description: 'Ofrece la misma interfaz de la báscula en clientes remotos (modo espejo).',
+  },
+  {
     key: 'debugLogs',
     title: 'Logs de depuración',
     description: 'Muestra logs adicionales en consola para diagnósticos.',
@@ -68,6 +73,7 @@ const cloneFlags = (flags: FeatureFlags): FeatureFlags => ({
   otaApply: flags.otaApply,
   debugLogs: flags.debugLogs,
   mascotMotion: flags.mascotMotion,
+  remoteMirror: flags.remoteMirror,
 });
 
 export const getFeatureFlags = (): FeatureFlags => {

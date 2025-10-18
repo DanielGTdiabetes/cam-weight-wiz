@@ -29,7 +29,8 @@ export type FeatureFlagKey =
   | 'otaCheck'
   | 'otaApply'
   | 'debugLogs'
-  | 'mascotMotion';
+  | 'mascotMotion'
+  | 'remoteMirror';
 
 export type FeatureFlags = Record<FeatureFlagKey, boolean>;
 
@@ -309,6 +310,7 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   otaApply: true,
   debugLogs: false,
   mascotMotion: true,
+  remoteMirror: true,
 };
 
 const DEFAULT_SCALE_DECIMALS: 0 | 1 = 1;
