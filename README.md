@@ -35,6 +35,19 @@ Software para la báscula digital basada en Raspberry Pi 5. Incluye:
 
    El script es idempotente: se puede volver a ejecutar sin romper instalaciones previas.
 
+### País Wi-Fi (WIFI_COUNTRY)
+
+A partir de esta versión, el instalador configura automáticamente el **país Wi-Fi** para evitar problemas de red y cumplimiento normativo.
+
+- Valor por defecto: `ES` (España)
+- Puedes sobrescribirlo al lanzar el instalador:
+
+  ```bash
+  sudo WIFI_COUNTRY=MX ./scripts/install-all.sh
+  ```
+
+Consulta la guía completa en [docs/INSTALL.md](docs/INSTALL.md).
+
 ### Logging del instalador
 
 - `scripts/install-all.sh` vuelca siempre el log a consola y a un fichero en `BASCULA_LOG_DIR` (por defecto `/var/log/bascula`).
