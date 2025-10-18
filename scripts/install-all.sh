@@ -2019,6 +2019,35 @@ ensure_capture_dirs() {
   chmod g+s /run/bascula/captures
 }
 
+
+ensure_x735_support() {
+  local os_dir="${RELEASE_DIR}/system/os"
+  local script_src="${os_dir}/x735-ensure.sh"
+  local unit_src="${os_dir}/x735-ensure.service"
+  local target_script="/usr/local/sbin/x735-ensure.sh"
+  local target_unit="${SYSTEMD_DEST}/x735-ensure.service"
+
+  if [[ ! -f "${script_src}" || ! -f "${unit_src}" ]]; then
+    log "Soporte X735 no encontrado en release; omitiendo despliegue"
+    return 0
+  fi
+
+  log_step "Instalando soporte X735 (fan/power)"
+  install -D -m 0755 "${script_src}" "${target_script}"
+  install -D -m 0644 "${unit_src}" "${target_unit}"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    if ! systemctl enable x735-ensure.service; then
+      log_warn "No se pudo habilitar x735-ensure.service (continuando)"
+    fi
+  fi
+
+  if ! "${target_script}" --oneshot; then
+    log_warn "x735-ensure.sh --oneshot devolvió un error (continuando)"
+  fi
+}
+
 ensure_www_root() {
   if [[ ! -d "${WWW_ROOT}" ]]; then
     mkdir -p "${WWW_ROOT}"
@@ -2723,6 +2752,7 @@ main() {
   systemd-tmpfiles --create "${TMPFILES_DEST}/bascula.conf"
   ensure_log_dir
   ensure_capture_dirs
+  ensure_x735_support
 
   install_bascula_ota_script
 
