@@ -1969,6 +1969,11 @@ pcm.bascula_out {
     slave.pcm "bascula_out_dmix"
 }
 
+pcm.!default {
+    type plug
+    slave.pcm "bascula_out"
+}
+
 pcm.bascula_out_dmix {
     type dmix
     ipc_key 8675309
@@ -1981,6 +1986,11 @@ pcm.bascula_out_dmix {
 }
 
 ctl.bascula_out {
+    type hw
+    card "${playback_card}"
+}
+
+ctl.!default {
     type hw
     card "${playback_card}"
 }
