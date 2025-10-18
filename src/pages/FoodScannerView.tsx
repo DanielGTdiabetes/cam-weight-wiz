@@ -191,14 +191,26 @@ export const FoodScannerView = () => {
   useEffect(() => () => stopCamera(), [stopCamera]);
 
   const captureRemotePhoto = useCallback(
-    async (options?: { silent?: boolean }): Promise<{ blob: Blob; previewUrl: string } | null> => {
+    async (options?: { silent?: boolean; timeoutMs?: number }): Promise<{ blob: Blob; previewUrl: string } | null> => {
       const silent = options?.silent ?? false;
+      const timeoutMs = options?.timeoutMs ?? 8000;
+
       if (!silent) {
         setIsRemoteCapturing(true);
       }
 
+      const runWithTimeout = async (input: RequestInfo | URL, init: RequestInit = {}) => {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          return await fetch(input, { ...init, signal: controller.signal });
+        } finally {
+          window.clearTimeout(timer);
+        }
+      };
+
       try {
-        const response = await fetch("/api/camera/capture-to-file", { method: "POST" });
+        const response = await runWithTimeout("/api/camera/capture-to-file", { method: "POST" });
         if (!response.ok) {
           throw new Error(`capture_failed_${response.status}`);
         }
@@ -217,7 +229,7 @@ export const FoodScannerView = () => {
             ? trimmedPath
             : `${origin}${trimmedPath.startsWith("/") ? "" : "/"}${trimmedPath}`;
         const bustUrl = `${absoluteUrl}${absoluteUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-        const imageResponse = await fetch(bustUrl, { cache: "no-store" });
+        const imageResponse = await runWithTimeout(bustUrl, { cache: "no-store" });
         if (!imageResponse.ok) {
           throw new Error(`image_fetch_failed_${imageResponse.status}`);
         }
@@ -225,7 +237,8 @@ export const FoodScannerView = () => {
         setPreviewUrl(bustUrl);
         return { blob, previewUrl: bustUrl };
       } catch (error) {
-        logger.error("Remote camera capture failed", { error });
+        const isAbortError = error instanceof DOMException && error.name === "AbortError";
+        logger.error("Remote camera capture failed", { error, aborted: isAbortError });
         return null;
       } finally {
         if (!silent) {
@@ -240,82 +253,91 @@ export const FoodScannerView = () => {
     setCameraError(null);
     setIsCameraStarting(true);
 
-    try {
-      let localStreamStarted = false;
-      let localErrorMessage: string | null = null;
+    let localStreamStarted = false;
+    let localErrorMessage: string | null = null;
 
-      if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-        localErrorMessage =
-          "Este dispositivo no permite acceso directo a la cámara. Se utilizará la cámara integrada al analizar.";
-      } else {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: "environment" },
-            audio: false,
-          });
-          streamRef.current = stream;
-          if (videoRef.current) {
-            const video = videoRef.current;
-            video.srcObject = stream;
-            video.muted = true;
-            video.setAttribute("muted", "true");
-            try {
-              await video.play();
-            } catch (playError) {
-              logger.error("Failed to play camera stream", { error: playError });
-              stream.getTracks().forEach((track) => track.stop());
-              if (streamRef.current === stream) {
-                streamRef.current = null;
-              }
-              video.srcObject = null;
-              throw playError;
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      localErrorMessage =
+        "Este dispositivo no permite acceso directo a la cámara. Se utilizará la cámara integrada al analizar.";
+    } else {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+          audio: false,
+        });
+        streamRef.current = stream;
+        if (videoRef.current) {
+          const video = videoRef.current;
+          video.srcObject = stream;
+          video.muted = true;
+          video.setAttribute("muted", "true");
+          try {
+            await video.play();
+          } catch (playError) {
+            logger.error("Failed to play camera stream", { error: playError });
+            stream.getTracks().forEach((track) => track.stop());
+            if (streamRef.current === stream) {
+              streamRef.current = null;
             }
+            video.srcObject = null;
+            throw playError;
           }
-          setIsCameraActive(true);
-          remoteCaptureCacheRef.current = null;
-          localStreamStarted = true;
-        } catch (error) {
-          if (streamRef.current) {
-            streamRef.current.getTracks().forEach((track) => track.stop());
-            streamRef.current = null;
-          }
-          if (videoRef.current) {
-            videoRef.current.srcObject = null;
-          }
-          setIsCameraActive(false);
-          logger.error("Failed to start camera", { error });
-          localErrorMessage =
-            "No se pudo iniciar la cámara del navegador. Revisa permisos o continúa usando la cámara integrada al analizar.";
         }
+        setIsCameraActive(true);
+        remoteCaptureCacheRef.current = null;
+        localStreamStarted = true;
+      } catch (error) {
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((track) => track.stop());
+          streamRef.current = null;
+        }
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+        setIsCameraActive(false);
+        logger.error("Failed to start camera", { error });
+        localErrorMessage =
+          "No se pudo iniciar la cámara del navegador. Revisa permisos o continúa usando la cámara integrada al analizar.";
       }
+    }
 
-      if (!localStreamStarted) {
-        if (localErrorMessage) {
-          setCameraError(localErrorMessage);
-        }
-        const remoteCapture = await captureRemotePhoto({ silent: true });
-        if (remoteCapture) {
-          remoteCaptureCacheRef.current = remoteCapture;
-          setCameraError(null);
-          toast({
-            title: "Usando la cámara de la báscula",
-            description: "No pudimos acceder a la cámara del navegador, pero recuperamos una captura remota.",
-          });
-        } else if (!localErrorMessage) {
-          setCameraError("No se pudo obtener una captura desde la cámara integrada de la báscula.");
-          toast({
-            title: "Sin cámara disponible",
-            description: "No se pudo abrir la cámara local ni obtener una captura remota.",
-            variant: "destructive",
-          });
-        } else {
-          setCameraError(
-            `${localErrorMessage} Además, no se pudo obtener una captura desde la cámara integrada de la báscula.`,
-          );
-        }
-      }
-    } finally {
-      setIsCameraStarting(false);
+    setIsCameraStarting(false);
+
+    if (localStreamStarted) {
+      return;
+    }
+
+    if (localErrorMessage) {
+      setCameraError(localErrorMessage);
+    }
+
+    toast({
+      title: "Usando la cámara de la báscula",
+      description: "No pudimos acceder a la cámara del navegador, intentando captura remota…",
+    });
+
+    const remoteCapture = await captureRemotePhoto({ silent: false, timeoutMs: 7000 });
+    if (remoteCapture) {
+      remoteCaptureCacheRef.current = remoteCapture;
+      setCameraError(null);
+      toast({
+        title: "Captura remota lista",
+        description: "La imagen se obtuvo desde la cámara de la báscula.",
+      });
+    } else {
+      const description = localErrorMessage
+        ? "No se pudo acceder a la cámara del navegador ni obtener una captura desde la báscula."
+        : "No se pudo obtener una captura desde la cámara integrada de la báscula.";
+      setCameraError(
+        localErrorMessage
+          ? `${localErrorMessage} Además, no se pudo obtener una captura desde la cámara integrada de la báscula.`
+          : "No se pudo obtener una captura desde la cámara integrada de la báscula.",
+      );
+      toast({
+        title: "Sin cámara disponible",
+        description,
+        variant: "destructive",
+      });
     }
   }, [captureRemotePhoto, toast]);
 
