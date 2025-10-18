@@ -16,8 +16,12 @@ const LOOPBACK_WS_REGEX = /^(wss?:\/\/)?(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$
 type ConnectionState = "connected" | "reconnecting" | "no-data";
 
 type WeightResponse = {
-  value: number | string | null;
+  value?: number | string | null;
+  weight?: number | string | null;
+  grams?: number | string | null;
   ts?: string | null;
+  stable?: boolean | null;
+  unit?: "g" | "ml" | string | null;
 };
 
 export interface UseScaleWebSocketReturn {
@@ -189,26 +193,47 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
         const data: WeightResponse = await response.json();
 
-        const rawValue = data?.value;
-        let gramsValue = 0;
+        const candidateSources: Array<number | string | null | undefined> = [
+          data?.value,
+          data?.weight,
+          data?.grams,
+        ];
 
-        if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
-          gramsValue = rawValue;
-        } else if (typeof rawValue === "string") {
-          const parsed = Number(rawValue);
-          if (Number.isNaN(parsed)) {
-            handleHttpOutcome(false);
-            return;
+        let gramsValue: number | null = null;
+        for (const raw of candidateSources) {
+          if (typeof raw === "number" && Number.isFinite(raw)) {
+            gramsValue = raw;
+            break;
           }
-          gramsValue = parsed;
-        } else if (rawValue !== null) {
+          if (typeof raw === "string") {
+            const parsed = Number(raw);
+            if (!Number.isNaN(parsed)) {
+              gramsValue = parsed;
+              break;
+            }
+          }
+          if (raw === null) {
+            gramsValue = null;
+            break;
+          }
+        }
+
+        if (gramsValue === null) {
           handleHttpOutcome(false);
           return;
         }
 
         setWeight(gramsValue);
-        setUnit("g");
-        setIsStable(false);
+        if (data?.unit === "ml" || data?.unit === "g") {
+          setUnit(data.unit);
+        } else {
+          setUnit("g");
+        }
+        if (typeof data?.stable === "boolean") {
+          setIsStable(data.stable);
+        } else {
+          setIsStable(false);
+        }
 
         handleHttpOutcome(true);
       } catch (err) {
@@ -481,22 +506,46 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
           try {
             const message = event as MessageEvent<string>;
-            const payload = JSON.parse(message.data) as { value: number | string | null; ts?: string | null };
-            const rawValue = payload?.value;
-            let nextWeight = 0;
-
-            if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
-              nextWeight = rawValue;
-            } else if (typeof rawValue === "string") {
-              const parsed = Number(rawValue);
-              if (!Number.isNaN(parsed)) {
-                nextWeight = parsed;
+            const payload = JSON.parse(message.data) as WeightResponse;
+            const candidates: Array<number | string | null | undefined> = [
+              payload?.value,
+              payload?.weight,
+              payload?.grams,
+            ];
+            let nextWeight: number | null = null;
+            for (const raw of candidates) {
+              if (typeof raw === "number" && Number.isFinite(raw)) {
+                nextWeight = raw;
+                break;
+              }
+              if (typeof raw === "string") {
+                const parsed = Number(raw);
+                if (!Number.isNaN(parsed)) {
+                  nextWeight = parsed;
+                  break;
+                }
+              }
+              if (raw === null) {
+                nextWeight = null;
+                break;
               }
             }
 
+            if (nextWeight === null) {
+              return;
+            }
+
             setWeight(nextWeight);
-            setIsStable(false);
-            setUnit("g");
+            if (typeof payload?.stable === "boolean") {
+              setIsStable(payload.stable);
+            } else {
+              setIsStable(false);
+            }
+            if (payload?.unit === "ml" || payload?.unit === "g") {
+              setUnit(payload.unit);
+            } else {
+              setUnit("g");
+            }
             realtimeConnectedRef.current = true;
             updateConnectivity();
           } catch (err) {
