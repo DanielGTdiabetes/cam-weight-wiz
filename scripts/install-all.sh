@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # Instalador principal para Báscula Digital Pro en Raspberry Pi OS Bookworm Lite
 # Requisitos clave:
@@ -16,6 +16,45 @@
 # --- Logging & tracing (SIEMPRE en pantalla y a fichero) ---
 # Modo estricto
 set -Euo pipefail
+
+# --- Wi-Fi country setup -------------------------------------------------------
+setup_wifi_country() {
+  local WIFI_CONF="/etc/wpa_supplicant/wpa_supplicant.conf"
+  local COUNTRY="${WIFI_COUNTRY:-ES}"
+
+  echo "[install] Verificando configuración de país Wi-Fi..."
+
+  if [[ ! -f "${WIFI_CONF}" ]]; then
+    echo "[install][warn] ${WIFI_CONF} no existe; creando fichero base"
+    if ! sudo install -m 600 -o root -g root /dev/null "${WIFI_CONF}"; then
+      echo "[install][warn] No se pudo crear ${WIFI_CONF}" >&2
+      return 0
+    fi
+  fi
+
+  if ! grep -qE '^country=[A-Z]{2}$' "${WIFI_CONF}" 2>/dev/null; then
+    echo "[install][warn] País Wi-Fi no definido; estableciendo a ${COUNTRY}"
+    if ! sudo sed -i "1{/^country=/d;}; 1i country=${COUNTRY}" "${WIFI_CONF}"; then
+      echo "[install][warn] No se pudo actualizar ${WIFI_CONF} con country=${COUNTRY}" >&2
+    fi
+    if ! sudo rfkill unblock wifi; then
+      echo "[install][warn] rfkill unblock wifi falló" >&2
+    fi
+    if ! sudo iw reg set "${COUNTRY}"; then
+      echo "[install][warn] iw reg set ${COUNTRY} falló" >&2
+    fi
+    if ! sudo raspi-config nonint do_wifi_country "${COUNTRY}"; then
+      echo "[install][warn] raspi-config no pudo establecer el país Wi-Fi" >&2
+    fi
+  else
+    echo "[install] País Wi-Fi ya configurado:"
+    grep -E '^country=' "${WIFI_CONF}" || true
+  fi
+
+  return 0
+}
+# ------------------------------------------------------------------------------
+
 IFS=$'\n\t'
 
 # Ficheros/dirs de log
@@ -2645,6 +2684,7 @@ main() {
   log_step "Configurando overlays de arranque"
   ensure_boot_overlays || true
   ensure_serial_console_disabled || true
+  setup_wifi_country || true
   purgar_fbdev_driver || true
   disable_fbdev_xorg_configs || true
   ensure_kms_device_config || true
