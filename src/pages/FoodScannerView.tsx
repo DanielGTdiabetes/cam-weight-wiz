@@ -26,6 +26,7 @@ export const FoodScannerView = () => {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
+  const [isCameraStarting, setIsCameraStarting] = useState(false);
   const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState(false);
   const [prefilledBarcode, setPrefilledBarcode] = useState<string | undefined>(undefined);
   const [isRemoteCapturing, setIsRemoteCapturing] = useState(false);
@@ -36,6 +37,7 @@ export const FoodScannerView = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasHydratedHistoryRef = useRef(false);
   const preservedScannerEntriesRef = useRef<ScannerHistoryEntry[]>([]);
+  const remoteCaptureCacheRef = useRef<{ blob: Blob; previewUrl: string } | null>(null);
 
   const { toast } = useToast();
   const decimals = useScaleDecimals();
@@ -183,54 +185,139 @@ export const FoodScannerView = () => {
       video.srcObject = null;
     }
     setIsCameraActive(false);
+    remoteCaptureCacheRef.current = null;
   }, []);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
-  const startCamera = useCallback(async () => {
-    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
-      setCameraError("Este dispositivo no permite acceso directo a la cámara. Se utilizará la cámara integrada al analizar.");
-      return;
-    }
+  const captureRemotePhoto = useCallback(
+    async (options?: { silent?: boolean }): Promise<{ blob: Blob; previewUrl: string } | null> => {
+      const silent = options?.silent ?? false;
+      if (!silent) {
+        setIsRemoteCapturing(true);
+      }
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false,
-      });
-      streamRef.current = stream;
-      if (videoRef.current) {
-        const video = videoRef.current;
-        video.srcObject = stream;
-        video.muted = true;
-        try {
-          await video.play();
-        } catch (playError) {
-          logger.error("Failed to play camera stream", { error: playError });
-          stream.getTracks().forEach((track) => track.stop());
-          if (streamRef.current === stream) {
-            streamRef.current = null;
-          }
-          video.srcObject = null;
-          setIsCameraActive(false);
-          throw playError;
+      try {
+        const response = await fetch("/api/camera/capture-to-file", { method: "POST" });
+        if (!response.ok) {
+          throw new Error(`capture_failed_${response.status}`);
+        }
+        const payload = (await response.json()) as { path?: string | null };
+        const capturePath = payload?.path;
+        if (typeof capturePath !== "string" || capturePath.trim().length === 0) {
+          throw new Error("capture_missing_path");
+        }
+        const trimmedPath = capturePath.trim();
+        const origin =
+          typeof window !== "undefined" && window.location?.origin
+            ? window.location.origin
+            : "";
+        const absoluteUrl =
+          trimmedPath.startsWith("http://") || trimmedPath.startsWith("https://")
+            ? trimmedPath
+            : `${origin}${trimmedPath.startsWith("/") ? "" : "/"}${trimmedPath}`;
+        const bustUrl = `${absoluteUrl}${absoluteUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+        const imageResponse = await fetch(bustUrl, { cache: "no-store" });
+        if (!imageResponse.ok) {
+          throw new Error(`image_fetch_failed_${imageResponse.status}`);
+        }
+        const blob = await imageResponse.blob();
+        setPreviewUrl(bustUrl);
+        return { blob, previewUrl: bustUrl };
+      } catch (error) {
+        logger.error("Remote camera capture failed", { error });
+        return null;
+      } finally {
+        if (!silent) {
+          setIsRemoteCapturing(false);
         }
       }
-      setCameraError(null);
-      setIsCameraActive(true);
-    } catch (error) {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
+    },
+    [],
+  );
+
+  const startCamera = useCallback(async () => {
+    setCameraError(null);
+    setIsCameraStarting(true);
+
+    try {
+      let localStreamStarted = false;
+      let localErrorMessage: string | null = null;
+
+      if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+        localErrorMessage =
+          "Este dispositivo no permite acceso directo a la cámara. Se utilizará la cámara integrada al analizar.";
+      } else {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+            audio: false,
+          });
+          streamRef.current = stream;
+          if (videoRef.current) {
+            const video = videoRef.current;
+            video.srcObject = stream;
+            video.muted = true;
+            video.setAttribute("muted", "true");
+            try {
+              await video.play();
+            } catch (playError) {
+              logger.error("Failed to play camera stream", { error: playError });
+              stream.getTracks().forEach((track) => track.stop());
+              if (streamRef.current === stream) {
+                streamRef.current = null;
+              }
+              video.srcObject = null;
+              throw playError;
+            }
+          }
+          setIsCameraActive(true);
+          remoteCaptureCacheRef.current = null;
+          localStreamStarted = true;
+        } catch (error) {
+          if (streamRef.current) {
+            streamRef.current.getTracks().forEach((track) => track.stop());
+            streamRef.current = null;
+          }
+          if (videoRef.current) {
+            videoRef.current.srcObject = null;
+          }
+          setIsCameraActive(false);
+          logger.error("Failed to start camera", { error });
+          localErrorMessage =
+            "No se pudo iniciar la cámara del navegador. Revisa permisos o continúa usando la cámara integrada al analizar.";
+        }
       }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
+
+      if (!localStreamStarted) {
+        if (localErrorMessage) {
+          setCameraError(localErrorMessage);
+        }
+        const remoteCapture = await captureRemotePhoto({ silent: true });
+        if (remoteCapture) {
+          remoteCaptureCacheRef.current = remoteCapture;
+          setCameraError(null);
+          toast({
+            title: "Usando la cámara de la báscula",
+            description: "No pudimos acceder a la cámara del navegador, pero recuperamos una captura remota.",
+          });
+        } else if (!localErrorMessage) {
+          setCameraError("No se pudo obtener una captura desde la cámara integrada de la báscula.");
+          toast({
+            title: "Sin cámara disponible",
+            description: "No se pudo abrir la cámara local ni obtener una captura remota.",
+            variant: "destructive",
+          });
+        } else {
+          setCameraError(
+            `${localErrorMessage} Además, no se pudo obtener una captura desde la cámara integrada de la báscula.`,
+          );
+        }
       }
-      setIsCameraActive(false);
-      logger.error("Failed to start camera", { error });
-      setCameraError("No se pudo iniciar la cámara del navegador. Revisa permisos o continúa usando la cámara integrada al analizar.");
+    } finally {
+      setIsCameraStarting(false);
     }
-  }, []);
+  }, [captureRemotePhoto, toast]);
 
   const capturePhoto = useCallback(async (): Promise<Blob | null> => {
     if (!videoRef.current) {
@@ -262,43 +349,6 @@ export const FoodScannerView = () => {
     return await new Promise<Blob | null>((resolve) => {
       canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.92);
     });
-  }, []);
-
-  const captureRemotePhoto = useCallback(async (): Promise<{ blob: Blob; previewUrl: string } | null> => {
-    try {
-      setIsRemoteCapturing(true);
-      const response = await fetch("/api/camera/capture-to-file", { method: "POST" });
-      if (!response.ok) {
-        throw new Error(`capture_failed_${response.status}`);
-      }
-      const payload = (await response.json()) as { path?: string | null };
-      const capturePath = payload?.path;
-      if (typeof capturePath !== "string" || capturePath.trim().length === 0) {
-        throw new Error("capture_missing_path");
-      }
-      const trimmedPath = capturePath.trim();
-      const origin =
-        typeof window !== "undefined" && window.location?.origin
-          ? window.location.origin
-          : "";
-      const absoluteUrl =
-        trimmedPath.startsWith("http://") || trimmedPath.startsWith("https://")
-          ? trimmedPath
-          : `${origin}${trimmedPath.startsWith("/") ? "" : "/"}${trimmedPath}`;
-      const bustUrl = `${absoluteUrl}${absoluteUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-      const imageResponse = await fetch(bustUrl, { cache: "no-store" });
-      if (!imageResponse.ok) {
-        throw new Error(`image_fetch_failed_${imageResponse.status}`);
-      }
-      const blob = await imageResponse.blob();
-      setPreviewUrl(bustUrl);
-      return { blob, previewUrl: bustUrl };
-    } catch (error) {
-      logger.error("Remote camera capture failed", { error });
-      return null;
-    } finally {
-      setIsRemoteCapturing(false);
-    }
   }, []);
 
   useEffect(() => {
@@ -369,6 +419,11 @@ export const FoodScannerView = () => {
       blob = await capturePhoto();
     }
 
+    if (!blob && remoteCaptureCacheRef.current) {
+      blob = remoteCaptureCacheRef.current.blob;
+      remoteCaptureCacheRef.current = null;
+    }
+
     if (!blob && uploadedFile) {
       blob = uploadedFile;
     }
@@ -377,6 +432,7 @@ export const FoodScannerView = () => {
       const remoteCapture = await captureRemotePhoto();
       if (remoteCapture) {
         blob = remoteCapture.blob;
+        remoteCaptureCacheRef.current = remoteCapture;
       }
     }
 
@@ -486,9 +542,17 @@ export const FoodScannerView = () => {
                   onClick={startCamera}
                   variant="secondary"
                   size="sm"
-                  disabled={isCameraActive}
+                  disabled={isCameraActive || isCameraStarting}
                 >
-                  <Camera className="mr-2 h-4 w-4" /> Activar cámara
+                  {isCameraStarting ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Activando…
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="mr-2 h-4 w-4" /> Activar cámara
+                    </>
+                  )}
                 </Button>
                 <Button
                   onClick={stopCamera}
@@ -511,7 +575,7 @@ export const FoodScannerView = () => {
                   !isCameraActive && "opacity-30"
                 )}
               />
-              {!isCameraActive && (
+              {!isCameraActive && !previewUrl && (
                 <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
                   <Camera className="mb-2 h-8 w-8" />
                   <p>Activa la cámara o sube una imagen desde archivos.</p>
