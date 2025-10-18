@@ -198,6 +198,7 @@ export const FoodScannerView = () => {
         video: { facingMode: "environment" },
         audio: false,
       });
+      streamRef.current = stream;
       if (videoRef.current) {
         const video = videoRef.current;
         video.srcObject = stream;
@@ -206,13 +207,26 @@ export const FoodScannerView = () => {
           await video.play();
         } catch (playError) {
           logger.error("Failed to play camera stream", { error: playError });
+          stream.getTracks().forEach((track) => track.stop());
+          if (streamRef.current === stream) {
+            streamRef.current = null;
+          }
+          video.srcObject = null;
+          setIsCameraActive(false);
           throw playError;
         }
       }
-      streamRef.current = stream;
       setCameraError(null);
       setIsCameraActive(true);
     } catch (error) {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      setIsCameraActive(false);
       logger.error("Failed to start camera", { error });
       setCameraError("No se pudo iniciar la cámara del navegador. Revisa permisos o continúa usando la cámara integrada al analizar.");
     }
