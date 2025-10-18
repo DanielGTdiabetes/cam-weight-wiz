@@ -177,6 +177,11 @@ export const FoodScannerView = () => {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
+    if (videoRef.current) {
+      const video = videoRef.current;
+      video.pause();
+      video.srcObject = null;
+    }
     setIsCameraActive(false);
   }, []);
 
@@ -194,7 +199,15 @@ export const FoodScannerView = () => {
         audio: false,
       });
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+        const video = videoRef.current;
+        video.srcObject = stream;
+        video.muted = true;
+        try {
+          await video.play();
+        } catch (playError) {
+          logger.error("Failed to play camera stream", { error: playError });
+          throw playError;
+        }
       }
       streamRef.current = stream;
       setCameraError(null);
