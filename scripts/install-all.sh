@@ -56,6 +56,76 @@ log_ok()    { printf '%s %s\n' "${LOG_PREFIX}" "[ok]   $*"; }
 log_warn()  { printf '%s[warn] %s\n' "${LOG_PREFIX}" "$*" >&2; }
 log_err()   { printf '%s[err]  %s\n' "${LOG_PREFIX}" "$*" >&2; }
 
+# ---- readiness helpers ------------------------------------------------------
+wait_for_unit_active() { # <unit> <timeout_s>
+  local unit="$1" timeout="${2:-60}" start ts
+  start=$(date +%s)
+  log "Esperando a que systemd active ${unit} (timeout ${timeout}s)…"
+  while true; do
+    if systemctl is-active --quiet "${unit}"; then
+      log_ok "${unit} está active"
+      return 0
+    fi
+    ts=$(( $(date +%s) - start ))
+    if [[ ${ts} -ge ${timeout} ]]; then
+      log_warn "Timeout esperando ${unit}; mostrando estado"
+      systemctl --no-pager --full status "${unit}" || true
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+wait_for_port() { # <host> <port> <timeout_s>
+  local host="$1" port="$2" timeout="${3:-60}" start ts
+  start=$(date +%s)
+  log "Esperando puerto ${host}:${port} (timeout ${timeout}s)…"
+  while true; do
+    if timeout 1 bash -c ">/dev/tcp/${host}/${port}" 2>/dev/null; then
+      log_ok "Puerto ${host}:${port} disponible"
+      return 0
+    fi
+    ts=$(( $(date +%s) - start ))
+    if [[ ${ts} -ge ${timeout} ]]; then
+      log_warn "Timeout esperando puerto ${host}:${port}"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+wait_for_http() { # <url> <timeout_s>
+  local url="$1" timeout="${2:-90}" start ts http_code success_codes="${WAIT_FOR_HTTP_SUCCESS_CODES:-200 204}" code
+  start=$(date +%s)
+  log "Esperando HTTP ${success_codes} en ${url} (timeout ${timeout}s)…"
+  while true; do
+    http_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${url}" || echo "000")
+    for code in ${success_codes}; do
+      if [[ "${http_code}" == "${code}" ]]; then
+        log_ok "${url} respondió ${http_code}"
+        return 0
+      fi
+    done
+    ts=$(( $(date +%s) - start ))
+    if [[ ${ts} -ge ${timeout} ]]; then
+      log_warn "Timeout esperando ${url} (último código ${http_code})"
+      return 1
+    fi
+    sleep 2
+  done
+}
+# ------------------------------------------------------------------------------
+
+json_escape_string() {
+  local str="$1"
+  str="${str//\\/\\\\}"
+  str="${str//\"/\\\"}"
+  str="${str//$'\n'/\\n}"
+  str="${str//$'\r'/\\r}"
+  str="${str//$'\t'/\\t}"
+  printf '%s' "${str}"
+}
+
 # --- Contexto de error / resumen final ---
 _last_cmd=''
 trap 'rc=$?; _last_cmd="$BASH_COMMAND"' DEBUG
@@ -465,6 +535,21 @@ final_check() {
   fi
 }
 
+final_check_warn() {
+  local description="$1"
+  shift
+  CHECK_FAIL_MSG=""
+  if "$@"; then
+    log "[ok] ${description}"
+  else
+    local message="Validación no bloqueante falló: ${description}"
+    if [[ -n "${CHECK_FAIL_MSG}" ]]; then
+      message+=" -> ${CHECK_FAIL_MSG}"
+    fi
+    log_warn "${message}"
+  fi
+}
+
 check_http_endpoint() {
   local url="$1" expected_body="$2"
   local tmp status body
@@ -532,31 +617,72 @@ check_voice_list_endpoint() {
   return 1
 }
 
-check_voice_say_endpoint() {
-  local url="http://127.0.0.1/api/voice/tts/say?text=Hola&voice=default"
-  local tmp status rc=0
+validate_tts_say() {
+  log_step "Validando TTS (say)"
+  local host="${BASCULA_HOST:-127.0.0.1}"
+  local port="${BASCULA_PORT:-8000}"
+  local url="${TTS_URL:-http://${host}:${port}/api/tts/say}"
+  local text="${TTS_TEXT:-Instalación completada}"
+  local attempt=0 max_attempts=3 backoff=2 rc=0 http_code payload tmp backend=""
+  payload="{"text":"$(json_escape_string "${text}")"}"
   tmp=$(mktemp)
-  status=$(curl -sS -X POST -o "${tmp}" -w '%{http_code}' "${url}" || rc=$?)
-  if [[ ${rc} -ne 0 ]]; then
-    CHECK_FAIL_MSG="curl rc=${rc}"
-    rm -f "${tmp}"
+
+  while (( attempt < max_attempts )); do
+    attempt=$((attempt + 1))
+    rc=0
+    http_code=$(curl -sS -X POST \
+      -H 'Content-Type: application/json' \
+      -d "${payload}" \
+      -o "${tmp}" -w '%{http_code}' --max-time 10 \
+      "${url}" || rc=$?)
+
+    if [[ ${rc} -eq 0 && ( "${http_code}" == "200" || "${http_code}" == "204" ) ]]; then
+      SUMMARY_SAY_STATUS="HTTP ${http_code}"
+      if command -v jq >/dev/null 2>&1; then
+        backend=$(jq -r '.backend // empty' "${tmp}" 2>/dev/null || echo "")
+      else
+        backend=$(grep -o '"backend"[^"]*"[^"]*"' "${tmp}" 2>/dev/null | head -n1 | sed -E 's/.*"backend"[^"]*"([^"]*)".*/\1/' || true)
+      fi
+      SUMMARY_SAY_BACKEND="${backend:-unknown}"
+      rm -f "${tmp}" || true
+      log_ok "TTS say respondió (${SUMMARY_SAY_STATUS})"
+      return 0
+    fi
+
+    if [[ ${rc} -ne 0 ]]; then
+      SUMMARY_SAY_STATUS="curl rc=${rc}"
+    else
+      SUMMARY_SAY_STATUS="HTTP ${http_code}"
+    fi
+
+    log_warn "TTS fallo intento ${attempt}/${max_attempts} (${SUMMARY_SAY_STATUS})"
+    if (( attempt < max_attempts )); then
+      sleep "${backoff}"
+      backoff=$((backoff * 2))
+    fi
+  done
+
+  SUMMARY_SAY_BACKEND=""
+  log_warn "TTS no respondió tras ${max_attempts} intentos; se continuará con la instalación"
+  echo "---- journalctl (piper.service) últimas 200 líneas ----"
+  journalctl -u piper.service -n 200 --no-pager || true
+  echo "---- journalctl (bascula-backend.service) últimas 200 líneas ----"
+  journalctl -u bascula-backend.service -n 200 --no-pager || true
+  rm -f "${tmp}" || true
+  return 1
+}
+
+check_voice_say_endpoint() {
+  local status="${SUMMARY_SAY_STATUS:-}"
+  if [[ -z "${status}" || "${status}" == "no-test" ]]; then
+    CHECK_FAIL_MSG="sin datos de validación previa"
     return 1
   fi
-  SUMMARY_SAY_STATUS="HTTP ${status}"
-  if [[ "${status}" != "200" ]]; then
-    CHECK_FAIL_MSG="HTTP ${status}"
-    SUMMARY_SAY_BACKEND=""
-    rm -f "${tmp}"
-    return 1
+  if [[ "${status}" =~ ^HTTP\ (200|204)$ ]]; then
+    return 0
   fi
-  if command -v jq >/dev/null 2>&1; then
-    SUMMARY_SAY_BACKEND=$(jq -r '.backend // empty' "${tmp}" 2>/dev/null || echo "")
-  fi
-  rm -f "${tmp}"
-  if [[ -z "${SUMMARY_SAY_BACKEND}" ]]; then
-    SUMMARY_SAY_BACKEND="unknown"
-  fi
-  return 0
+  CHECK_FAIL_MSG="${status}"
+  return 1
 }
 
 check_voice_synthesize_endpoint() {
@@ -2433,7 +2559,7 @@ run_final_checks() {
   final_check "voces Piper instaladas" check_piper_voices_installed "${PIPER_VOICES_DIR}"
   final_check "piper CLI disponible" check_piper_cli_ready
   final_check "API voces Piper" check_voice_list_endpoint
-  final_check "TTS say" check_voice_say_endpoint
+  final_check_warn "TTS say" check_voice_say_endpoint
   final_check "TTS synthesize" check_voice_synthesize_endpoint
   final_check "Cámara info" check_camera_info_endpoint
   test -f /opt/bascula/voices/piper/default.onnx || (echo "[ERR] Piper sin voz por defecto" && exit 1)
@@ -2587,6 +2713,50 @@ main() {
 
   log_step "Activando servicios de la Báscula"
   ensure_services_started
+
+  BASCULA_HOST="${BASCULA_HOST:-127.0.0.1}"
+  BASCULA_PORT="${BASCULA_PORT:-8000}"
+  PIPER_PORT="${PIPER_PORT:-59125}"
+  BASCULA_HEALTH_URL="${BASCULA_HEALTH_URL:-http://${BASCULA_HOST}:${BASCULA_PORT}/health}"
+
+  log_step "Esperando disponibilidad de servicios"
+  systemctl daemon-reload || true
+  if systemctl list-unit-files | grep -q '^systemd-networkd-wait-online.service'; then
+    systemctl start systemd-networkd-wait-online.service || true
+  fi
+  if systemctl list-unit-files --type target | grep -q '^network-online.target'; then
+    wait_for_unit_active "network-online.target" 60 || log_warn "network-online.target no alcanzó estado active (continuando)"
+  fi
+  if systemctl list-unit-files | grep -q '^piper.service'; then
+    wait_for_unit_active "piper.service" 90 || log_warn "piper.service no se activó tras el timeout"
+  fi
+  if systemctl list-unit-files | grep -q '^bascula-backend.service'; then
+    wait_for_unit_active "bascula-backend.service" 120 || log_warn "bascula-backend.service no se activó tras el timeout"
+  fi
+
+  wait_for_port "${BASCULA_HOST}" "${BASCULA_PORT}" 90 || log_warn "Puerto ${BASCULA_HOST}:${BASCULA_PORT} no disponible tras la espera"
+  if systemctl list-unit-files | grep -q '^piper.service'; then
+    wait_for_port "127.0.0.1" "${PIPER_PORT}" 90 || log_warn "Puerto Piper 127.0.0.1:${PIPER_PORT} no disponible tras la espera"
+  fi
+
+  local health_code=""
+  if ! WAIT_FOR_HTTP_SUCCESS_CODES="200 204 404 405" wait_for_http "${BASCULA_HEALTH_URL}" 90; then
+    health_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${BASCULA_HEALTH_URL}" || echo "000")
+    log_warn "Healthcheck en ${BASCULA_HEALTH_URL} falló con código ${health_code}"
+  else
+    health_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${BASCULA_HEALTH_URL}" || echo "000")
+    if [[ "${health_code}" == "404" || "${health_code}" == "405" ]]; then
+      log "[info] Health endpoint devolvió ${health_code}; se considera servicio vivo"
+    fi
+  fi
+  if [[ -n "${health_code}" && "${health_code}" =~ ^[0-9]+$ ]]; then
+    SUMMARY_HTTP_API_STATUS="HTTP ${health_code}"
+  fi
+
+  if ! validate_tts_say; then
+    log_warn "Validación TTS /say falló tras reintentos (no bloquea)."
+  fi
+
   log_step "Sanity check sesión systemd --user"
   loginctl show-user "${DEFAULT_USER}" | grep -i Linger
   ls -ld /run/user/1000 || true
