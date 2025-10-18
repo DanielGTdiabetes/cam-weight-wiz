@@ -659,8 +659,8 @@ check_voice_list_endpoint() {
 validate_tts_say() {
   log_step "Validando TTS (say)"
   local host="${BASCULA_HOST:-127.0.0.1}"
-  local port="${BASCULA_PORT:-8000}"
-  local url="${TTS_URL:-http://${host}:${port}/api/tts/say}"
+  local tts_port="${TTS_PORT:-8080}"
+  local url="${TTS_URL:-http://${host}:${tts_port}/api/voice/tts/say}"
   local text="${TTS_TEXT:-Instalación completada}"
   local attempt=0 max_attempts=3 backoff=2 rc=0 http_code payload tmp backend=""
   payload="{"text":"$(json_escape_string "${text}")"}"
@@ -2795,7 +2795,7 @@ main() {
   ensure_services_started
 
   BASCULA_HOST="${BASCULA_HOST:-127.0.0.1}"
-  BASCULA_PORT="${BASCULA_PORT:-8000}"
+  BASCULA_PORT="${BASCULA_PORT:-8081}"
   PIPER_PORT="${PIPER_PORT:-59125}"
   BASCULA_HEALTH_URL="${BASCULA_HEALTH_URL:-http://${BASCULA_HOST}:${BASCULA_PORT}/health}"
 
@@ -2815,6 +2815,10 @@ main() {
   fi
 
   wait_for_port "${BASCULA_HOST}" "${BASCULA_PORT}" 90 || log_warn "Puerto ${BASCULA_HOST}:${BASCULA_PORT} no disponible tras la espera"
+  local tts_wait_port="${TTS_PORT:-8080}"
+  if [[ "${tts_wait_port}" != "${BASCULA_PORT}" || "${BASCULA_HOST}" != "127.0.0.1" ]]; then
+    wait_for_port "127.0.0.1" "${tts_wait_port}" 90 || log_warn "Puerto miniweb 127.0.0.1:${tts_wait_port} no disponible tras la espera"
+  fi
   if systemctl list-unit-files | grep -q '^piper.service'; then
     wait_for_port "127.0.0.1" "${PIPER_PORT}" 90 || log_warn "Puerto Piper 127.0.0.1:${PIPER_PORT} no disponible tras la espera"
   fi
