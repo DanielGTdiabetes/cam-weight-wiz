@@ -2282,6 +2282,19 @@ EOF
   local dropin_file="${dropin_dir}/30-chrome-cache.conf"
   install -d -m0755 "${dropin_dir}"
 
+  if [[ ! -f "${SYSTEMD_DEST}/bascula-ui.service" ]]; then
+    log_warn "bascula-ui.service ausente en ${SYSTEMD_DEST}; reinstalando"
+    install_systemd_unit "bascula-ui.service"
+    if [[ ! -f "${SYSTEMD_DEST}/bascula-ui.service" ]]; then
+      abort "No se pudo instalar bascula-ui.service en ${SYSTEMD_DEST}"
+    fi
+  fi
+
+  if [[ ${SYSTEMD_NEEDS_RELOAD:-0} -eq 1 ]]; then
+    systemctl daemon-reload
+    SYSTEMD_NEEDS_RELOAD=0
+  fi
+
   local tmp="${dropin_file}.tmp"
   cat >"${tmp}" <<'EOF'
 [Service]
