@@ -108,10 +108,8 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
 
     setIsConnected(realtimeConnected || hasRecentHttp);
 
-    if (realtimeConnected) {
+    if (realtimeConnected || hasRecentHttp) {
       setConnectionState("connected");
-    } else if (hasRecentHttp) {
-      setConnectionState("reconnecting");
     } else {
       setConnectionState("no-data");
     }
