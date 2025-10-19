@@ -24,6 +24,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/hooks/use-toast';
 import { useScaleWebSocket } from '@/hooks/useScaleWebSocket';
 import { storage } from '@/services/storage';
+import { normalizeToIsoTimestamp } from '@/lib/timestamps';
 import { api } from '@/services/api';
 import { logger } from '@/services/logger';
 import { useForm } from 'react-hook-form';
@@ -667,7 +668,7 @@ export function BarcodeScannerModal({
 
       try {
         if (action.type === 'exportBolus') {
-          const timestamp = typeof action.timestamp === 'string' ? action.timestamp : action.timestamp.toISOString();
+          const timestamp = normalizeToIsoTimestamp(action.timestamp);
           await api.exportBolus(action.carbs, action.insulin ?? 0, timestamp);
         }
       } catch (error) {

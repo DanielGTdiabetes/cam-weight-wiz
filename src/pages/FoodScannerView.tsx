@@ -15,6 +15,7 @@ import { api } from "@/services/api";
 import { ApiError } from "@/services/apiWrapper";
 import { buildFoodItem, toFoodItem, type FoodScannerConfirmedPayload, type FoodItem } from "@/features/food-scanner/foodItem";
 import { formatWeight } from "@/lib/format";
+import { normalizeToIsoTimestamp } from "@/lib/timestamps";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
 import { useCameraPreview } from "@/hooks/useCameraPreview";
 
@@ -800,7 +801,7 @@ export const FoodScannerView = () => {
 
       try {
         if (action.type === "exportBolus") {
-          const timestamp = typeof action.timestamp === 'string' ? action.timestamp : action.timestamp.toISOString();
+          const timestamp = normalizeToIsoTimestamp(action.timestamp);
           await api.exportBolus(action.carbs, action.insulin ?? 0, timestamp);
         }
         logger.info("Scanner queue action processed", { action });
