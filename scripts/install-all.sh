@@ -2167,30 +2167,114 @@ ensure_capture_dirs() {
 
 
 ensure_x735_support() {
-  local os_dir="${RELEASE_DIR}/system/os"
-  local script_src="${os_dir}/x735-ensure.sh"
-  local unit_src="${os_dir}/x735-ensure.service"
-  local target_script="/usr/local/sbin/x735-ensure.sh"
-  local target_unit="${SYSTEMD_DEST}/x735-ensure.service"
+  log_step "Configurando soporte X735 (fan/power)"
 
-  if [[ ! -f "${script_src}" || ! -f "${unit_src}" ]]; then
-    log "Soporte X735 no encontrado en release; omitiendo despliegue"
-    return 0
+  local conf="/boot/firmware/config.txt"
+  local backup
+  if [[ -f "${conf}" ]]; then
+    backup="${conf}.bak.$(date +%Y%m%d-%H%M)"
+    cp -n "${conf}" "${backup}" 2>/dev/null && log "Backup de config.txt en ${backup}" || true
+    if ! grep -qE '^\s*dtoverlay=pwm1(,|$)' "${conf}"; then
+      printf '%s\n' 'dtoverlay=pwm1,pin=13' >>"${conf}"
+      log "dtoverlay=pwm1,pin=13 añadido a ${conf}"
+    else
+      log "dtoverlay=pwm1 ya presente en ${conf}"
+    fi
+  else
+    log_warn "${conf} no encontrado; no se puede configurar dtoverlay pwm1"
   fi
 
-  log_step "Instalando soporte X735 (fan/power)"
-  install -D -m 0755 "${script_src}" "${target_script}"
-  install -D -m 0644 "${unit_src}" "${target_unit}"
+  install -d -m 0755 /opt
+  if [[ ! -d /opt/x735-script/.git ]]; then
+    if git clone https://github.com/geekworm-com/x735-script /opt/x735-script; then
+      log "Repositorio x735-script clonado"
+    else
+      log_warn "No se pudo clonar x735-script (continuando)"
+    fi
+  else
+    if git -C /opt/x735-script pull --ff-only; then
+      log "Repositorio x735-script actualizado"
+    else
+      log_warn "git pull sobre x735-script falló (continuando)"
+    fi
+  fi
+  chmod +x /opt/x735-script/*.sh 2>/dev/null || true
+
+  local fan_script="/opt/x735-script/x735-fan.sh"
+  if [[ -f "${fan_script}" ]]; then
+    if ! grep -q 'PWMCHIP=' "${fan_script}"; then
+      if sed -i '1i PWMCHIP="$(ls -d /sys/class/pwm/pwmchip* 2>/dev/null | head -n1)"; [ -z "$PWMCHIP" ] && PWMCHIP=/sys/class/pwm/pwmchip0' "${fan_script}" && \
+         sed -i 's#/sys/class/pwm/pwmchip[0-9]\+#$PWMCHIP#g' "${fan_script}"; then
+        log "x735-fan.sh parcheado para detectar pwmchip dinámicamente"
+      else
+        log_warn "No se pudo parchear x735-fan.sh"
+      fi
+    else
+      log "x735-fan.sh ya soporta detección dinámica de pwmchip"
+    fi
+  else
+    log_warn "x735-fan.sh no encontrado"
+  fi
+
+  local fan_installer="/opt/x735-script/install-fan-service.sh"
+  local pwr_installer="/opt/x735-script/install-pwr-service.sh"
+  if [[ -x "${fan_installer}" ]]; then
+    "${fan_installer}" || log_warn "install-fan-service.sh devolvió error"
+  else
+    log_warn "install-fan-service.sh no disponible"
+  fi
+  if [[ -x "${pwr_installer}" ]]; then
+    "${pwr_installer}" || log_warn "install-pwr-service.sh devolvió error"
+  else
+    log_warn "install-pwr-service.sh no disponible"
+  fi
+
+  install -d -m 0755 /etc/systemd/system/x735-fan.service.d
+  cat <<'EOF' >/etc/systemd/system/x735-fan.service.d/override.conf
+[Unit]
+After=local-fs.target sysinit.target
+ConditionPathExistsGlob=/sys/class/pwm/pwmchip*
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 20); do for c in /sys/class/pwm/pwmchip*; do [ -d "$c" ] && exit 0; done; sleep 1; done; exit 0'
+Restart=on-failure
+RestartSec=5
+EOF
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
-    if ! systemctl enable x735-ensure.service; then
-      log_warn "No se pudo habilitar x735-ensure.service (continuando)"
-    fi
+    systemctl enable --now x735-fan.service || log_warn "No se pudo habilitar/iniciar x735-fan.service"
+    systemctl enable --now x735-pwr.service || log_warn "No se pudo habilitar/iniciar x735-pwr.service"
+  else
+    log_warn "systemctl no disponible; no se pueden gestionar servicios X735"
   fi
 
-  if ! "${target_script}" --oneshot; then
-    log_warn "x735-ensure.sh --oneshot devolvió un error (continuando)"
+  if [[ -x /usr/local/bin/xPWR.sh ]]; then
+    log "xPWR.sh presente en /usr/local/bin"
+  else
+    log_warn "/usr/local/bin/xPWR.sh no encontrado"
+  fi
+
+  local pwm_paths
+  if pwm_paths=$(ls -d /sys/class/pwm/pwmchip* 2>/dev/null); then
+    echo "[x735][ok] PWM detectado: ${pwm_paths//$'\n'/ }"
+  else
+    echo "[x735][warn] PWM no aparece aún; requiere reboot tras dtoverlay"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet x735-fan.service; then
+      echo "[x735][ok] x735-fan activo"
+    else
+      echo "[x735][warn] x735-fan no activo"
+    fi
+    if systemctl is-active --quiet x735-pwr.service; then
+      echo "[x735][ok] x735-pwr activo"
+    else
+      echo "[x735][warn] x735-pwr no activo"
+    fi
+  else
+    echo "[x735][warn] systemctl no disponible para comprobar estado de servicios"
   fi
 }
 
