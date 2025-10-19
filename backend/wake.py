@@ -22,6 +22,8 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from backend.config import WAKE_ENABLED
+
 USE_SOUNDDEVICE_ENV = os.getenv("BASCULA_ENABLE_SOUNDDEVICE", "0").strip().lower()
 USE_SOUNDDEVICE = USE_SOUNDDEVICE_ENV in {"1", "true", "yes", "on"}
 sd = None  # type: ignore
@@ -997,15 +999,46 @@ _wake_lock = threading.Lock()
 
 
 def _env_enabled() -> bool:
-    value = os.getenv("BASCULA_WAKEWORD", "1").strip().lower()
-    return value not in {"0", "false", "no", "off"}
+    truthy = {"1", "true", "yes", "on"}
+    falsy = {"0", "false", "no", "off"}
+
+    disable_flag = os.getenv("DISABLE_WAKE", "").strip().lower()
+    if disable_flag in truthy:
+        return False
+
+    for env_name in ("BASCULA_WAKE_ENABLED", "BASCULA_VOSK_ENABLED", "BASCULA_LISTEN_ENABLED"):
+        value = os.getenv(env_name)
+        if value and value.strip().lower() in truthy:
+            return True
+
+    raw_wakeword = os.getenv("BASCULA_WAKEWORD")
+    if raw_wakeword is None:
+        return bool(WAKE_ENABLED)
+
+    normalized = raw_wakeword.strip().lower()
+    if not normalized:
+        return bool(WAKE_ENABLED)
+    if normalized in falsy:
+        return False
+    if normalized in truthy:
+        return True
+
+    return bool(WAKE_ENABLED)
 
 
-def init_wake_if_enabled(app: FastAPI) -> None:
+def wake_requested_by_env() -> bool:
+    return _env_enabled()
+
+
+def init_wake_if_enabled(app: FastAPI, *, force_enable: Optional[bool] = None) -> None:
     global _wake_listener
+    desired_enabled = _env_enabled() if force_enable is None else bool(force_enable)
+    if not desired_enabled:
+        LOG_WAKE.info("[wake] WakeListener no inicializado (wake desactivado)")
+        return
     with _wake_lock:
         if _wake_listener is None:
-            listener = WakeListener(initial_enabled=_env_enabled())
+            listener = WakeListener(initial_enabled=desired_enabled)
             listener.start()
             _wake_listener = listener
             LOG_WAKE.info("[wake] WakeListener inicializado (enabled=%s)", listener.enabled)

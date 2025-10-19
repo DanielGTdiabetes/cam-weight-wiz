@@ -70,7 +70,11 @@ from backend.routers import food as food_router
 from backend.routes.diabetes import router as diabetes_router, glucose_monitor
 from backend.app.services.settings_service import get_settings_service
 from backend.voice import list_voices as list_piper_voices, router as voice_router
-from backend.wake import router as wake_router, init_wake_if_enabled
+from backend.wake import (
+    init_wake_if_enabled,
+    router as wake_router,
+    wake_requested_by_env,
+)
 
 CAPTURES_DIR = Path(os.getenv("BASCULA_CAPTURES_DIR", "/run/bascula/captures"))
 
@@ -556,6 +560,7 @@ def _resolve_serial_device(preferred: str) -> tuple[str, List[str]]:
 
 LOG_SCALE = logging.getLogger("bascula.scale")
 LOG_VOICE = logging.getLogger("bascula.voice")
+LOG_WAKE = logging.getLogger("bascula.wake")
 
 # Global state
 ScaleServiceType = Union[HX711Service, SerialScaleService]
@@ -1360,7 +1365,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-init_wake_if_enabled(app)
+_truthy = {"1", "true", "yes", "on"}
+disable_wake = os.getenv("DISABLE_WAKE", "").strip().lower() in _truthy
+enable_wake = False if disable_wake else wake_requested_by_env()
+
+if enable_wake:
+    LOG_WAKE.info("[wake] Activado por variables de entorno")
+    init_wake_if_enabled(app, force_enable=True)
+else:
+    LOG_WAKE.info("[wake] Desactivado por configuración (por defecto)")
 
 app.include_router(voice_router)
 app.include_router(wake_router)

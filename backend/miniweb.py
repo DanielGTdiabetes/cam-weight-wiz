@@ -74,7 +74,11 @@ _LOGGED_SERIAL_WARNING = False
 from backend.voice import router as voice_router
 from backend.routes.voice import router as voice_ptt_router
 from backend.camera import router as camera_router
-from backend.wake import router as wake_router, init_wake_if_enabled
+from backend.wake import (
+    init_wake_if_enabled,
+    router as wake_router,
+    wake_requested_by_env,
+)
 from backend.routers.food import router as food_router
 from backend.models.settings import AppSettings, load_settings, dump_settings
 from backend.services.voice_service import voice_service
@@ -111,6 +115,7 @@ LOG_NETWORK = logging.getLogger("bascula.network")
 LOG_OTA = logging.getLogger("bascula.ota")
 LOG_MINIWEB = logging.getLogger("bascula.miniweb")
 LOG_APP = logging.getLogger("bascula.app")
+LOG_WAKE = logging.getLogger("bascula.wake")
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -3823,7 +3828,15 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-init_wake_if_enabled(app)
+_truthy = {"1", "true", "yes", "on"}
+disable_wake = os.getenv("DISABLE_WAKE", "").strip().lower() in _truthy
+enable_wake = False if disable_wake else wake_requested_by_env()
+
+if enable_wake:
+    LOG_WAKE.info("[wake] Activado por variables de entorno")
+    init_wake_if_enabled(app, force_enable=True)
+else:
+    LOG_WAKE.info("[wake] Desactivado por configuración (por defecto)")
 
 app.include_router(voice_router)
 app.include_router(voice_ptt_router)

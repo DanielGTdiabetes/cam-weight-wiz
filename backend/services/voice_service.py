@@ -10,8 +10,14 @@ from importlib import import_module
 from pathlib import Path
 from typing import Callable, Dict, Literal, Optional, Tuple
 
+from backend.audio.capture import (
+    AudioCaptureError,
+    AudioCaptureSession,
+    AudioCaptureTimeout,
+    start_capture,
+)
 from backend.models.settings import AppSettings, load_settings
-from backend.wake import WakeListener, _BaseAudioSource  # type: ignore[attr-defined]
+from backend.wake import WakeListener  # type: ignore[attr-defined]
 
 logger = logging.getLogger("bascula.voice.service")
 
@@ -39,11 +45,11 @@ class VoiceService:
         self._state_lock = threading.Lock()
         self._capture_stop = threading.Event()
         self._capture_thread: Optional[threading.Thread] = None
-        self._active_source: Optional[_BaseAudioSource] = None
+        self._active_capture: Optional[AudioCaptureSession] = None
         self._captured_chunks: list[bytes] = []
         self._last_transcript: Optional[str] = None
         self._capture_error: Optional[str] = None
-        self._wake_helper = WakeListener(initial_enabled=True)
+        self._wake_helper = WakeListener(initial_enabled=False)
         self._speech_lock = threading.Lock()
         self._speech_subscribers: Dict[int, queue.Queue[Dict[str, object]]] = {}
         self._next_speech_token = 1
@@ -63,17 +69,16 @@ class VoiceService:
             self._captured_chunks = []
             self._capture_error = None
             self._capture_stop.clear()
-            self._wake_helper.enabled = True
-            self._wake_helper._audio_failure_reported = False  # type: ignore[attr-defined]
-            source, reason = self._obtain_audio_source()
-            if source is None:
+            capture, reason = self._obtain_audio_capture()
+            if capture is None:
                 logger.warning("VOICE[PTT] unable to open microphone: %s", reason or "unknown")
                 return PttResult(ok=False, reason=reason or "unavailable")
 
             self.listen_enabled = True
-            self._active_source = source
+            self._active_capture = capture
             self._capture_thread = threading.Thread(
                 target=self._capture_loop,
+                args=(capture,),
                 name="voice-ptt",
                 daemon=True,
             )
@@ -90,17 +95,17 @@ class VoiceService:
             self.listen_enabled = False
             self._capture_stop.set()
             thread = self._capture_thread
-            source = self._active_source
+            capture = self._active_capture
             self._capture_thread = None
-            self._active_source = None
+            self._active_capture = None
 
         if thread is not None:
             thread.join(timeout=1.5)
-        if source is not None:
+        if capture is not None:
             try:
-                self._wake_helper._close_audio_source(source)
+                capture.close()
             except Exception:  # pragma: no cover - defensive
-                logger.exception("VOICE[PTT] failed closing audio source")
+                logger.exception("VOICE[PTT] failed closing capture session")
 
         pcm_audio = b"".join(self._captured_chunks)
         self._captured_chunks = []
@@ -118,42 +123,27 @@ class VoiceService:
         self._last_transcript = transcript
         return PttResult(ok=True, transcript=transcript or "")
 
-    def _obtain_audio_source(self) -> Tuple[Optional[_BaseAudioSource], Optional[str]]:
-        """Attempt to acquire an audio source with a couple of retries."""
-        last_reason: Optional[str] = None
-        for attempt in range(3):
-            try:
-                source = self._wake_helper._open_audio_source()
-            except Exception as exc:  # pragma: no cover - runtime failure
-                logger.exception("VOICE[PTT] opening audio source failed")
-                last_reason = str(exc)
-                source = None
+    def _obtain_audio_capture(self) -> Tuple[Optional[AudioCaptureSession], Optional[str]]:
+        """Start a fresh ``arecord`` session for push-to-talk capture."""
 
-            if source is not None:
-                logger.info(
-                    "VOICE[PTT] microphone ready (%s@%dHz)",
-                    getattr(self._wake_helper, "_current_source_name", "unknown"),
-                    getattr(self._wake_helper, "_sample_rate", 16000),
-                )
-                return source, None
+        try:
+            capture = start_capture(timeout=65.0)
+        except AudioCaptureError as exc:
+            return None, exc.reason or "audio-unavailable"
 
-            last_reason = getattr(self._wake_helper, "_last_audio_failure_reason", None)
-            if last_reason:
-                reason_lower = last_reason.lower()
-                if "busy" in reason_lower or "ocupado" in reason_lower:
-                    last_reason = "busy"
-            time.sleep(0.2)
-
-        self._wake_helper._handle_audio_unavailable()
-        return None, last_reason or "audio-unavailable"
-
-    def _capture_loop(self) -> None:
         helper = self._wake_helper
-        source = self._active_source
-        if source is None:
-            self._capture_error = "no-source"
-            return
+        try:
+            helper._configured_sample_rate = capture.sample_rate  # type: ignore[attr-defined]
+            helper._set_sample_rate(capture.sample_rate)  # type: ignore[attr-defined]
+            helper._recent_audio.clear()  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - defensive sync
+            logger.debug("VOICE[PTT] unable to sync wake helper sample rate", exc_info=True)
 
+        logger.info("VOICE[PTT] microphone ready (%s@%dHz)", capture.device, capture.sample_rate)
+        return capture, None
+
+    def _capture_loop(self, capture: AudioCaptureSession) -> None:
+        helper = self._wake_helper
         max_duration = 60.0
         started_at = time.monotonic()
         while not self._capture_stop.is_set():
@@ -162,10 +152,16 @@ class VoiceService:
                 logger.warning("VOICE[PTT] capture timeout reached (%.1fs)", max_duration)
                 break
             try:
-                chunk = source.read_chunk()
-            except Exception as exc:  # pragma: no cover - runtime failure
-                self._capture_error = f"capture-error: {exc}"
+                chunk = capture.read_chunk()
+            except AudioCaptureTimeout:
+                self._capture_error = "timeout"
+                logger.warning("VOICE[PTT] capture timeout reached (arecord)")
                 break
+            except AudioCaptureError as exc:
+                self._capture_error = exc.reason or "capture-error"
+                logger.warning("VOICE[PTT] capture aborted: %s", exc)
+                break
+
             if not chunk:
                 continue
             self._captured_chunks.append(chunk)
