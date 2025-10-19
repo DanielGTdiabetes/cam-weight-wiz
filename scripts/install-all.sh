@@ -139,12 +139,10 @@ wait_for_http() { # <url> <timeout_s>
   log "Esperando HTTP ${success_codes} en ${url} (timeout ${timeout}s)…"
   while true; do
     http_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${url}" || echo "000")
-    for code in ${success_codes}; do
-      if [[ "${http_code}" == "${code}" ]]; then
-        log_ok "${url} respondió ${http_code}"
-        return 0
-      fi
-    done
+    if [[ " ${success_codes} " == *" ${http_code} "* ]]; then
+      log_ok "${url} respondió ${http_code}"
+      return 0
+    fi
     ts=$(( $(date +%s) - start ))
     if [[ ${ts} -ge ${timeout} ]]; then
       log_warn "Timeout esperando ${url} (último código ${http_code})"
@@ -701,12 +699,12 @@ validate_tts_say() {
   local text="${TTS_TEXT:-Instalación completada}"
   local voice="${TTS_VOICE:-}"
   local attempt=0 max_attempts=3 backoff=2 rc=0 http_code tmp backend=""
-  local encoded_text encoded_voice request_url
+  local encoded_text encoded_voice post_fields
   encoded_text=$(urlencode "${text}")
-  request_url="${url}?text=${encoded_text}"
+  post_fields="text=${encoded_text}"
   if [[ -n "${voice}" ]]; then
     encoded_voice=$(urlencode "${voice}")
-    request_url+="&voice=${encoded_voice}"
+    post_fields="${post_fields}&voice=${encoded_voice}"
   fi
   tmp=$(mktemp)
 
@@ -715,7 +713,9 @@ validate_tts_say() {
     rc=0
     http_code=$(curl -sS \
       -o "${tmp}" -w '%{http_code}' --max-time 10 \
-      "${request_url}" || rc=$?)
+      -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
+      --data "${post_fields}" \
+      "${url}" || rc=$?)
 
     if [[ ${rc} -eq 0 && ( "${http_code}" == "200" || "${http_code}" == "204" ) ]]; then
       SUMMARY_SAY_STATUS="HTTP ${http_code}"
@@ -2502,18 +2502,21 @@ list_releases() {
 health_check() {
   local name="$1"
   local url="$2"
+  local allowed_codes="${3:-${HEALTHCHECK_ALLOWED_CODES:-200}}"
   local attempts=15
   local delay=2
-  local i
+  local i http_code
 
   for ((i=1; i<=attempts; i++)); do
-    if curl -fsS "${url}" >/dev/null 2>&1; then
-      log "${name} health check passed on attempt ${i}"
+    http_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "${url}" || echo "000")
+    if [[ " ${allowed_codes} " == *" ${http_code} "* ]]; then
+      log "${name} health check passed on attempt ${i} (HTTP ${http_code})"
       return 0
     fi
+    log_warn "Health ${name} aún no OK (HTTP ${http_code}); reintentando…"
     sleep "${delay}"
   done
-  log "${name} health check failed after ${attempts} attempts"
+  log_warn "${name} health check failed after ${attempts} attempts (último código ${http_code})"
   return 1
 }
 
