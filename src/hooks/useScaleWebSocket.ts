@@ -41,6 +41,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const reconnectAttemptsRef = useRef(0);
   const [lastHttpOkAt, setLastHttpOkAt] = useState<number>(0);
   const [connectionState, setConnectionState] = useState<ConnectionState>("reconnecting");
 
@@ -260,6 +261,17 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
     return delay + Math.random() * 1000;
   };
 
+  const updateReconnectAttempts = useCallback((updater: number | ((prev: number) => number)) => {
+    setReconnectAttempts(prev => {
+      const nextValue = typeof updater === "function"
+        ? (updater as (value: number) => number)(prev)
+        : updater;
+      const clamped = Math.max(0, Math.min(nextValue, MAX_RECONNECT_ATTEMPTS));
+      reconnectAttemptsRef.current = clamped;
+      return clamped;
+    });
+  }, [setReconnectAttempts]);
+
   const connect = useCallback(() => {
     if (!localClient) {
       return null;
@@ -270,7 +282,9 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
       reconnectTimeoutRef.current = null;
     }
 
-    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    const attempts = reconnectAttemptsRef.current;
+
+    if (attempts >= MAX_RECONNECT_ATTEMPTS) {
       realtimeConnectedRef.current = false;
       startHttpPolling();
       updateConnectivity();
@@ -285,7 +299,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
         stopHttpPolling();
         realtimeConnectedRef.current = true;
         resetHttpTracking();
-        setReconnectAttempts(0);
+        updateReconnectAttempts(0);
         updateConnectivity();
       };
 
@@ -317,10 +331,15 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
         startHttpPolling();
         updateConnectivity();
 
-        if (shouldReconnectRef.current && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          const delay = getReconnectDelay(reconnectAttempts);
+        if (shouldReconnectRef.current && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          const currentAttempts = reconnectAttemptsRef.current;
+          if (currentAttempts >= MAX_RECONNECT_ATTEMPTS) {
+            return;
+          }
+
+          const delay = getReconnectDelay(currentAttempts);
           reconnectTimeoutRef.current = setTimeout(() => {
-            setReconnectAttempts(prev => prev + 1);
+            updateReconnectAttempts(prev => prev + 1);
             connect();
           }, delay);
         }
@@ -333,17 +352,22 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
       startHttpPolling();
       updateConnectivity();
 
-      if (shouldReconnectRef.current && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        const delay = getReconnectDelay(reconnectAttempts);
+      if (shouldReconnectRef.current && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+        const currentAttempts = reconnectAttemptsRef.current;
+        if (currentAttempts >= MAX_RECONNECT_ATTEMPTS) {
+          return;
+        }
+
+        const delay = getReconnectDelay(currentAttempts);
         reconnectTimeoutRef.current = setTimeout(() => {
-          setReconnectAttempts(prev => prev + 1);
+          updateReconnectAttempts(prev => prev + 1);
           connect();
         }, delay);
       }
 
       return null;
     }
-  }, [localClient, reconnectAttempts, resetHttpTracking, setIsStable, setUnit, setWeight, startHttpPolling, stopHttpPolling, updateConnectivity, wsBaseUrl]);
+  }, [localClient, resetHttpTracking, setIsStable, setUnit, setWeight, startHttpPolling, stopHttpPolling, updateConnectivity, updateReconnectAttempts, wsBaseUrl]);
 
   useEffect(() => {
     if (isDemoMode) {
@@ -495,7 +519,7 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
           resetHttpTracking();
           stopHttpPolling();
           setError(null);
-          setReconnectAttempts(0);
+          updateReconnectAttempts(0);
           updateConnectivity();
         };
 
@@ -593,12 +617,13 @@ export const useScaleWebSocket = (): UseScaleWebSocketReturn => {
     resetHttpTracking,
     setError,
     setIsStable,
-    setReconnectAttempts,
+    updateReconnectAttempts,
     setUnit,
     setWeight,
     startHttpPolling,
     stopHttpPolling,
     updateConnectivity,
+    apiBaseUrl,
   ]);
 
   return {
