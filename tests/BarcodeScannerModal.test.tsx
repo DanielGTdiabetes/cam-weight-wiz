@@ -466,6 +466,27 @@ describe('BarcodeScannerModal', () => {
     dateSpy.mockRestore();
   });
 
+  it('normaliza timestamps inválidos al vaciar la cola offline', async () => {
+    storageMocks.dequeueScannerAction
+      .mockReturnValueOnce({
+        type: 'exportBolus',
+        carbs: 18,
+        insulin: 0,
+        timestamp: undefined,
+      })
+      .mockReturnValueOnce(null);
+
+    apiMocks.exportBolus.mockResolvedValue();
+
+    renderModal();
+
+    await waitFor(() => expect(apiMocks.exportBolus).toHaveBeenCalled());
+
+    const [, , timestamp] = apiMocks.exportBolus.mock.calls[0];
+    expect(timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:/);
+    expect(storageMocks.enqueueScannerAction).not.toHaveBeenCalled();
+  });
+
   it('cambia a código de barras cuando la confianza de la IA es baja', async () => {
     const COOLDOWN_MS = 20_000;
     let currentTime = Date.now();

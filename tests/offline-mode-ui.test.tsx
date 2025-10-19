@@ -3,6 +3,23 @@ import { render, screen, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import React from 'react';
 
+class MockEventSource {
+  url: string;
+
+  constructor(url: string) {
+    this.url = url;
+  }
+
+  addEventListener() {}
+
+  removeEventListener() {}
+
+  close() {}
+}
+
+(globalThis as typeof globalThis & { EventSource: typeof MockEventSource }).EventSource =
+  MockEventSource as unknown as typeof EventSource;
+
 vi.mock('@/components/MainMenu', () => ({ MainMenu: () => <div data-testid="main-menu" /> }));
 vi.mock('@/pages/ScaleView', () => ({ ScaleView: () => <div data-testid="scale-view" /> }));
 vi.mock('@/pages/FoodScannerView', () => ({ FoodScannerView: () => <div data-testid="scanner-view" /> }));

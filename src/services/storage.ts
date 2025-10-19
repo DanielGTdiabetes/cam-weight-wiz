@@ -3,6 +3,8 @@
  * Maneja la persistencia de configuraciones y datos locales
  */
 
+import { normalizeToIsoTimestamp } from '@/lib/timestamps';
+
 const STORAGE_VERSION = 4;
 const VERSION_KEY = 'storage_version';
 
@@ -122,10 +124,14 @@ export interface ScannerQueueAction {
   type: 'exportBolus';
   carbs: number;
   insulin?: number;
-  timestamp: string | Date;
+  timestamp?: string | Date | number | null;
 }
 
-interface QueuedScannerAction extends ScannerQueueAction {
+interface QueuedScannerAction {
+  type: 'exportBolus';
+  carbs: number;
+  insulin?: number;
+  timestamp: string;
   queuedAt: number;
 }
 
@@ -279,18 +285,27 @@ const toScannerHistoryEntry = (value: unknown): ScannerHistoryEntry | null => {
   return normalised;
 };
 
-const isQueuedScannerAction = (value: unknown): value is QueuedScannerAction => {
+const toQueuedScannerAction = (value: unknown): QueuedScannerAction | null => {
   if (!value || typeof value !== 'object') {
-    return false;
+    return null;
   }
 
   const action = value as Record<string, unknown>;
-  return (
-    action.type === 'exportBolus' &&
-    typeof action.carbs === 'number' &&
-    typeof action.timestamp === 'string' &&
-    typeof action.queuedAt === 'number'
-  );
+
+  if (action.type !== 'exportBolus' || typeof action.carbs !== 'number') {
+    return null;
+  }
+
+  const queuedAt = typeof action.queuedAt === 'number' ? action.queuedAt : Date.now();
+  const insulin = typeof action.insulin === 'number' ? action.insulin : undefined;
+
+  return {
+    type: 'exportBolus',
+    carbs: action.carbs,
+    insulin,
+    timestamp: normalizeToIsoTimestamp(action.timestamp),
+    queuedAt,
+  };
 };
 
 export const SETTINGS_STORAGE_KEY = 'bascula_settings';
@@ -663,7 +678,9 @@ class StorageService {
     try {
       const stored = parseJson<unknown[]>(localStorage.getItem('scanner_history_queue'));
       if (Array.isArray(stored)) {
-        return stored.filter(isQueuedScannerAction);
+        return stored
+          .map(toQueuedScannerAction)
+          .filter((entry): entry is QueuedScannerAction => entry !== null);
       }
     } catch (error) {
       console.error('Error loading scanner queue:', error);
@@ -674,11 +691,14 @@ class StorageService {
   enqueueScannerAction(action: ScannerQueueAction): void {
     try {
       const queue = this.getScannerQueue();
-      const timestamp =
-        action.timestamp instanceof Date
-          ? action.timestamp.toISOString()
-          : action.timestamp;
-      queue.push({ ...action, timestamp, queuedAt: Date.now() });
+      const timestamp = normalizeToIsoTimestamp(action.timestamp);
+      queue.push({
+        type: 'exportBolus',
+        carbs: action.carbs,
+        insulin: typeof action.insulin === 'number' ? action.insulin : undefined,
+        timestamp,
+        queuedAt: Date.now(),
+      });
       localStorage.setItem('scanner_history_queue', JSON.stringify(queue));
     } catch (error) {
       console.error('Error enqueuing scanner action:', error);
