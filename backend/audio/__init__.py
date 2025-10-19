@@ -7,6 +7,7 @@ from .capture import (
     capture_context,
     start_capture,
 )
+from .router import router
 
 __all__ = [
     "AudioCaptureError",
@@ -14,4 +15,5 @@ __all__ = [
     "AudioCaptureTimeout",
     "capture_context",
     "start_capture",
+    "router",
 ]
