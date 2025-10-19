@@ -30,6 +30,75 @@ logger = logging.getLogger(__name__)
 _PLAYBACK_LOCK = asyncio.Lock()
 
 
+class VoiceTranscriptionError(RuntimeError):
+    """Raised when local transcription cannot be completed."""
+
+    def __init__(self, reason: str, message: Optional[str] = None) -> None:
+        super().__init__(message or reason)
+        self.reason = reason
+
+
+def _ensure_whisper_dependencies() -> Tuple[Path, Path]:
+    whisper_binary = _find_whisper_binary()
+    model_path = _find_whisper_model()
+    if whisper_binary is None or model_path is None:
+        raise VoiceTranscriptionError("whisper_not_installed")
+    return whisper_binary, model_path
+
+
+def transcribe_wav_file(
+    wav_path: Path,
+    *,
+    whisper_binary: Optional[Path] = None,
+    model_path: Optional[Path] = None,
+) -> str:
+    """Transcribe a WAV file using the bundled whisper.cpp binary."""
+
+    if not wav_path.exists():
+        raise VoiceTranscriptionError("wav_missing", f"No existe el archivo {wav_path}")
+
+    binary = whisper_binary
+    model = model_path
+    if binary is None or model is None:
+        binary, model = _ensure_whisper_dependencies()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_prefix = Path(tmpdir) / "transcript"
+        whisper_cmd = [
+            str(binary),
+            "-m",
+            str(model),
+            "-f",
+            str(wav_path),
+            "-otxt",
+            "-of",
+            str(output_prefix),
+        ]
+
+        try:
+            subprocess.run(
+                whisper_cmd,
+                check=True,
+                cwd=WHISPER_DIR,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError as exc:
+            raise VoiceTranscriptionError("whisper_not_installed") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="ignore") if exc.stderr else None
+            raise VoiceTranscriptionError("whisper_failed", stderr or str(exc)) from exc
+
+        transcript_file = output_prefix.with_suffix(".txt")
+        transcript_text = (
+            transcript_file.read_text(encoding="utf-8").strip()
+            if transcript_file.exists()
+            else ""
+        )
+
+    return transcript_text
+
+
 def _iter_env_dirs() -> Iterable[Path]:
     raw_single = os.getenv("BASCULA_VOICES_DIR") or os.getenv("BASCULA_VOICE_DIR")
     if raw_single:
@@ -397,10 +466,12 @@ def _find_whisper_model() -> Optional[Path]:
 
 @router.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
-    whisper_binary = _find_whisper_binary()
-    model_path = _find_whisper_model()
-    if whisper_binary is None or model_path is None:
-        return {"ok": True, "transcript": None, "reason": "whisper_not_installed"}
+    try:
+        whisper_binary, model_path = _ensure_whisper_dependencies()
+    except VoiceTranscriptionError as exc:
+        if exc.reason == "whisper_not_installed":
+            return {"ok": True, "transcript": None, "reason": exc.reason}
+        raise
 
     if shutil.which("ffmpeg") is None:
         return {"ok": True, "transcript": None, "reason": "ffmpeg_missing"}
@@ -431,24 +502,15 @@ async def transcribe(file: UploadFile = File(...)):
         except subprocess.CalledProcessError as exc:
             raise HTTPException(status_code=500, detail="ffmpeg_failed") from exc
 
-        output_prefix = Path(tmpdir) / "transcript"
-        whisper_cmd = [
-            str(whisper_binary),
-            "-m",
-            str(model_path),
-            "-f",
-            str(wav_path),
-            "-otxt",
-            "-of",
-            str(output_prefix),
-        ]
-
         try:
-            subprocess.run(whisper_cmd, check=True, cwd=WHISPER_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except subprocess.CalledProcessError as exc:
-            raise HTTPException(status_code=500, detail="whisper_failed") from exc
-
-        transcript_file = output_prefix.with_suffix(".txt")
-        transcript_text = transcript_file.read_text(encoding="utf-8").strip() if transcript_file.exists() else ""
+            transcript_text = transcribe_wav_file(
+                wav_path,
+                whisper_binary=whisper_binary,
+                model_path=model_path,
+            )
+        except VoiceTranscriptionError as exc:
+            if exc.reason == "whisper_not_installed":
+                return {"ok": True, "transcript": None, "reason": exc.reason}
+            raise HTTPException(status_code=500, detail=exc.reason) from exc
 
     return {"ok": True, "transcript": transcript_text or None, "engine": "whisper.cpp"}
