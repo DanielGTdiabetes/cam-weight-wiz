@@ -1209,7 +1209,11 @@ detect_expected_camera_sensor() {
 
   if command -v libcamera-hello >/dev/null 2>&1; then
     local detected
-    detected="$(libcamera-hello --list-cameras 2>/dev/null | sed -n 's/^[[:space:]]*[0-9]\+[[:space:]]*:[[:space:]]*\([[:alnum:]_.-]\+\).*/\1/p' | head -n1)"
+    detected="$(
+      { libcamera-hello --list-cameras 2>/dev/null || true; } |
+        sed -n 's/^[[:space:]]*[0-9]\+[[:space:]]*:[[:space:]]*\([[:alnum:]_.-]\+\).*/\1/p' |
+        head -n1
+    )"
     if [[ -n "${detected}" ]]; then
       CAMERA_MODEL_SOURCE="libcamera"
       printf '%s\n' "${detected}"
