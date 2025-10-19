@@ -714,6 +714,7 @@ validate_tts_say() {
     attempt=$((attempt + 1))
     rc=0
     http_code=$(curl -sS \
+      -X POST -d '' \
       -o "${tmp}" -w '%{http_code}' --max-time 10 \
       "${request_url}" || rc=$?)
 
