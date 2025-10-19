@@ -1960,12 +1960,15 @@ EOF
 }
 
 precompile_backend_release() {
-  local python_bin=""
+  local python_bin="" venv_python="${CURRENT_LINK}/.venv/bin/python"
   if [[ ! -d "${CURRENT_LINK}" ]]; then
     log_warn "Ruta ${CURRENT_LINK} no disponible; omitiendo precompilación"
     return 0
   fi
-  if command -v python >/dev/null 2>&1; then
+
+  if [[ -x "${venv_python}" ]]; then
+    python_bin="${venv_python}"
+  elif command -v python >/dev/null 2>&1; then
     python_bin="$(command -v python)"
   elif command -v python3 >/dev/null 2>&1; then
     python_bin="$(command -v python3)"
