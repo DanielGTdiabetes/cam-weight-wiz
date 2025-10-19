@@ -1972,7 +1972,7 @@ precompile_backend_release() {
   else
     log_warn "python no disponible; omitiendo precompilación"
     return 0
-  }
+  fi
 
   log_step "Precompilando bytecode del backend"
   if ! "${python_bin}" -m compileall -q "${CURRENT_LINK}"; then
