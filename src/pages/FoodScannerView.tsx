@@ -16,6 +16,7 @@ import { ApiError } from "@/services/apiWrapper";
 import { buildFoodItem, toFoodItem, type FoodScannerConfirmedPayload, type FoodItem } from "@/features/food-scanner/foodItem";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
+import { useCameraPreview } from "@/hooks/useCameraPreview";
 
 type CaptureMode = "backend" | "browser";
 
@@ -70,11 +71,12 @@ export const FoodScannerView = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showBolusCalculator, setShowBolusCalculator] = useState(false);
   const [currentGlucose, setCurrentGlucose] = useState<number | undefined>();
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [lastCaptureUrl, setLastCaptureUrl] = useState<string | null>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [isCameraStarting, setIsCameraStarting] = useState(false);
+  const [isBackendPreviewing, setIsBackendPreviewing] = useState(false);
   const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState(false);
   const [prefilledBarcode, setPrefilledBarcode] = useState<string | undefined>(undefined);
   const [isRemoteCapturing, setIsRemoteCapturing] = useState(false);
@@ -86,7 +88,7 @@ export const FoodScannerView = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const hasHydratedHistoryRef = useRef(false);
   const preservedScannerEntriesRef = useRef<ScannerHistoryEntry[]>([]);
-  const remoteCaptureCacheRef = useRef<{ blob: Blob; previewUrl: string } | null>(null);
+  const captureCacheRef = useRef<{ blob: Blob; previewUrl: string } | null>(null);
 
   const { toast } = useToast();
   const decimals = useScaleDecimals();
@@ -279,7 +281,7 @@ export const FoodScannerView = () => {
     }
   }, [foods]);
 
-  const stopCamera = useCallback(() => {
+  const stopCamera = useCallback((options?: { preserveCapture?: boolean }) => {
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -290,16 +292,19 @@ export const FoodScannerView = () => {
       video.srcObject = null;
     }
     setIsCameraActive(false);
-    remoteCaptureCacheRef.current = null;
+    if (!options?.preserveCapture) {
+      captureCacheRef.current = null;
+    }
   }, []);
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
-  useEffect(() => {    
+  useEffect(() => {
     if (captureMode === "backend") {
-      stopCamera();
+      stopCamera({ preserveCapture: true });
       setCameraError(null);
     }
+    setIsBackendPreviewing(false);
   }, [captureMode, stopCamera]);
 
   useEffect(() => {
@@ -388,12 +393,14 @@ export const FoodScannerView = () => {
         }
 
         const blob = await imageResponse.blob();
-        setPreviewUrl(bustUrl);
+        const capturePayload = { blob, previewUrl: bustUrl };
+        captureCacheRef.current = capturePayload;
+        setLastCaptureUrl(bustUrl);
         if (!silent) {
           setCameraError(null);
         }
 
-        return { result: { blob, previewUrl: bustUrl }, errorMessage: null };
+        return { result: capturePayload, errorMessage: null };
       } catch (error) {
         const message =
           error instanceof Error && error.message
@@ -409,6 +416,31 @@ export const FoodScannerView = () => {
       }
     },
     [buildBackendUrl, toast],
+  );
+
+  const backendPreviewEndpoint = useMemo(
+    () => buildBackendUrl("/api/camera/capture"),
+    [buildBackendUrl],
+  );
+
+  const handleBackendPreviewError = useCallback(
+    (error: Error) => {
+      logger.error("Remote preview failed", { error });
+      setIsBackendPreviewing(false);
+      setCameraError("No se pudo iniciar la cámara de la báscula.");
+      toast({
+        title: "Cámara no disponible",
+        description: "No se pudo iniciar la cámara de la báscula.",
+        variant: "destructive",
+      });
+    },
+    [toast],
+  );
+
+  const livePreviewSrc = useCameraPreview(
+    backendPreviewEndpoint,
+    captureMode === "backend" && isBackendPreviewing && !lastCaptureUrl,
+    { intervalMs: 800, onError: handleBackendPreviewError },
   );
 
   const startBrowserCamera = useCallback(async () => {
@@ -446,7 +478,8 @@ export const FoodScannerView = () => {
           }
         }
         setIsCameraActive(true);
-        remoteCaptureCacheRef.current = null;
+        captureCacheRef.current = null;
+        setLastCaptureUrl(null);
         localStreamStarted = true;
       } catch (error) {
         if (streamRef.current) {
@@ -480,7 +513,8 @@ export const FoodScannerView = () => {
 
     const { result: remoteCapture, errorMessage } = await captureRemotePhoto({ silent: true, timeoutMs: 7000 });
     if (remoteCapture) {
-      remoteCaptureCacheRef.current = remoteCapture;
+      captureCacheRef.current = remoteCapture;
+      setLastCaptureUrl(remoteCapture.previewUrl);
       setCameraError(null);
       toast({
         title: "Captura remota lista",
@@ -512,17 +546,51 @@ export const FoodScannerView = () => {
     [allowBrowserCapture],
   );
 
-  const handleActivateCamera = useCallback(async () => {
+  const startBackendPreview = useCallback(() => {
+    captureCacheRef.current = null;
+    setLastCaptureUrl(null);
+    setCameraError(null);
+    setIsBackendPreviewing(true);
+  }, []);
+
+  const handleCaptureClick = useCallback(async () => {
     if (captureMode === "backend") {
-      const { result: remoteCapture } = await captureRemotePhoto({ silent: false, timeoutMs: 7000 });
-      if (remoteCapture) {
-        remoteCaptureCacheRef.current = remoteCapture;
+      if (!isBackendPreviewing && !lastCaptureUrl) {
+        startBackendPreview();
+        return;
       }
+
+      if (isBackendPreviewing) {
+        const { result: remoteCapture } = await captureRemotePhoto({ silent: false, timeoutMs: 7000 });
+        if (remoteCapture) {
+          setIsBackendPreviewing(false);
+        }
+        return;
+      }
+
       return;
     }
 
-    await startBrowserCamera();
-  }, [captureMode, captureRemotePhoto, startBrowserCamera]);
+    if (!isCameraActive) {
+      await startBrowserCamera();
+      return;
+    }
+
+    const blob = await capturePhoto();
+    if (blob) {
+      stopCamera({ preserveCapture: true });
+    }
+  }, [
+    captureMode,
+    capturePhoto,
+    captureRemotePhoto,
+    isBackendPreviewing,
+    isCameraActive,
+    lastCaptureUrl,
+    startBackendPreview,
+    startBrowserCamera,
+    stopCamera,
+  ]);
 
   const capturePhoto = useCallback(async (): Promise<Blob | null> => {
     if (!videoRef.current) {
@@ -549,21 +617,66 @@ export const FoodScannerView = () => {
     context.drawImage(video, 0, 0, width, height);
 
     const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-    setPreviewUrl(dataUrl);
+    setLastCaptureUrl(dataUrl);
 
     return await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.92);
+      canvas.toBlob((blob) => {
+        if (blob) {
+          captureCacheRef.current = { blob, previewUrl: dataUrl };
+        }
+        resolve(blob);
+      }, "image/jpeg", 0.92);
     });
   }, []);
+
+  const handleRetake = useCallback(async () => {
+    setUploadedFile(null);
+    if (captureMode === "backend") {
+      startBackendPreview();
+      return;
+    }
+
+    setLastCaptureUrl(null);
+    captureCacheRef.current = null;
+    stopCamera();
+    await startBrowserCamera();
+  }, [captureMode, startBackendPreview, startBrowserCamera, stopCamera]);
 
   useEffect(() => {
     if (!uploadedFile) {
       return;
     }
     const url = URL.createObjectURL(uploadedFile);
-    setPreviewUrl(url);
-    return () => URL.revokeObjectURL(url);
+    setLastCaptureUrl(url);
+    captureCacheRef.current = { blob: uploadedFile, previewUrl: url };
+    return () => {
+      URL.revokeObjectURL(url);
+      if (captureCacheRef.current?.previewUrl === url) {
+        captureCacheRef.current = null;
+      }
+    };
   }, [uploadedFile]);
+
+  useEffect(() => {
+    if (captureMode !== "browser") {
+      return;
+    }
+
+    const video = videoRef.current;
+    const stream = streamRef.current;
+    if (!isCameraActive || !video || !stream) {
+      return;
+    }
+
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+    video.muted = true;
+    video.setAttribute("muted", "true");
+    video
+      .play()
+      .catch((error) => logger.error("Failed to play camera stream", { error }));
+  }, [captureMode, isCameraActive]);
 
   const ensureWeight = async (): Promise<number | null> => {
     if (scaleWeight > 0) {
@@ -613,49 +726,30 @@ export const FoodScannerView = () => {
   };
 
   const handleAnalyze = async () => {
+    if (!captureCacheRef.current) {
+      toast({
+        title: "Sin captura",
+        description: "Captura una imagen antes de analizar.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const validWeight = await ensureWeight();
     if (!validWeight) {
       return;
     }
 
-    let blob: Blob | null = null;
-
-    if (isCameraActive) {
-      blob = await capturePhoto();
-    }
-
-    if (!blob && remoteCaptureCacheRef.current) {
-      blob = remoteCaptureCacheRef.current.blob;
-      remoteCaptureCacheRef.current = null;
-    }
-
-    if (!blob && uploadedFile) {
-      blob = uploadedFile;
-    }
-
-    if (!blob) {
-      const { result: remoteCapture } = await captureRemotePhoto();
-      if (remoteCapture) {
-        blob = remoteCapture.blob;
-        remoteCaptureCacheRef.current = remoteCapture;
-      }
-    }
-
-    if (!blob) {
-      toast({
-        title: "Sin imagen",
-        description: "No se pudo obtener una foto. Revisa la cámara integrada o vuelve a intentarlo.",
-        variant: "destructive",
-      });
-      return;
-    }
+    const blob = captureCacheRef.current.blob;
 
     setIsScanning(true);
     try {
       const analysis = await api.analyzeFood(blob, validWeight);
       const item = buildFoodItem(analysis, validWeight, "camera");
       appendFood(item);
-      setUploadedFile(null);
+      if (uploadedFile) {
+        setUploadedFile(null);
+      }
     } catch (error) {
       logger.error("Food analysis failed", { error });
       if (error instanceof ApiError) {
@@ -730,6 +824,16 @@ export const FoodScannerView = () => {
     return () => window.removeEventListener("online", handleOnline);
   }, [flushScannerQueue, toast]);
 
+  const hasCapture = Boolean(lastCaptureUrl);
+  const isBrowserPreviewing = captureMode === "browser" && (isCameraActive || isCameraStarting);
+  const isBackendPreviewingActive = captureMode === "backend" && isBackendPreviewing;
+  const scannerMode: "idle" | "previewing" | "captured" = hasCapture
+    ? "captured"
+    : isBrowserPreviewing || isBackendPreviewingActive
+      ? "previewing"
+      : "idle";
+  const canAnalyze = Boolean(captureCacheRef.current);
+
   return (
     <div className="flex h-full flex-col gap-6 bg-background p-4">
       <div className="grid gap-6 md:grid-cols-[1.4fr_1fr]">
@@ -767,15 +871,15 @@ export const FoodScannerView = () => {
                     Modo: Cámara de la báscula
                   </div>
                 )}
-                <div className="flex gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <Button
-                    onClick={handleActivateCamera}
+                    onClick={handleCaptureClick}
                     variant="secondary"
                     size="sm"
                     disabled={
                       captureMode === "backend"
-                        ? isRemoteCapturing
-                        : isCameraActive || isCameraStarting
+                        ? isRemoteCapturing || scannerMode === "captured"
+                        : isCameraStarting || scannerMode === "captured"
                     }
                   >
                     {captureMode === "backend" ? (
@@ -783,15 +887,26 @@ export const FoodScannerView = () => {
                         <>
                           <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Capturando…
                         </>
+                      ) : scannerMode === "captured" ? (
+                        <>
+                          <Camera className="mr-2 h-4 w-4" /> Captura lista
+                        </>
                       ) : (
                         <>
-                          <Camera className="mr-2 h-4 w-4" />
-                          {previewUrl ? "Capturar de nuevo" : "Capturar imagen"}
+                          <Camera className="mr-2 h-4 w-4" /> Capturar imagen
                         </>
                       )
                     ) : isCameraStarting ? (
                       <>
                         <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Activando…
+                      </>
+                    ) : scannerMode === "previewing" ? (
+                      <>
+                        <Camera className="mr-2 h-4 w-4" /> Capturar imagen
+                      </>
+                    ) : scannerMode === "captured" ? (
+                      <>
+                        <Camera className="mr-2 h-4 w-4" /> Captura lista
                       </>
                     ) : (
                       <>
@@ -799,12 +914,16 @@ export const FoodScannerView = () => {
                       </>
                     )}
                   </Button>
-                  {captureMode === "browser" && (
+                  {scannerMode === "captured" && (
+                    <Button onClick={handleRetake} variant="outline" size="sm">
+                      Capturar de nuevo
+                    </Button>
+                  )}
+                  {captureMode === "browser" && isCameraActive && (
                     <Button
-                      onClick={stopCamera}
-                      variant="outline"
+                      onClick={() => stopCamera({ preserveCapture: true })}
+                      variant="ghost"
                       size="sm"
-                      disabled={!isCameraActive}
                     >
                       Detener
                     </Button>
@@ -813,55 +932,71 @@ export const FoodScannerView = () => {
               </div>
             </div>
 
-            <div className="relative mb-4 rounded-xl border border-dashed border-primary/30 bg-muted/30">
-              {captureMode === "browser" ? (
-                <>
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    className={cn(
-                      "h-64 w-full rounded-xl object-cover",
-                      !isCameraActive && "opacity-30"
-                    )}
-                  />
-                  {!isCameraActive && !previewUrl && (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-                      <Camera className="mb-2 h-8 w-8" />
-                      <p>Activa la cámara o sube una imagen desde archivos.</p>
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="flex h-64 w-full flex-col items-center justify-center gap-2 text-muted-foreground">
-                  <Camera className="h-10 w-10 opacity-60" />
+            <div className="mb-4">
+              {scannerMode === "idle" && (
+                <div className="grid aspect-video w-full place-items-center rounded-2xl border border-dashed border-primary/30 bg-muted/30 p-8 text-center text-muted-foreground">
+                  <Camera className="mb-3 h-10 w-10 opacity-60" />
                   <p className="text-sm font-medium">La captura se realizará desde la cámara de la báscula.</p>
-                  <p className="text-xs text-muted-foreground/80">Pulsa "Capturar imagen" para obtener una nueva foto.</p>
+                  <p className="text-xs text-muted-foreground/80">Pulsa «Capturar imagen» para iniciar la vista previa.</p>
+                  {cameraError && (
+                    <span className="mt-3 text-xs font-semibold text-destructive">{cameraError}</span>
+                  )}
                 </div>
               )}
+
+              {scannerMode === "previewing" && (
+                captureMode === "backend" ? (
+                  <figure className="relative aspect-video w-full overflow-hidden rounded-2xl border border-primary/40 bg-black/70">
+                    {livePreviewSrc ? (
+                      <img
+                        src={livePreviewSrc}
+                        alt="Vista previa en vivo"
+                        className="h-full w-full object-contain"
+                      />
+                    ) : (
+                      <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-muted-foreground">
+                        <Loader2 className="h-6 w-6 animate-spin" />
+                        <span className="text-sm font-medium">Iniciando cámara…</span>
+                      </div>
+                    )}
+                  </figure>
+                ) : (
+                  <div className="relative aspect-video w-full overflow-hidden rounded-2xl border border-primary/40 bg-black/70">
+                    <video ref={videoRef} autoPlay playsInline className="h-full w-full object-cover" />
+                    {isCameraStarting && (
+                      <div className="absolute inset-0 grid place-items-center bg-black/60 text-sm text-muted-foreground">
+                        <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Activando cámara…
+                      </div>
+                    )}
+                  </div>
+                )
+              )}
+
+              {scannerMode === "captured" && lastCaptureUrl && (
+                <figure className="aspect-video w-full overflow-hidden rounded-2xl border border-primary/40 bg-black/70">
+                  <img src={lastCaptureUrl} alt="Última captura" className="h-full w-full object-contain" />
+                </figure>
+              )}
+
+              {cameraError && scannerMode !== "idle" && (
+                <p className="mt-3 text-sm text-destructive">{cameraError}</p>
+              )}
             </div>
-
-            {previewUrl && (
-              <div className="mb-4 rounded-lg border border-primary/20 bg-primary/5 p-3">
-                <p className="mb-2 text-sm font-medium text-primary">Última captura</p>
-                <img src={previewUrl} alt="Vista previa" className="h-40 w-full rounded-md object-cover" />
-              </div>
-            )}
-
-            {cameraError && (
-              <p className="mb-4 text-sm text-destructive">{cameraError}</p>
-            )}
 
             <div className="flex flex-wrap items-center gap-3">
               <Button
                 onClick={handleAnalyze}
-                disabled={isScanning || isRemoteCapturing}
+                disabled={!canAnalyze || isScanning || isRemoteCapturing}
                 className="min-w-[180px]"
               >
-                {isScanning || isRemoteCapturing ? (
+                {isScanning ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    {isRemoteCapturing ? "Capturando..." : "Analizando…"}
+                    Analizando…
+                  </>
+                ) : isRemoteCapturing ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Esperando captura…
                   </>
                 ) : (
                   <>
