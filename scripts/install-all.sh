@@ -795,6 +795,46 @@ check_camera_info_endpoint() {
   return 1
 }
 
+check_no_arecord_process() {
+  if pgrep -a arecord >/dev/null 2>&1; then
+    CHECK_FAIL_MSG=$(pgrep -a arecord | head -n 1)
+    SUMMARY_AUDIO_CAPTURE="arecord-running"
+    return 1
+  fi
+  SUMMARY_AUDIO_CAPTURE="idle"
+  return 0
+}
+
+check_wake_disabled_logs() {
+  if ! command -v journalctl >/dev/null 2>&1; then
+    SUMMARY_WAKE_LOG="journalctl-missing"
+    return 0
+  fi
+  local logs
+  logs=$(journalctl -u bascula-backend.service -n 200 --no-pager 2>/dev/null || true)
+  if [[ -z "${logs}" ]]; then
+    SUMMARY_WAKE_LOG="no-logs"
+    return 0
+  fi
+  if printf '%s\n' "${logs}" | grep -qi 'WakeListener inicializado'; then
+    CHECK_FAIL_MSG="WakeListener inicializado"
+    SUMMARY_WAKE_LOG="wake-enabled"
+    return 1
+  fi
+  if printf '%s\n' "${logs}" | grep -qi 'listener thread started'; then
+    CHECK_FAIL_MSG="listener thread started"
+    SUMMARY_WAKE_LOG="wake-thread"
+    return 1
+  fi
+  if ! printf '%s\n' "${logs}" | grep -qi 'Desactivado por configuración'; then
+    CHECK_FAIL_MSG="sin log de wake desactivado"
+    SUMMARY_WAKE_LOG="missing-disabled-log"
+    return 1
+  fi
+  SUMMARY_WAKE_LOG="disabled"
+  return 0
+}
+
 check_scale_health() {
   local url="http://127.0.0.1/api/health"
   local tmp status rc=0
@@ -1863,6 +1903,12 @@ ensure_backend_env_file() {
 # BASCULA_SCALE_TIMEOUT_S=2
 #
 # Dejar BASCULA_SCALE_DEMO=true fuerza modo demo sin hardware.
+BASCULA_WAKE_ENABLED=false
+BASCULA_VOSK_ENABLED=false
+BASCULA_LISTEN_ENABLED=false
+DISABLE_WAKE=1
+BASCULA_MIC_DEVICE=bascula_mix_in
+BASCULA_SAMPLE_RATE=16000
 EOF
   if [[ -f "${file}" ]] && cmp -s "${tmp}" "${file}"; then
     rm -f "${tmp}"
@@ -2640,6 +2686,8 @@ run_final_checks() {
   final_check_warn "TTS say" check_voice_say_endpoint
   final_check "TTS synthesize" check_voice_synthesize_endpoint
   final_check "Cámara info" check_camera_info_endpoint
+  final_check "sin procesos arecord activos" check_no_arecord_process
+  final_check "wake desactivado en journal" check_wake_disabled_logs
   test -f /opt/bascula/voices/piper/default.onnx || (echo "[ERR] Piper sin voz por defecto" && exit 1)
   if [[ ${FRONTEND_EXPECTED} -eq 1 ]]; then
     final_check "frontend publicado en ${WWW_ROOT}/index.html" check_file_exists "${WWW_ROOT}/index.html"
@@ -2702,6 +2750,8 @@ run_final_checks() {
   fi
 
   run_final_smoke_tests
+
+  log "[install][ok] Wake/Vosk desactivado por defecto; micro disponible para captura bajo demanda (Modo Receta)."
 
   log_ok "Instalación completa"
 }

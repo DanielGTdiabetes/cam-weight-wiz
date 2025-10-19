@@ -40,4 +40,9 @@ else
   warn "audio checks omitidos (SKIP_AUDIO=1)"
 fi
 
+run "sin arecord en ejecución" bash -c '! pgrep -a arecord' || STATUS=1
+run "wake listener no inicializado" bash -c 'if command -v journalctl >/dev/null 2>&1; then ! journalctl -u bascula-backend.service -n 200 --no-pager | grep -qi "WakeListener inicializado"; else exit 0; fi' || STATUS=1
+
+log "[install][ok] Wake/Vosk desactivado por defecto; micro disponible para captura bajo demanda (Modo Receta)."
+
 exit ${STATUS}
