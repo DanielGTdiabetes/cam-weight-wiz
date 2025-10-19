@@ -47,9 +47,60 @@ sed -i "s/pwmchip[0-9]\\+/${PWMCHIP}/g" x735-fan.sh 2>/dev/null || true
 ./install-fan-service.sh || true
 ./install-pwr-service.sh || true
 
+FAN_UNIT=""
+PWR_UNIT=""
+
+for candidate in /etc/systemd/system/x735-fan.service /lib/systemd/system/x735-fan.service; do
+  if [[ -f "${candidate}" ]]; then
+    FAN_UNIT="${candidate}"
+    break
+  fi
+done
+if [[ -z "${FAN_UNIT}" && -f x735-fan.service ]]; then
+  install -D -m 0644 x735-fan.service /etc/systemd/system/x735-fan.service
+  FAN_UNIT="/etc/systemd/system/x735-fan.service"
+  LOG "x735-fan.service instalado manualmente en /etc/systemd/system"
+fi
+
+for candidate in /etc/systemd/system/x735-pwr.service /lib/systemd/system/x735-pwr.service; do
+  if [[ -f "${candidate}" ]]; then
+    PWR_UNIT="${candidate}"
+    break
+  fi
+done
+if [[ -z "${PWR_UNIT}" && -f x735-pwr.service ]]; then
+  install -D -m 0644 x735-pwr.service /etc/systemd/system/x735-pwr.service
+  PWR_UNIT="/etc/systemd/system/x735-pwr.service"
+  LOG "x735-pwr.service instalado manualmente en /etc/systemd/system"
+fi
+
+if [[ -f x735-fan.sh && ! -x /usr/local/bin/x735-fan.sh ]]; then
+  install -D -m 0755 x735-fan.sh /usr/local/bin/x735-fan.sh
+  LOG "x735-fan.sh copiado a /usr/local/bin"
+fi
+
+if [[ -f pwm_fan_control.py && ! -f /usr/local/bin/pwm_fan_control.py ]]; then
+  install -D -m 0644 pwm_fan_control.py /usr/local/bin/pwm_fan_control.py
+  LOG "pwm_fan_control.py copiado a /usr/local/bin"
+fi
+
+if [[ -f xPWR.sh && ! -x /usr/local/bin/xPWR.sh ]]; then
+  install -D -m 0755 xPWR.sh /usr/local/bin/xPWR.sh
+  LOG "xPWR.sh copiado a /usr/local/bin"
+fi
+
 if [[ "${HAS_SYSTEMD}" -eq 1 ]]; then
-  systemctl enable --now x735-fan.service 2>/dev/null || true
-  systemctl enable --now x735-pwr.service 2>/dev/null || true
+  systemctl daemon-reload 2>/dev/null || true
+  if [[ -n "${FAN_UNIT}" || -f /lib/systemd/system/x735-fan.service || -f /etc/systemd/system/x735-fan.service ]]; then
+    systemctl enable --now x735-fan.service 2>/dev/null || WARN "No se pudo habilitar/iniciar x735-fan.service"
+  else
+    WARN "Unidad x735-fan.service no encontrada tras la instalación"
+  fi
+  if [[ -n "${PWR_UNIT}" || -f /lib/systemd/system/x735-pwr.service || -f /etc/systemd/system/x735-pwr.service ]]; then
+    systemctl enable --now x735-pwr.service 2>/dev/null || WARN "No se pudo habilitar/iniciar x735-pwr.service"
+  else
+    WARN "Unidad x735-pwr.service no encontrada tras la instalación"
+  fi
 elif [[ "${MODE}" == "oneshot" ]]; then
   WARN "systemd no disponible; fan/power se habilitarán al primer arranque"
 fi
