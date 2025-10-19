@@ -2330,6 +2330,52 @@ ensure_x735_support() {
     log_warn "install-pwr-service.sh no disponible"
   fi
 
+  local fan_service_src="/opt/x735-script/x735-fan.service"
+  local pwr_service_src="/opt/x735-script/x735-pwr.service"
+  local fan_unit=""
+  local pwr_unit=""
+
+  for candidate in /etc/systemd/system/x735-fan.service /lib/systemd/system/x735-fan.service; do
+    if [[ -f "${candidate}" ]]; then
+      fan_unit="${candidate}"
+      break
+    fi
+  done
+  if [[ -z "${fan_unit}" && -f "${fan_service_src}" ]]; then
+    install -D -m 0644 "${fan_service_src}" /etc/systemd/system/x735-fan.service
+    fan_unit="/etc/systemd/system/x735-fan.service"
+    log "x735-fan.service instalado manualmente en /etc/systemd/system"
+  fi
+
+  for candidate in /etc/systemd/system/x735-pwr.service /lib/systemd/system/x735-pwr.service; do
+    if [[ -f "${candidate}" ]]; then
+      pwr_unit="${candidate}"
+      break
+    fi
+  done
+  if [[ -z "${pwr_unit}" && -f "${pwr_service_src}" ]]; then
+    install -D -m 0644 "${pwr_service_src}" /etc/systemd/system/x735-pwr.service
+    pwr_unit="/etc/systemd/system/x735-pwr.service"
+    log "x735-pwr.service instalado manualmente en /etc/systemd/system"
+  fi
+
+  if [[ -f "${fan_script}" && ! -x /usr/local/bin/x735-fan.sh ]]; then
+    install -D -m 0755 "${fan_script}" /usr/local/bin/x735-fan.sh
+    log "x735-fan.sh copiado a /usr/local/bin"
+  fi
+
+  local fan_helper="/opt/x735-script/pwm_fan_control.py"
+  if [[ -f "${fan_helper}" && ! -f /usr/local/bin/pwm_fan_control.py ]]; then
+    install -D -m 0644 "${fan_helper}" /usr/local/bin/pwm_fan_control.py
+    log "pwm_fan_control.py copiado a /usr/local/bin"
+  fi
+
+  local pwr_script="/opt/x735-script/xPWR.sh"
+  if [[ -f "${pwr_script}" && ! -x /usr/local/bin/xPWR.sh ]]; then
+    install -D -m 0755 "${pwr_script}" /usr/local/bin/xPWR.sh
+    log "xPWR.sh copiado a /usr/local/bin"
+  fi
+
   install -d -m 0755 /etc/systemd/system/x735-fan.service.d
   cat <<'EOF' >/etc/systemd/system/x735-fan.service.d/override.conf
 [Unit]
@@ -2344,8 +2390,16 @@ EOF
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
-    systemctl enable --now x735-fan.service || log_warn "No se pudo habilitar/iniciar x735-fan.service"
-    systemctl enable --now x735-pwr.service || log_warn "No se pudo habilitar/iniciar x735-pwr.service"
+    if [[ -n "${fan_unit}" || -f /lib/systemd/system/x735-fan.service || -f /etc/systemd/system/x735-fan.service ]]; then
+      systemctl enable --now x735-fan.service || log_warn "No se pudo habilitar/iniciar x735-fan.service"
+    else
+      log_warn "Unidad x735-fan.service no encontrada tras la instalación"
+    fi
+    if [[ -n "${pwr_unit}" || -f /lib/systemd/system/x735-pwr.service || -f /etc/systemd/system/x735-pwr.service ]]; then
+      systemctl enable --now x735-pwr.service || log_warn "No se pudo habilitar/iniciar x735-pwr.service"
+    else
+      log_warn "Unidad x735-pwr.service no encontrada tras la instalación"
+    fi
   else
     log_warn "systemctl no disponible; no se pueden gestionar servicios X735"
   fi
