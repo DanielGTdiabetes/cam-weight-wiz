@@ -35,14 +35,13 @@ interface RemoteCaptureOutcome {
   errorMessage: string | null;
 }
 
-const kioskUserAgentPattern = /(bascula|raspberry|aarch64)/i;
-
 const isLikelyLocalDevice = (): boolean => {
   if (typeof window === "undefined") {
     return true;
   }
 
   try {
+    const kioskUserAgentPattern = /(bascula|raspberry|aarch64)/i;
     const hostname = window.location?.hostname ?? "";
     const userAgent = window.navigator?.userAgent ?? "";
     if (!hostname) {
