@@ -23,7 +23,11 @@ const CRITICAL_ENDPOINTS: CriticalEndpoint[] = [
 
 const FAILURE_THRESHOLD = 3;
 const POLL_INTERVAL_MS = 8000;
-const STATE_TIMEOUT_MS = 3500;
+// ``/api/state`` agrega datos de varios subsistemas (miniweb, Nightscout, cámara, etc.).
+// La consulta a Nightscout por sí sola puede demorar hasta 5 s antes de fallar, por lo que
+// el timeout del frontend debe ser más holgado para no abortar peticiones válidas ni mostrar
+// avisos falsos de "No se pudo obtener el estado" en instalaciones lentas.
+const STATE_TIMEOUT_MS = 8000;
 const CRITICAL_TIMEOUT_MS = 4000;
 
 const DEFAULT_FAILURE_COUNTS: FailureCounts = {
