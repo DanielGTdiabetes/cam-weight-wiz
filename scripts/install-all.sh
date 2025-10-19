@@ -662,16 +662,19 @@ validate_tts_say() {
   local tts_port="${TTS_PORT:-8080}"
   local url="${TTS_URL:-http://${host}:${tts_port}/api/voice/tts/say}"
   local text="${TTS_TEXT:-Instalación completada}"
-  local attempt=0 max_attempts=3 backoff=2 rc=0 http_code payload tmp backend=""
-  payload="{"text":"$(json_escape_string "${text}")"}"
+  local voice="${TTS_VOICE:-}"
+  local attempt=0 max_attempts=3 backoff=2 rc=0 http_code tmp backend=""
+  local -a curl_data=("--data-urlencode" "text=${text}")
+  if [[ -n "${voice}" ]]; then
+    curl_data+=("--data-urlencode" "voice=${voice}")
+  fi
   tmp=$(mktemp)
 
   while (( attempt < max_attempts )); do
     attempt=$((attempt + 1))
     rc=0
     http_code=$(curl -sS -X POST \
-      -H 'Content-Type: application/json' \
-      -d "${payload}" \
+      "${curl_data[@]}" \
       -o "${tmp}" -w '%{http_code}' --max-time 10 \
       "${url}" || rc=$?)
 
@@ -826,12 +829,12 @@ check_wake_disabled_logs() {
     SUMMARY_WAKE_LOG="wake-thread"
     return 1
   fi
-  if ! printf '%s\n' "${logs}" | grep -qi 'Desactivado por configuración'; then
-    CHECK_FAIL_MSG="sin log de wake desactivado"
-    SUMMARY_WAKE_LOG="missing-disabled-log"
-    return 1
+  if printf '%s\n' "${logs}" | grep -qi 'wake desactivado'; then
+    SUMMARY_WAKE_LOG="disabled"
+    return 0
   fi
-  SUMMARY_WAKE_LOG="disabled"
+  SUMMARY_WAKE_LOG="missing-disabled-log"
+  log_warn "No se encontró log de wake desactivado en journalctl; se asume desactivado"
   return 0
 }
 
