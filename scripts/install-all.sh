@@ -691,20 +691,21 @@ check_voice_list_endpoint() {
   return 1
 }
 
+# [codex-fix] switched from /tts/say to /tts/synthesize (miniweb compatibility)
 validate_tts_say() {
   log_step "Validando TTS (say)"
   local host="${BASCULA_HOST:-127.0.0.1}"
   local tts_port="${TTS_PORT:-8080}"
-  local url="${TTS_URL:-http://${host}:${tts_port}/api/voice/tts/say}"
+  local base_url="${TTS_URL:-http://${host}:${tts_port}/api/voice/tts/synthesize}"
   local text="${TTS_TEXT:-Instalación completada}"
   local voice="${TTS_VOICE:-}"
   local attempt=0 max_attempts=3 backoff=2 rc=0 http_code tmp backend=""
-  local encoded_text encoded_voice post_fields
+  local encoded_text encoded_voice url
   encoded_text=$(urlencode "${text}")
-  post_fields="text=${encoded_text}"
+  url="${base_url}?text=${encoded_text}"
   if [[ -n "${voice}" ]]; then
     encoded_voice=$(urlencode "${voice}")
-    post_fields="${post_fields}&voice=${encoded_voice}"
+    url="${url}&voice=${encoded_voice}"
   fi
   tmp=$(mktemp)
 
@@ -714,7 +715,6 @@ validate_tts_say() {
     http_code=$(curl -sS \
       -o "${tmp}" -w '%{http_code}' --max-time 10 \
       -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
-      --data "${post_fields}" \
       "${url}" || rc=$?)
 
     if [[ ${rc} -eq 0 && ( "${http_code}" == "200" || "${http_code}" == "204" ) ]]; then
