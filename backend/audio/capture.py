@@ -113,13 +113,46 @@ class AudioCaptureSession:
             proc.kill()
             raise AudioCaptureError("no-stdout", "arecord no expone stdout")
 
-        deadline = time.monotonic() + timeout if timeout and timeout > 0 else None
+        stdout = proc.stdout
+        probe_timeout = 2.0
+        if timeout and timeout > 0:
+            probe_timeout = min(timeout, 2.0)
+        probe_deadline = time.monotonic() + probe_timeout if probe_timeout and probe_timeout > 0 else None
+        if probe_deadline is not None:
+            ready = False
+            while time.monotonic() < probe_deadline:
+                if proc.poll() is not None:
+                    break
+                try:
+                    if stdout.peek(1):  # type: ignore[attr-defined]
+                        ready = True
+                        break
+                except AttributeError:
+                    ready = True
+                    break
+                except Exception:
+                    time.sleep(0.05)
+                    continue
+                time.sleep(0.05)
+
+            if proc.poll() is not None:
+                err = proc.stderr.read().decode(errors="ignore") if proc.stderr else ""
+                raise AudioCaptureError(
+                    "process-exit",
+                    f"arecord terminó antes de entregar audio: {err.strip()}",
+                )
+
+            if not ready:
+                raise AudioCaptureTimeout("timeout", "arecord no entregó audio inicial a tiempo")
+
+        session_deadline = time.monotonic() + timeout if timeout and timeout > 0 else None
+
         return cls(
             device=resolved_device,
             sample_rate=resolved_rate,
             frame_bytes=frame_bytes,
             _proc=proc,
-            _deadline=deadline,
+            _deadline=session_deadline,
         )
 
     def __enter__(self) -> "AudioCaptureSession":

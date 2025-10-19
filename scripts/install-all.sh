@@ -835,6 +835,26 @@ check_wake_disabled_logs() {
   return 0
 }
 
+check_miniweb_module_errors() {
+  if ! command -v journalctl >/dev/null 2>&1; then
+    SUMMARY_MINIWEB_IMPORT="journalctl-missing"
+    return 0
+  fi
+  local logs
+  logs=$(journalctl -u bascula-miniweb.service -n 400 --no-pager 2>/dev/null || true)
+  if [[ -z "${logs}" ]]; then
+    SUMMARY_MINIWEB_IMPORT="no-logs"
+    return 0
+  fi
+  if printf '%s\n' "${logs}" | grep -qi 'ModuleNotFoundError'; then
+    CHECK_FAIL_MSG="ModuleNotFoundError detectado en bascula-miniweb"
+    SUMMARY_MINIWEB_IMPORT="module-error"
+    return 1
+  fi
+  SUMMARY_MINIWEB_IMPORT="clean"
+  return 0
+}
+
 check_scale_health() {
   local url="http://127.0.0.1/api/health"
   local tmp status rc=0
@@ -1907,6 +1927,7 @@ BASCULA_WAKE_ENABLED=false
 BASCULA_VOSK_ENABLED=false
 BASCULA_LISTEN_ENABLED=false
 DISABLE_WAKE=1
+BASCULA_AUDIO_DEVICE=bascula_out
 BASCULA_MIC_DEVICE=bascula_mix_in
 BASCULA_SAMPLE_RATE=16000
 EOF
@@ -1916,6 +1937,69 @@ EOF
   fi
   install -o root -g root -m0644 "${tmp}" "${file}"
   rm -f "${tmp}"
+}
+
+ensure_miniweb_env_file() {
+  local file="/etc/default/bascula-miniweb"
+  local tmp="${file}.tmp"
+  cat <<'EOF' > "${tmp}"
+BASCULA_WAKE_ENABLED=false
+BASCULA_VOSK_ENABLED=false
+BASCULA_LISTEN_ENABLED=false
+DISABLE_WAKE=1
+BASCULA_AUDIO_DEVICE=bascula_out
+BASCULA_MIC_DEVICE=bascula_mix_in
+BASCULA_SAMPLE_RATE=16000
+EOF
+  if [[ -f "${file}" ]] && cmp -s "${tmp}" "${file}"; then
+    rm -f "${tmp}"
+    return
+  fi
+  install -o root -g root -m0644 "${tmp}" "${file}"
+  rm -f "${tmp}"
+}
+
+precompile_backend_release() {
+  local python_bin=""
+  if [[ ! -d "${CURRENT_LINK}" ]]; then
+    log_warn "Ruta ${CURRENT_LINK} no disponible; omitiendo precompilación"
+    return 0
+  fi
+  if command -v python >/dev/null 2>&1; then
+    python_bin="$(command -v python)"
+  elif command -v python3 >/dev/null 2>&1; then
+    python_bin="$(command -v python3)"
+  else
+    log_warn "python no disponible; omitiendo precompilación"
+    return 0
+  }
+
+  log_step "Precompilando bytecode del backend"
+  if ! "${python_bin}" -m compileall -q "${CURRENT_LINK}"; then
+    log_warn "compileall falló para ${CURRENT_LINK}"
+  else
+    log "Bytecode generado en ${CURRENT_LINK}"
+  fi
+
+  local import_output
+  if ! import_output=$(
+    PYTHONPATH="${CURRENT_LINK}:${PYTHONPATH:-}" "${python_bin}" - <<'PY' 2>&1
+import importlib
+import sys
+
+try:
+    importlib.import_module("backend.audio.capture")
+except Exception as exc:  # pragma: no cover - validación runtime
+    print(f"[install][err] import backend.audio.capture failed: {exc}")
+    sys.exit(1)
+else:
+    print("[install][ok] backend.audio.capture importable")
+PY
+  ); then
+    log_err "[install][err] import backend.audio.capture failed: ${import_output}"
+    exit 1
+  fi
+  printf '%s\n' "${import_output}"
 }
 
 get_playback_hw() {
@@ -2624,6 +2708,21 @@ smoke_failure_diagnostics() {
   print_xorg_tail_relevant "warn"
 }
 
+report_voice_ptt_status() {
+  if ! command -v journalctl >/dev/null 2>&1; then
+    return 0
+  fi
+  local logs
+  logs=$(journalctl -u bascula-miniweb.service -n 200 --no-pager 2>/dev/null || true)
+  if [[ -z "${logs}" ]]; then
+    return 0
+  fi
+  if printf '%s\n' "${logs}" | grep -qi 'VOICE PTT no disponible'; then
+    log_warn "VOICE PTT no disponible; continuando."
+  fi
+  return 0
+}
+
 run_final_smoke_tests() {
   log_step "Smoke test final"
   local failure=0
@@ -2679,6 +2778,7 @@ run_final_checks() {
   final_check "miniweb status" check_http_endpoint "http://127.0.0.1:8080/api/miniweb/status" ""
   final_check "health backend directo" check_http_endpoint "http://127.0.0.1:8081/health" ""
   final_check "health vía nginx" check_scale_health
+  final_check "miniweb sin ModuleNotFoundError" check_miniweb_module_errors
   final_check "cabeceras SSE en proxy" check_sse_headers "http://127.0.0.1/api/scale/events"
   final_check "voces Piper instaladas" check_piper_voices_installed "${PIPER_VOICES_DIR}"
   final_check "piper CLI disponible" check_piper_cli_ready
@@ -2750,6 +2850,7 @@ run_final_checks() {
   fi
 
   run_final_smoke_tests
+  report_voice_ptt_status
 
   log "[install][ok] Wake/Vosk desactivado por defecto; micro disponible para captura bajo demanda (Modo Receta)."
 
@@ -2805,6 +2906,8 @@ main() {
   ensure_voice_symlinks
   ensure_audio_env_file
   ensure_backend_env_file
+  ensure_miniweb_env_file
+  precompile_backend_release
   install_asound_conf
   ensure_user_groups
   record_audio_devices

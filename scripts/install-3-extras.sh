@@ -6,83 +6,61 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   exit 1
 fi
 
-echo "[+] Configurando ALSA (mic USB compartido y salida HiFiBerry)"
+echo "[+] Configurando ALSA (dsnoop/dmix por defecto)"
 cat <<'EOC' > /etc/asound.conf
-##### ENTRADA (MICRÓFONO USB) — compatible 48 kHz/16 kHz #####
-# Ajusta card/device según tu arecord -l
-pcm.dsnoop_mic {
-  type dsnoop
-  ipc_key 2048
-  slave {
-    pcm "hw:0,0"
-    rate 48000
-    channels 1
-    format S16_LE
-    period_time 0
-    period_size 1024
-    buffer_size 4096
-  }
-}
-
-# Ganancia software (control SoftMicGain) encadenada a dsnoop
-pcm.soft_mic {
-  type softvol
-  slave.pcm "dsnoop_mic"
-  control {
-    name "SoftMicGain"
-    card 0
-  }
-  use_dB yes
-  min_dB -30.0
-  max_dB +20.0
-  resolution 100
-}
-
-# EXPOSICIÓN PARA LAS APPS con re-muestreo automático
-pcm.bascula_mix_in {
-  type plug
-  slave.pcm "soft_mic"
-}
-
-ctl.bascula_mix_in {
-  type hw
-  card 0
-}
-
-##### SALIDA (HIFIBERRY DAC) #####
-# Ajusta la card del DAC si difiere (ver `aplay -l`). En nuestros equipos suele ser card 1, device 0.
-pcm.raw_dac {
-  type hw
-  card 1
-  device 0
-}
-
-# dmix para permitir múltiples clientes de salida simultáneos
-pcm.dmix_dac {
-  type dmix
-  ipc_key 2049
-  slave {
-    pcm "raw_dac"
-    format S16_LE
-    rate 44100
-    channels 2
-    period_time 0
-    period_size 1024
-    buffer_size 4096
-  }
-}
-
-# plug para adaptar cualquier formato a lo que acepte dmix_dac
+# Salida principal con dmix para permitir múltiples clientes simultáneos.
 pcm.bascula_out {
-  type plug
-  slave.pcm "dmix_dac"
+    type plug
+    slave.pcm "bascula_out_dmix"
+}
+
+pcm.!default {
+    type plug
+    slave.pcm "bascula_out"
+}
+
+pcm.bascula_out_dmix {
+    type dmix
+    ipc_key 8675309
+    slave {
+        pcm "hw:CARD=sndrpihifiberry,DEV=0"
+        channels 2
+        rate 48000
+        format S16_LE
+    }
 }
 
 ctl.bascula_out {
-  type hw
-  card 1
+    type hw
+    card "sndrpihifiberry"
+}
+
+ctl.!default {
+    type hw
+    card "sndrpihifiberry"
+}
+
+# Entrada compartida por dsnoop (micrófono USB típico).
+pcm.bascula_mix_in {
+    type plug
+    slave.pcm "bascula_mix_in_raw"
+}
+
+pcm.bascula_mix_in_raw {
+    type dsnoop
+    ipc_key 8675310
+    slave {
+        pcm "plughw:CARD=Device,DEV=0"
+        channels 1
+    }
+}
+
+ctl.bascula_mix_in {
+    type hw
+    card "Device"
 }
 EOC
+echo "[i] Ajusta CARD/DEV en /etc/asound.conf si tu DAC o micro difieren de sndrpihifiberry/Device"
 
 if command -v amixer >/dev/null 2>&1; then
   amixer -c 0 sset 'Mic' 16 cap >/dev/null 2>&1 || true

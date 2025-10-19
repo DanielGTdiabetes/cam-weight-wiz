@@ -120,6 +120,13 @@ Tu backend debe exponer estos endpoints:
 - `POST /api/timer/start` - Temporizador
 - Ver `INTEGRATION.md` para lista completa
 
+### Voz y Push-to-Talk
+
+- Tras la instalación, **la voz queda desactivada por defecto** para garantizar que la miniweb no falle si faltan dependencias de audio. Los servicios `bascula-backend` y `bascula-miniweb` leen sus banderas en `/etc/default/bascula-backend` y `/etc/default/bascula-miniweb` (`BASCULA_WAKE_ENABLED`, `BASCULA_VOSK_ENABLED`, `BASCULA_LISTEN_ENABLED`, `DISABLE_WAKE`, `BASCULA_AUDIO_DEVICE`, `BASCULA_MIC_DEVICE`, `BASCULA_SAMPLE_RATE`).
+- El micro `bascula_mix_in` sólo se abre bajo demanda en **Modo Receta**. Comprueba que `pgrep -a arecord` esté vacío tras el arranque y que sólo aparezca cuando actives PTT desde la UI.
+- Para habilitar Push-to-Talk: exporta `FEATURE_VOICE_PTT=true` en el entorno de `bascula-miniweb` y activa la escucha en el backend con `BASCULA_LISTEN_ENABLED=true`; reinicia ambos servicios.
+- La escucha continua o wake-word siguen desaconsejadas; si necesitas reactivarlas usa `BASCULA_WAKE_ENABLED=true` y valida que el dispositivo `bascula_mix_in` con `dsnoop` no bloquee otras apps de audio.
+
 ### 3. Verificar Instalación
 
 ```bash

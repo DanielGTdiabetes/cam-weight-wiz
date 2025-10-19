@@ -12,9 +12,7 @@ Environment=PATH=/opt/bascula/current/.venv/bin:/usr/local/sbin:/usr/local/bin:/
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-/etc/default/bascula
 EnvironmentFile=-/etc/default/bascula-audio
-Environment=BASCULA_AUDIO_DEVICE=bascula_out
-Environment=BASCULA_MIC_DEVICE=bascula_mix_in
-Environment=BASCULA_SAMPLE_RATE=16000
+EnvironmentFile=-/etc/default/bascula-miniweb
 Environment=BASCULA_CFG_DIR=/home/pi/.bascula
 Environment=BASCULA_CAPTURES_DIR=/run/bascula/captures
 Environment=BACKEND_BASE_URL=http://127.0.0.1:8081

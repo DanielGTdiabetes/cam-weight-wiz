@@ -71,8 +71,6 @@ _HX711_AVAILABLE = HX711Service is not None
 _SERIAL_AVAILABLE = SerialScaleService is not None
 _LOGGED_HX711_WARNING = False
 _LOGGED_SERIAL_WARNING = False
-from backend.voice import router as voice_router
-from backend.routes.voice import router as voice_ptt_router
 from backend.camera import router as camera_router
 from backend.wake import (
     init_wake_if_enabled,
@@ -116,6 +114,13 @@ LOG_OTA = logging.getLogger("bascula.ota")
 LOG_MINIWEB = logging.getLogger("bascula.miniweb")
 LOG_APP = logging.getLogger("bascula.app")
 LOG_WAKE = logging.getLogger("bascula.wake")
+
+VOICE_PTT_ENABLED = os.getenv("FEATURE_VOICE_PTT", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _env_flag(name: str, default: bool) -> bool:
@@ -3838,8 +3843,24 @@ if enable_wake:
 else:
     LOG_WAKE.info("[wake] Desactivado por configuración (por defecto)")
 
-app.include_router(voice_router)
-app.include_router(voice_ptt_router)
+try:
+    from backend.voice import router as voice_router  # type: ignore
+except Exception as exc:  # pragma: no cover - tolerante en runtime
+    LOG_MINIWEB.warning("Voice API no disponible (%s); miniweb continúa sin voz", exc)
+else:
+    app.include_router(voice_router)
+
+if VOICE_PTT_ENABLED:
+    try:
+        from backend.routes.voice import router as voice_ptt_router  # type: ignore
+    except Exception as exc:  # pragma: no cover - tolerante en runtime
+        LOG_MINIWEB.warning("VOICE PTT no disponible (%s); continuando sin PTT", exc)
+    else:
+        app.include_router(voice_ptt_router)
+        LOG_MINIWEB.info("VOICE PTT habilitado y router montado")
+else:
+    LOG_MINIWEB.info("VOICE PTT deshabilitado por configuración")
+
 app.include_router(camera_router)
 app.include_router(wake_router)
 app.include_router(food_router, prefix="/api/food", tags=["food"])
