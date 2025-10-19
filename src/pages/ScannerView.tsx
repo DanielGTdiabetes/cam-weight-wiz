@@ -6,10 +6,12 @@ import { useToast } from "@/hooks/use-toast";
 import { Countdown } from "@/components/Countdown";
 import { useCountdown } from "@/hooks/useCountdown";
 import { useTimerStore } from "@/state/timerStore";
+import { storage } from "@/services/storage";
 
 interface CaptureResponse {
   ok?: boolean;
   path?: string;
+  url?: string;
   size?: number;
   detail?: string;
   message?: string;
@@ -18,7 +20,7 @@ interface CaptureResponse {
 
 export const ScannerView = () => {
   const [isCapturing, setIsCapturing] = useState(false);
-  const [capturePath, setCapturePath] = useState<string | null>(null);
+  const [captureUrl, setCaptureUrl] = useState<string | null>(null);
   const [captureTs, setCaptureTs] = useState<number | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const { toast } = useToast();
@@ -27,26 +29,69 @@ export const ScannerView = () => {
   const { remainingMs, mmss, phase } = useCountdown({ durationMs, startedAt });
   const showCountdown = durationMs > 0 || startedAt !== null;
 
+  const backendOrigin = useMemo(() => {
+    if (typeof window === "undefined") {
+      return "http://127.0.0.1:8081";
+    }
+
+    try {
+      const settings = storage.getSettings();
+      const apiUrl = typeof settings.apiUrl === "string" ? settings.apiUrl.trim() : "";
+      if (apiUrl) {
+        return apiUrl;
+      }
+    } catch (error) {
+      console.debug("No se pudo leer apiUrl desde storage", error);
+    }
+
+    try {
+      const current = new URL(window.location.href);
+      if (current.port === "8080") {
+        current.port = "8081";
+        return current.origin;
+      }
+      return current.origin;
+    } catch (error) {
+      console.warn("No se pudo resolver el origen actual", error);
+      return "http://127.0.0.1:8081";
+    }
+  }, []);
+
+  const buildUrl = useCallback(
+    (path: string) => {
+      if (!path) {
+        return backendOrigin;
+      }
+
+      if (/^https?:\/\//i.test(path)) {
+        return path;
+      }
+
+      try {
+        return new URL(path, backendOrigin).toString();
+      } catch (error) {
+        console.warn("No se pudo componer la URL absoluta", { path, error });
+        return path;
+      }
+    },
+    [backendOrigin],
+  );
+
   const imageUrl = useMemo(() => {
-    if (!capturePath) {
+    if (!captureUrl) {
       return null;
     }
     const tsValue = captureTs ?? Date.now();
-    const basePath = capturePath.startsWith("http")
-      ? capturePath
-      : capturePath.startsWith("/")
-        ? capturePath
-        : `/${capturePath}`;
-    const separator = basePath.includes("?") ? "&" : "?";
-    return `${basePath}${separator}t=${tsValue}`;
-  }, [capturePath, captureTs]);
+    const separator = captureUrl.includes("?") ? "&" : "?";
+    return `${captureUrl}${separator}t=${tsValue}`;
+  }, [captureUrl, captureTs]);
 
   const handleCapture = useCallback(async () => {
     setIsCapturing(true);
     setErrorMessage(null);
 
     try {
-      const response = await fetch("/api/camera/capture-to-file", {
+      const response = await fetch(buildUrl("/api/camera/capture-to-file"), {
         method: "POST",
       });
 
@@ -55,25 +100,31 @@ export const ScannerView = () => {
         payload = (await response.json()) as CaptureResponse;
       } catch (parseError) {
         if (!response.ok) {
-          throw parseError instanceof Error
-            ? parseError
-            : new Error("capture_failed");
+          throw new Error(`HTTP ${response.status}`);
         }
       }
 
-      const captureOk = response.ok && (payload?.ok ?? true);
+      if (!response.ok) {
+        const backendMessage =
+          payload?.detail || payload?.message || payload?.error;
+        throw new Error(backendMessage || `HTTP ${response.status}`);
+      }
+
+      const captureOk = payload?.ok ?? true;
       if (!captureOk) {
         const backendMessage =
           payload?.detail || payload?.message || payload?.error;
         throw new Error(backendMessage || "capture_failed");
       }
 
-      const pathValue = payload?.path;
+      const pathValue = payload?.url ?? payload?.path;
       if (typeof pathValue !== "string" || pathValue.trim().length === 0) {
         throw new Error("capture_missing_path");
       }
 
-      setCapturePath(pathValue.trim());
+      const normalizedPath = pathValue.trim();
+      const absoluteUrl = buildUrl(normalizedPath);
+      setCaptureUrl(absoluteUrl);
       setCaptureTs(Date.now());
     } catch (error) {
       console.error("Error al capturar imagen", error);
@@ -94,7 +145,7 @@ export const ScannerView = () => {
     } finally {
       setIsCapturing(false);
     }
-  }, [toast]);
+  }, [buildUrl, toast]);
 
   return (
     <div className="flex h-full flex-col gap-4 bg-background p-4">
