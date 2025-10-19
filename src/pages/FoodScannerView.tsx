@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Camera, Trash2, Check, X, Barcode, Syringe, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { BolusCalculator } from "@/components/BolusCalculator";
@@ -14,6 +16,52 @@ import { ApiError } from "@/services/apiWrapper";
 import { buildFoodItem, toFoodItem, type FoodScannerConfirmedPayload, type FoodItem } from "@/features/food-scanner/foodItem";
 import { formatWeight } from "@/lib/format";
 import { useScaleDecimals } from "@/hooks/useScaleDecimals";
+
+type CaptureMode = "backend" | "browser";
+
+interface CaptureResponse {
+  ok?: boolean;
+  path?: string | null;
+  url?: string | null;
+  detail?: string | null;
+  message?: string | null;
+  error?: string | null;
+}
+
+interface RemoteCaptureOutcome {
+  result: { blob: Blob; previewUrl: string } | null;
+  errorMessage: string | null;
+}
+
+const kioskUserAgentPattern = /(bascula|raspberry|aarch64)/i;
+
+const isLikelyLocalDevice = (): boolean => {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  try {
+    const hostname = window.location?.hostname ?? "";
+    const userAgent = window.navigator?.userAgent ?? "";
+    if (!hostname) {
+      return kioskUserAgentPattern.test(userAgent);
+    }
+
+    const normalizedHost = hostname.trim().toLowerCase();
+    if (
+      normalizedHost === "localhost" ||
+      normalizedHost === "127.0.0.1" ||
+      normalizedHost === "::1" ||
+      normalizedHost.endsWith(".local")
+    ) {
+      return true;
+    }
+
+    return kioskUserAgentPattern.test(userAgent);
+  } catch {
+    return true;
+  }
+};
 
 export const FoodScannerView = () => {
   const { weight: scaleWeight } = useScaleWebSocket();
@@ -30,6 +78,7 @@ export const FoodScannerView = () => {
   const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState(false);
   const [prefilledBarcode, setPrefilledBarcode] = useState<string | undefined>(undefined);
   const [isRemoteCapturing, setIsRemoteCapturing] = useState(false);
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("backend");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -41,6 +90,7 @@ export const FoodScannerView = () => {
 
   const { toast } = useToast();
   const decimals = useScaleDecimals();
+  const allowBrowserCapture = useMemo(() => !isLikelyLocalDevice(), []);
   const renderWeight = (value: number | null | undefined) => {
     const formatted = formatWeight(value, decimals);
     return formatted === '–' ? formatted : `${formatted} g`;
@@ -48,6 +98,61 @@ export const FoodScannerView = () => {
 
   const settings = storage.getSettings();
   const isDiabetesMode = settings.diabetesMode;
+
+  const backendOrigin = useMemo(() => {
+    try {
+      const apiUrl = typeof settings?.apiUrl === "string" ? settings.apiUrl.trim() : "";
+      if (apiUrl) {
+        return apiUrl;
+      }
+    } catch (error) {
+      logger.debug("[scanner] Failed to read settings apiUrl", { error });
+    }
+
+    if (typeof window === "undefined") {
+      return "http://127.0.0.1:8081";
+    }
+
+    try {
+      const current = new URL(window.location.href);
+      const port = current.port;
+
+      if (port === "8080") {
+        current.port = "8081";
+        return current.origin;
+      }
+
+      if (port === "" || port === "80" || port === "443") {
+        current.port = "8081";
+        return current.origin;
+      }
+
+      return current.origin;
+    } catch (error) {
+      logger.debug("[scanner] Unable to derive backend origin", { error });
+      return "http://127.0.0.1:8081";
+    }
+  }, [settings?.apiUrl]);
+
+  const buildBackendUrl = useCallback(
+    (path: string) => {
+      if (!path) {
+        return backendOrigin;
+      }
+
+      if (/^https?:\/\//i.test(path)) {
+        return path;
+      }
+
+      try {
+        return new URL(path, backendOrigin).toString();
+      } catch (error) {
+        logger.debug("[scanner] Failed to compose backend URL", { path, error });
+        return path;
+      }
+    },
+    [backendOrigin],
+  );
 
   const totals = useMemo(
     () =>
@@ -133,7 +238,7 @@ export const FoodScannerView = () => {
     hasHydratedHistoryRef.current = true;
   }, []);
 
-  useEffect(() => {
+  useEffect(() => {    
     hydrateScannerHistory();
   }, [hydrateScannerHistory]);
 
@@ -190,8 +295,19 @@ export const FoodScannerView = () => {
 
   useEffect(() => () => stopCamera(), [stopCamera]);
 
+  useEffect(() => {    
+    if (captureMode === "backend") {
+      stopCamera();
+      setCameraError(null);
+    }
+  }, [captureMode, stopCamera]);
+
+  useEffect(() => {
+    console.info("[scanner] capture mode:", captureMode);
+  }, [captureMode]);
+
   const captureRemotePhoto = useCallback(
-    async (options?: { silent?: boolean; timeoutMs?: number }): Promise<{ blob: Blob; previewUrl: string } | null> => {
+    async (options?: { silent?: boolean; timeoutMs?: number }): Promise<RemoteCaptureOutcome> => {
       const silent = options?.silent ?? false;
       const timeoutMs = options?.timeoutMs ?? 8000;
 
@@ -209,47 +325,93 @@ export const FoodScannerView = () => {
         }
       };
 
+      const fail = (message: string): RemoteCaptureOutcome => {
+        if (!silent) {
+          setCameraError(message);
+          toast({
+            title: "Captura fallida",
+            description: message,
+            variant: "destructive",
+          });
+        }
+        return { result: null, errorMessage: message };
+      };
+
       try {
-        const response = await runWithTimeout("/api/camera/capture-to-file", { method: "POST" });
+        const endpoint = buildBackendUrl("/api/camera/capture-to-file");
+        const response = await runWithTimeout(endpoint, { method: "POST" });
+        let payload: CaptureResponse | null = null;
+
+        try {
+          payload = (await response.json()) as CaptureResponse;
+        } catch (parseError) {
+          if (!response.ok) {
+            console.error("[scanner] backend capture failed:", response.status, null);
+            logger.error("Remote capture JSON parse failed", { parseError });
+            return fail(`HTTP ${response.status}`);
+          }
+        }
+
         if (!response.ok) {
-          throw new Error(`capture_failed_${response.status}`);
+          const message =
+            payload?.detail || payload?.message || payload?.error || `HTTP ${response.status}`;
+          console.error("[scanner] backend capture failed:", response.status, payload);
+          logger.error("Remote capture request failed", { status: response.status, payload });
+          return fail(message);
         }
-        const payload = (await response.json()) as { path?: string | null };
-        const capturePath = payload?.path;
-        if (typeof capturePath !== "string" || capturePath.trim().length === 0) {
-          throw new Error("capture_missing_path");
+
+        const captureOk = payload?.ok ?? true;
+        if (!captureOk) {
+          const message =
+            payload?.detail || payload?.message || payload?.error || "La captura remota no se completó.";
+          console.error("[scanner] backend capture failed:", response.status, payload);
+          logger.error("Remote capture reported failure", { payload });
+          return fail(message);
         }
-        const trimmedPath = capturePath.trim();
-        const origin =
-          typeof window !== "undefined" && window.location?.origin
-            ? window.location.origin
-            : "";
-        const absoluteUrl =
-          trimmedPath.startsWith("http://") || trimmedPath.startsWith("https://")
-            ? trimmedPath
-            : `${origin}${trimmedPath.startsWith("/") ? "" : "/"}${trimmedPath}`;
+
+        const pathValue = payload?.url ?? payload?.path;
+        if (typeof pathValue !== "string" || pathValue.trim().length === 0) {
+          logger.error("Remote capture missing path", { payload });
+          return fail("La captura remota no devolvió una ruta válida.");
+        }
+
+        const normalizedPath = pathValue.trim();
+        const absoluteUrl = buildBackendUrl(normalizedPath);
         const bustUrl = `${absoluteUrl}${absoluteUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+        console.info("[scanner] capture via backend:", bustUrl);
+
         const imageResponse = await runWithTimeout(bustUrl, { cache: "no-store" });
         if (!imageResponse.ok) {
-          throw new Error(`image_fetch_failed_${imageResponse.status}`);
+          console.error("[scanner] backend capture failed:", imageResponse.status, null);
+          logger.error("Remote capture image fetch failed", { status: imageResponse.status });
+          return fail(`No se pudo descargar la imagen (HTTP ${imageResponse.status}).`);
         }
+
         const blob = await imageResponse.blob();
         setPreviewUrl(bustUrl);
-        return { blob, previewUrl: bustUrl };
+        if (!silent) {
+          setCameraError(null);
+        }
+
+        return { result: { blob, previewUrl: bustUrl }, errorMessage: null };
       } catch (error) {
-        const isAbortError = error instanceof DOMException && error.name === "AbortError";
-        logger.error("Remote camera capture failed", { error, aborted: isAbortError });
-        return null;
+        const message =
+          error instanceof Error && error.message
+            ? error.message
+            : "No se pudo capturar la imagen desde la báscula.";
+        console.error("[scanner] backend capture failed:", message, error);
+        logger.error("Remote capture threw exception", { error });
+        return fail(message);
       } finally {
         if (!silent) {
           setIsRemoteCapturing(false);
         }
       }
     },
-    [],
+    [buildBackendUrl, toast],
   );
 
-  const startCamera = useCallback(async () => {
+  const startBrowserCamera = useCallback(async () => {
     setCameraError(null);
     setIsCameraStarting(true);
 
@@ -316,7 +478,7 @@ export const FoodScannerView = () => {
       description: "No pudimos acceder a la cámara del navegador, intentando captura remota…",
     });
 
-    const remoteCapture = await captureRemotePhoto({ silent: false, timeoutMs: 7000 });
+    const { result: remoteCapture, errorMessage } = await captureRemotePhoto({ silent: true, timeoutMs: 7000 });
     if (remoteCapture) {
       remoteCaptureCacheRef.current = remoteCapture;
       setCameraError(null);
@@ -325,21 +487,42 @@ export const FoodScannerView = () => {
         description: "La imagen se obtuvo desde la cámara de la báscula.",
       });
     } else {
-      const description = localErrorMessage
-        ? "No se pudo acceder a la cámara del navegador ni obtener una captura desde la báscula."
-        : "No se pudo obtener una captura desde la cámara integrada de la báscula.";
-      setCameraError(
-        localErrorMessage
-          ? `${localErrorMessage} Además, no se pudo obtener una captura desde la cámara integrada de la báscula.`
-          : "No se pudo obtener una captura desde la cámara integrada de la báscula.",
-      );
+      const description =
+        errorMessage ||
+        (localErrorMessage
+          ? "No se pudo acceder a la cámara del navegador ni obtener una captura desde la báscula."
+          : "No se pudo obtener una captura desde la cámara integrada de la báscula.");
+      setCameraError(description);
       toast({
         title: "Sin cámara disponible",
-        description,
+        description: description ||
+          "No se pudo obtener una captura desde la cámara integrada de la báscula.",
         variant: "destructive",
       });
     }
   }, [captureRemotePhoto, toast]);
+
+  const handleCaptureModeToggle = useCallback(
+    (checked: boolean) => {
+      if (!allowBrowserCapture) {
+        return;
+      }
+      setCaptureMode(checked ? "browser" : "backend");
+    },
+    [allowBrowserCapture],
+  );
+
+  const handleActivateCamera = useCallback(async () => {
+    if (captureMode === "backend") {
+      const { result: remoteCapture } = await captureRemotePhoto({ silent: false, timeoutMs: 7000 });
+      if (remoteCapture) {
+        remoteCaptureCacheRef.current = remoteCapture;
+      }
+      return;
+    }
+
+    await startBrowserCamera();
+  }, [captureMode, captureRemotePhoto, startBrowserCamera]);
 
   const capturePhoto = useCallback(async (): Promise<Blob | null> => {
     if (!videoRef.current) {
@@ -451,7 +634,7 @@ export const FoodScannerView = () => {
     }
 
     if (!blob) {
-      const remoteCapture = await captureRemotePhoto();
+      const { result: remoteCapture } = await captureRemotePhoto();
       if (remoteCapture) {
         blob = remoteCapture.blob;
         remoteCaptureCacheRef.current = remoteCapture;
@@ -552,55 +735,108 @@ export const FoodScannerView = () => {
       <div className="grid gap-6 md:grid-cols-[1.4fr_1fr]">
         <Card className="relative overflow-hidden border-primary/30">
           <div className="p-6">
-            <div className="mb-4 flex items-center justify-between">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h2 className="text-2xl font-bold">Captura con cámara</h2>
                 <p className="text-sm text-muted-foreground" style={{ fontFeatureSettings: '"tnum"' }}>
                   Peso detectado: {renderWeight(scaleWeight)}
                 </p>
               </div>
-              <div className="flex gap-2">
-                <Button
-                  onClick={startCamera}
-                  variant="secondary"
-                  size="sm"
-                  disabled={isCameraActive || isCameraStarting}
-                >
-                  {isCameraStarting ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Activando…
-                    </>
-                  ) : (
-                    <>
-                      <Camera className="mr-2 h-4 w-4" /> Activar cámara
-                    </>
+              <div className="flex flex-col items-end gap-3">
+                {allowBrowserCapture ? (
+                  <div className="flex items-center gap-3 rounded-lg border border-border bg-muted/40 px-3 py-2">
+                    <Switch
+                      id="capture-mode-toggle"
+                      checked={captureMode === "browser"}
+                      onCheckedChange={handleCaptureModeToggle}
+                    />
+                    <div className="flex flex-col">
+                      <Label
+                        htmlFor="capture-mode-toggle"
+                        className="text-xs font-medium uppercase tracking-wide text-muted-foreground"
+                      >
+                        Modo de captura
+                      </Label>
+                      <span className="text-sm font-semibold">
+                        {captureMode === "backend" ? "Cámara de la báscula" : "Cámara del navegador"}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-primary">
+                    Modo: Cámara de la báscula
+                  </div>
+                )}
+                <div className="flex gap-2">
+                  <Button
+                    onClick={handleActivateCamera}
+                    variant="secondary"
+                    size="sm"
+                    disabled={
+                      captureMode === "backend"
+                        ? isRemoteCapturing
+                        : isCameraActive || isCameraStarting
+                    }
+                  >
+                    {captureMode === "backend" ? (
+                      isRemoteCapturing ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Capturando…
+                        </>
+                      ) : (
+                        <>
+                          <Camera className="mr-2 h-4 w-4" />
+                          {previewUrl ? "Capturar de nuevo" : "Capturar imagen"}
+                        </>
+                      )
+                    ) : isCameraStarting ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Activando…
+                      </>
+                    ) : (
+                      <>
+                        <Camera className="mr-2 h-4 w-4" /> Activar cámara
+                      </>
+                    )}
+                  </Button>
+                  {captureMode === "browser" && (
+                    <Button
+                      onClick={stopCamera}
+                      variant="outline"
+                      size="sm"
+                      disabled={!isCameraActive}
+                    >
+                      Detener
+                    </Button>
                   )}
-                </Button>
-                <Button
-                  onClick={stopCamera}
-                  variant="outline"
-                  size="sm"
-                  disabled={!isCameraActive}
-                >
-                  Detener
-                </Button>
+                </div>
               </div>
             </div>
 
             <div className="relative mb-4 rounded-xl border border-dashed border-primary/30 bg-muted/30">
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                className={cn(
-                  "h-64 w-full rounded-xl object-cover",
-                  !isCameraActive && "opacity-30"
-                )}
-              />
-              {!isCameraActive && !previewUrl && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-                  <Camera className="mb-2 h-8 w-8" />
-                  <p>Activa la cámara o sube una imagen desde archivos.</p>
+              {captureMode === "browser" ? (
+                <>
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    className={cn(
+                      "h-64 w-full rounded-xl object-cover",
+                      !isCameraActive && "opacity-30"
+                    )}
+                  />
+                  {!isCameraActive && !previewUrl && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
+                      <Camera className="mb-2 h-8 w-8" />
+                      <p>Activa la cámara o sube una imagen desde archivos.</p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="flex h-64 w-full flex-col items-center justify-center gap-2 text-muted-foreground">
+                  <Camera className="h-10 w-10 opacity-60" />
+                  <p className="text-sm font-medium">La captura se realizará desde la cámara de la báscula.</p>
+                  <p className="text-xs text-muted-foreground/80">Pulsa "Capturar imagen" para obtener una nueva foto.</p>
                 </div>
               )}
             </div>
