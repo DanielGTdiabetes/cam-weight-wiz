@@ -165,6 +165,32 @@ json_escape_string() {
   printf '%s' "${str}"
 }
 
+urlencode() {
+  local input="$1" encoded=""
+
+  if command -v jq >/dev/null 2>&1; then
+    encoded=$(printf '%s' "${input}" | jq -sRr @uri 2>/dev/null || true)
+  fi
+
+  if [[ -z "${encoded}" ]]; then
+    if command -v python3 >/dev/null 2>&1; then
+      encoded=$(BASCULA_URLENCODE_INPUT="${input}" python3 - <<'PY' 2>/dev/null || true
+import os
+import urllib.parse
+
+print(urllib.parse.quote(os.environ.get("BASCULA_URLENCODE_INPUT", ""), safe=""))
+PY
+)
+    fi
+  fi
+
+  if [[ -z "${encoded}" ]]; then
+    encoded="${input}"
+  fi
+
+  printf '%s' "${encoded}"
+}
+
 # --- Contexto de error / resumen final ---
 _last_cmd=''
 trap 'rc=$?; _last_cmd="$BASH_COMMAND"' DEBUG
@@ -675,19 +701,21 @@ validate_tts_say() {
   local text="${TTS_TEXT:-Instalación completada}"
   local voice="${TTS_VOICE:-}"
   local attempt=0 max_attempts=3 backoff=2 rc=0 http_code tmp backend=""
-  local -a curl_data=("--data-urlencode" "text=${text}")
+  local encoded_text encoded_voice request_url
+  encoded_text=$(urlencode "${text}")
+  request_url="${url}?text=${encoded_text}"
   if [[ -n "${voice}" ]]; then
-    curl_data+=("--data-urlencode" "voice=${voice}")
+    encoded_voice=$(urlencode "${voice}")
+    request_url+="&voice=${encoded_voice}"
   fi
   tmp=$(mktemp)
 
   while (( attempt < max_attempts )); do
     attempt=$((attempt + 1))
     rc=0
-    http_code=$(curl -sS -X POST \
-      "${curl_data[@]}" \
+    http_code=$(curl -sS \
       -o "${tmp}" -w '%{http_code}' --max-time 10 \
-      "${url}" || rc=$?)
+      "${request_url}" || rc=$?)
 
     if [[ ${rc} -eq 0 && ( "${http_code}" == "200" || "${http_code}" == "204" ) ]]; then
       SUMMARY_SAY_STATUS="HTTP ${http_code}"
