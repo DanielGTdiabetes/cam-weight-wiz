@@ -240,6 +240,12 @@ on_exit() {
 
   log "Log: ${BASCULA_LOG_FILE}"
 
+  if [[ ${REBOOT_FLAG} -eq 1 && -f "${STATE_DIR}/reboot-reasons.txt" ]]; then
+    if grep -q '^boot-config:' "${STATE_DIR}/reboot-reasons.txt"; then
+      log_warn "Se modificó ${BOOT_CONFIG_FILE}; reinicia la Raspberry Pi para aplicar la configuración de cámara/overlays."
+    fi
+  fi
+
   echo
   if [[ $rc -ne 0 ]]; then
     log_err "Instalación con errores. Revisa arriba y en: ${BASCULA_LOG_FILE}"
@@ -298,6 +304,11 @@ SUMMARY_MINIWEB_STATUS=""
 SUMMARY_KMS_STATUS=""
 SUMMARY_XORG_STATUS=""
 SUMMARY_AUDIO_DEVICES=""
+
+: "${DEFAULT_CAMERA_MODEL:=imx708}"
+: "${CAMERA_MODEL:=}"
+: "${CAMERA_SKIP_IMX708_OVERLAY:=0}"
+CAMERA_MODEL_SOURCE="unknown"
 
 PI_MODEL="$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)"
 IS_PI5=0
@@ -1177,6 +1188,45 @@ ensure_boot_config_backup() {
   fi
 }
 
+detect_expected_camera_sensor() {
+  if [[ -n "${CAMERA_MODEL:-}" ]]; then
+    CAMERA_MODEL_SOURCE="env"
+    printf '%s\n' "${CAMERA_MODEL}"
+    return 0
+  fi
+
+  local persisted
+  persisted="${STATE_DIR}/camera-model.txt"
+  if [[ -s "${persisted}" ]]; then
+    local stored
+    stored="$(head -n1 "${persisted}" 2>/dev/null | tr -d '\r')"
+    if [[ -n "${stored}" ]]; then
+      CAMERA_MODEL_SOURCE="state"
+      printf '%s\n' "${stored}"
+      return 0
+    fi
+  fi
+
+  if command -v libcamera-hello >/dev/null 2>&1; then
+    local detected
+    detected="$(libcamera-hello --list-cameras 2>/dev/null | sed -n 's/^[[:space:]]*[0-9]\+[[:space:]]*:[[:space:]]*\([[:alnum:]_.-]\+\).*/\1/p' | head -n1)"
+    if [[ -n "${detected}" ]]; then
+      CAMERA_MODEL_SOURCE="libcamera"
+      printf '%s\n' "${detected}"
+      return 0
+    fi
+  fi
+
+  if [[ -n "${DEFAULT_CAMERA_MODEL:-}" ]]; then
+    CAMERA_MODEL_SOURCE="default"
+    printf '%s\n' "${DEFAULT_CAMERA_MODEL}"
+    return 0
+  fi
+
+  CAMERA_MODEL_SOURCE="unknown"
+  return 0
+}
+
 remove_boot_config_lines_matching() {
   local pattern="$1"
   local file="${BOOT_CONFIG_FILE}"
@@ -1389,8 +1439,31 @@ ensure_boot_overlays() {
   fi
   remove_boot_config_lines_matching '^disable_fw_kms_setup=.*'
   ensure_boot_config_backup
+  local expected_camera
+  expected_camera="$(detect_expected_camera_sensor)"
+  if [[ -n "${expected_camera}" ]]; then
+    log "Sensor CSI esperado (${CAMERA_MODEL_SOURCE}): ${expected_camera}"
+  else
+    log "Sensor CSI esperado (${CAMERA_MODEL_SOURCE}): desconocido"
+  fi
   if [[ ${IS_PI5} -eq 1 ]]; then
     apply_pi5_boot_overlays
+  fi
+  ensure_boot_config_line "camera_auto_detect=1"
+  local skip_overlay
+  skip_overlay="$(printf '%s' "${CAMERA_SKIP_IMX708_OVERLAY}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "${skip_overlay}" =~ ^(1|true|yes)$ ]]; then
+    log_warn "CAMERA_SKIP_IMX708_OVERLAY=${CAMERA_SKIP_IMX708_OVERLAY}: omitiendo dtoverlay=imx708"
+  else
+    local normalized_camera
+    normalized_camera="$(printf '%s' "${expected_camera}" | tr '[:upper:]' '[:lower:]' | tr -d ' _-')"
+    if [[ "${normalized_camera}" == imx708* || "${normalized_camera}" == cameramodule3* ]]; then
+      ensure_boot_config_line "dtoverlay=imx708"
+    elif [[ -z "${normalized_camera}" ]]; then
+      log_warn "No se pudo determinar sensor CSI; omitiendo dtoverlay=imx708"
+    else
+      log "Sensor CSI distinto (${expected_camera}); no se añade dtoverlay=imx708"
+    fi
   fi
   ensure_boot_config_line "dtoverlay=disable-bt"
   ensure_boot_config_line "dtoverlay=hifiberry-dac"
