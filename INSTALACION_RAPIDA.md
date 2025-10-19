@@ -339,6 +339,8 @@ dtoverlay=imx708  # Para Camera Module 3
 sudo reboot
 ```
 
+> ℹ️ El instalador `scripts/install-all.sh` fuerza `camera_auto_detect=1` y añadirá `dtoverlay=imx708` automáticamente cuando detecte un Camera Module 3 (sensor **imx708**). Si vas a emplear otro sensor CSI, exporta `CAMERA_SKIP_IMX708_OVERLAY=1` o define `CAMERA_MODEL=<sensor>` antes de ejecutar el instalador para omitir ese overlay.
+
 **Verificar Camera Module 3:**
 
 ```bash

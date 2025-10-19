@@ -105,6 +105,8 @@ sudo reboot
 libcamera-hello --list-cameras
 ```
 
+> ℹ️ Si utilizas el instalador (`scripts/install-all.sh`), el overlay del **imx708** se aplicará automáticamente cuando se espere un Camera Module 3. Para omitirlo porque usas otro sensor, exporta `CAMERA_SKIP_IMX708_OVERLAY=1` o especifica `CAMERA_MODEL=<sensor>` antes de ejecutar el script.
+
 ### 2. Habilitar Audio I2S (HifiBerry DAC / MAX98357A)
 
 ```bash
