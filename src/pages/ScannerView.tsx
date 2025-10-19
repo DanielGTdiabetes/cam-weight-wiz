@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Camera, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -30,32 +30,46 @@ export const ScannerView = () => {
   const showCountdown = durationMs > 0 || startedAt !== null;
 
   const backendOrigin = useMemo(() => {
+    // 1) Preferir apiUrl de settings persistidos
+    try {
+      const settings = storage.getSettings();
+      const apiUrl = typeof settings?.apiUrl === "string" ? settings.apiUrl.trim() : "";
+      if (apiUrl) return apiUrl;
+    } catch {}
+
+    // 2) Derivar a partir de la URL actual
     if (typeof window === "undefined") {
       return "http://127.0.0.1:8081";
     }
 
     try {
-      const settings = storage.getSettings();
-      const apiUrl = typeof settings.apiUrl === "string" ? settings.apiUrl.trim() : "";
-      if (apiUrl) {
-        return apiUrl;
-      }
-    } catch (error) {
-      console.debug("No se pudo leer apiUrl desde storage", error);
-    }
-
-    try {
       const current = new URL(window.location.href);
-      if (current.port === "8080") {
+      const port = current.port; // cadena o "" si sin puerto explícito
+
+      // Si estamos en miniweb (8080), cambiar a 8081
+      if (port === "8080") {
         current.port = "8081";
         return current.origin;
       }
+
+      // Si estamos en 80, 443 o SIN puerto (nginx estático), forzar 8081
+      if (port === "" || port === "80" || port === "443") {
+        // Mantener protocolo/host, solo fijar puerto 8081
+        current.port = "8081";
+        return current.origin;
+      }
+
+      // Si ya estamos en 8081 u otro puerto explícito, usar tal cual
       return current.origin;
-    } catch (error) {
-      console.warn("No se pudo resolver el origen actual", error);
+    } catch (e) {
+      console.warn("No se pudo resolver el origen actual, fallback 127.0.0.1:8081", e);
       return "http://127.0.0.1:8081";
     }
   }, []);
+
+  useEffect(() => {
+    console.debug("[scanner] backendOrigin =", backendOrigin);
+  }, [backendOrigin]);
 
   const buildUrl = useCallback(
     (path: string) => {
