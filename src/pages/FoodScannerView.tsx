@@ -553,6 +553,43 @@ export const FoodScannerView = () => {
     setIsBackendPreviewing(true);
   }, []);
 
+  const capturePhoto = useCallback(async (): Promise<Blob | null> => {
+    if (!videoRef.current) {
+      return null;
+    }
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return null;
+    }
+
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    if (!width || !height) {
+      return null;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      return null;
+    }
+    context.drawImage(video, 0, 0, width, height);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+    setLastCaptureUrl(dataUrl);
+
+    return await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          captureCacheRef.current = { blob, previewUrl: dataUrl };
+        }
+        resolve(blob);
+      }, "image/jpeg", 0.92);
+    });
+  }, []);
+
   const handleCaptureClick = useCallback(async () => {
     if (captureMode === "backend") {
       if (!isBackendPreviewing && !lastCaptureUrl) {
@@ -591,43 +628,6 @@ export const FoodScannerView = () => {
     startBrowserCamera,
     stopCamera,
   ]);
-
-  const capturePhoto = useCallback(async (): Promise<Blob | null> => {
-    if (!videoRef.current) {
-      return null;
-    }
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return null;
-    }
-
-    const width = video.videoWidth;
-    const height = video.videoHeight;
-    if (!width || !height) {
-      return null;
-    }
-
-    canvas.width = width;
-    canvas.height = height;
-    const context = canvas.getContext("2d");
-    if (!context) {
-      return null;
-    }
-    context.drawImage(video, 0, 0, width, height);
-
-    const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
-    setLastCaptureUrl(dataUrl);
-
-    return await new Promise<Blob | null>((resolve) => {
-      canvas.toBlob((blob) => {
-        if (blob) {
-          captureCacheRef.current = { blob, previewUrl: dataUrl };
-        }
-        resolve(blob);
-      }, "image/jpeg", 0.92);
-    });
-  }, []);
 
   const handleRetake = useCallback(async () => {
     setUploadedFile(null);
