@@ -70,6 +70,7 @@ from backend.routers import food as food_router
 from backend.routes.diabetes import router as diabetes_router, glucose_monitor
 from backend.app.services.settings_service import get_settings_service
 from backend.voice import list_voices as list_piper_voices, router as voice_router
+from backend.voice_ptt import router as voice_ptt_router
 from backend.wake import (
     init_wake_if_enabled,
     router as wake_router,
@@ -1375,6 +1376,7 @@ if enable_wake:
 else:
     LOG_WAKE.info("[wake] Desactivado por configuración (por defecto)")
 
+app.include_router(voice_ptt_router, prefix="/api/voice/ptt", tags=["voice"])
 app.include_router(voice_router)
 app.include_router(wake_router)
 app.include_router(camera_router)
