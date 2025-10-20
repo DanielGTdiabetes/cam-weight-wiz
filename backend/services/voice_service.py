@@ -218,7 +218,11 @@ class VoiceService:
             voice_module = import_module("backend.voice")
             synthesize = getattr(voice_module, "_synthesize_to_file")
             playback = getattr(voice_module, "_play_audio_locally")
-            playback_lock = getattr(voice_module, "_PLAYBACK_LOCK")
+            raw_timeout = getattr(voice_module, "_PLAY_TIMEOUT_S", 10.0)
+            try:
+                playback_timeout = float(raw_timeout)
+            except (TypeError, ValueError):  # pragma: no cover - defensive fallback
+                playback_timeout = 10.0
         except Exception as exc:  # pragma: no cover - unexpected import failure
             logger.exception("VOICE unable to import playback helpers: %s", exc)
             return False
@@ -232,9 +236,8 @@ class VoiceService:
             return False
 
         try:
-            async with playback_lock:
-                await playback(audio_path)
-                logger.info("VOICE played with backend=%s (%s)", backend_used, audio_path)
+            await playback(audio_path, timeout_s=playback_timeout)
+            logger.info("VOICE played with backend=%s (%s)", backend_used, audio_path)
         except Exception:
             logger.exception("VOICE playback failed")
             return False
