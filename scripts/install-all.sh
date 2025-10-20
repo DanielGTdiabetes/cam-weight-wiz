@@ -699,7 +699,7 @@ validate_tts_say() {
   local base_url="${TTS_URL:-http://${host}:${tts_port}/api/voice/tts/synthesize}"
   local text="${TTS_TEXT:-Instalación completada}"
   local voice="${TTS_VOICE:-}"
-  local attempt=0 max_attempts=3 backoff=2 rc=0 http_code tmp backend=""
+  local attempt=0 max_attempts=3 backoff=2 rc=0 http_code tmp_body tmp_headers backend=""
   local encoded_text encoded_voice url
   encoded_text=$(urlencode "${text}")
   url="${base_url}?text=${encoded_text}"
@@ -707,25 +707,22 @@ validate_tts_say() {
     encoded_voice=$(urlencode "${voice}")
     url="${url}&voice=${encoded_voice}"
   fi
-  tmp=$(mktemp)
+  tmp_body=$(mktemp)
+  tmp_headers=$(mktemp)
 
   while (( attempt < max_attempts )); do
     attempt=$((attempt + 1))
     rc=0
     http_code=$(curl -sS \
-      -o "${tmp}" -w '%{http_code}' --max-time 10 \
+      -D "${tmp_headers}" -o "${tmp_body}" -w '%{http_code}' --max-time 10 \
       -X POST -H 'Content-Type: application/x-www-form-urlencoded' \
       "${url}" || rc=$?)
 
     if [[ ${rc} -eq 0 && ( "${http_code}" == "200" || "${http_code}" == "204" ) ]]; then
       SUMMARY_SAY_STATUS="HTTP ${http_code}"
-      if command -v jq >/dev/null 2>&1; then
-        backend=$(jq -r '.backend // empty' "${tmp}" 2>/dev/null || echo "")
-      else
-        backend=$(grep -o '"backend"[^"]*"[^"]*"' "${tmp}" 2>/dev/null | head -n1 | sed -E 's/.*"backend"[^"]*"([^"]*)".*/\1/' || true)
-      fi
+      backend=$(grep -i '^X-TTS-Backend:' "${tmp_headers}" 2>/dev/null | tail -n1 | awk -F':' '{print $2}' | xargs || true)
       SUMMARY_SAY_BACKEND="${backend:-unknown}"
-      rm -f "${tmp}" || true
+      rm -f "${tmp_body}" "${tmp_headers}" || true
       log_ok "TTS say respondió (${SUMMARY_SAY_STATUS})"
       return 0
     fi
@@ -749,7 +746,7 @@ validate_tts_say() {
   journalctl -u piper.service -n 200 --no-pager || true
   echo "---- journalctl (bascula-backend.service) últimas 200 líneas ----"
   journalctl -u bascula-backend.service -n 200 --no-pager || true
-  rm -f "${tmp}" || true
+  rm -f "${tmp_body}" "${tmp_headers}" || true
   return 1
 }
 

@@ -27,7 +27,32 @@ SUPPORTED_UPLOAD_EXTENSIONS = {".webm", ".ogg", ".wav", ".mp3"}
 
 logger = logging.getLogger(__name__)
 
+
+def _read_float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):  # pragma: no cover - defensive parsing
+        logger.warning("Invalid %s value %r; using default %s", name, raw_value, default)
+        return default
+
+
 _PLAYBACK_LOCK = asyncio.Lock()
+_PLAY_TIMEOUT_S = _read_float_env("BASCULA_PLAY_TIMEOUT", 10.0)
+_PLAY_CLEANUP_DELAY_S = _read_float_env("BASCULA_TTS_CLEANUP_DELAY", 15.0)
+
+
+def _unlink_path(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+async def _delayed_unlink(path: Path, delay_s: float) -> None:
+    try:
+        await asyncio.sleep(delay_s)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 class VoiceTranscriptionError(RuntimeError):
@@ -276,12 +301,42 @@ def _synthesize_with_espeak(text: str, output_path: Path) -> None:
         raise RuntimeError(f"espeak_failed: {exc.stderr.decode(errors='ignore').strip()}") from exc
 
 
-async def _play_audio_locally(path: Path) -> None:
+async def _play_audio_locally(
+    path: Path,
+    *,
+    timeout_s: float | None = None,
+    fire_and_forget: bool = False,
+) -> None:
     if not _is_aplay_available():
         return
+
     loop = asyncio.get_running_loop()
-    async with _PLAYBACK_LOCK:
-        await loop.run_in_executor(None, play_audio_file, path)
+
+    async def _run() -> None:
+        async with _PLAYBACK_LOCK:
+            await loop.run_in_executor(None, play_audio_file, path)
+
+    if fire_and_forget:
+        async def _runner() -> None:
+            try:
+                await _run()
+            except Exception as exc:  # pragma: no cover - best effort logging
+                logger.warning("Local playback failed: %s", exc)
+
+        asyncio.create_task(_runner())
+        return
+
+    effective_timeout = timeout_s
+    if effective_timeout is None and _PLAY_TIMEOUT_S > 0:
+        effective_timeout = _PLAY_TIMEOUT_S
+
+    if effective_timeout is not None and effective_timeout <= 0:
+        effective_timeout = None
+
+    if effective_timeout is not None:
+        await asyncio.wait_for(_run(), timeout=effective_timeout)
+    else:
+        await _run()
 
 
 def _synthesize_to_file(text: str, voice: Optional[str]) -> Tuple[Path, str]:
@@ -380,12 +435,12 @@ async def synthesize_tts(
 
     if payload_play_local:
         try:
-            await _play_audio_locally(audio_path)
+            await _play_audio_locally(audio_path, fire_and_forget=True)
         except Exception:
-            # Best-effort playback; ignore errors to still return audio
-            pass
-
-    background = BackgroundTask(lambda: audio_path.unlink(missing_ok=True))
+            logger.warning("Could not start local playback for synthesize.")
+        background = BackgroundTask(_delayed_unlink, audio_path, _PLAY_CLEANUP_DELAY_S)
+    else:
+        background = BackgroundTask(_unlink_path, audio_path)
     filename = f"tts_{backend_used}.wav"
     response = FileResponse(
         audio_path,
@@ -405,8 +460,9 @@ async def say(text: str, voice: Optional[str] = None):
 
     audio_path, backend_used = _synthesize_to_file(text, voice)
     try:
-        await _play_audio_locally(audio_path)
-    finally:
+        await _play_audio_locally(audio_path, fire_and_forget=True)
+        asyncio.create_task(_delayed_unlink(audio_path, _PLAY_CLEANUP_DELAY_S))
+    except Exception:
         audio_path.unlink(missing_ok=True)
 
     return {"ok": True, "backend": backend_used}
