@@ -1887,7 +1887,7 @@ ensure_piper_cli() {
   fi
 
   if ! tar -xzf "${archive}" -C "${tmpdir}"; then
-    rc=$?
+    local rc=$?
     rm -rf "${tmpdir}"
     log_err "Extracción de Piper CLI falló (rc=${rc})"
     exit 1
@@ -2541,7 +2541,7 @@ record_previous() {
   local prev="$1"
   if [[ -n "${prev}" ]]; then
     printf '%s\n' "${prev}" > "${PREV_FILE}"
-    chown pi:pi "${PREV_FILE}" >/dev/null 2>&1 || true
+    chown "${DEFAULT_USER}:${DEFAULT_USER}" "${PREV_FILE}" >/dev/null 2>&1 || true
   fi
 }
 
@@ -2655,7 +2655,7 @@ EOF
   rm -f "${tmp}"
 
   install -d -m 0755 -o root -g root /var/lib/bascula
-  install -d -m 0755 -o pi -g pi /var/lib/bascula/ota-prev
+  install -d -m 0755 -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" /var/lib/bascula/ota-prev
 }
 
 ensure_log_dir() {
@@ -2875,9 +2875,9 @@ EOF
   fi
 
   local tmp="${dropin_file}.tmp"
-  cat >"${tmp}" <<'EOF'
+  cat >"${tmp}" <<EOF
 [Service]
-ExecStartPre=/bin/sh -c 'rm -rf /run/bascula/chrome-profile /run/bascula/chrome-cache; install -d -m0700 -o pi -g pi /run/user/1000'
+ExecStartPre=/bin/sh -c 'rm -rf /run/bascula/chrome-profile /run/bascula/chrome-cache; install -d -m0700 -o ${DEFAULT_USER} -g ${DEFAULT_USER} /run/user/1000'
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 EOF
 
@@ -2898,7 +2898,7 @@ EOF
   # Comprobar bus de sesión
   if ! sudo -u "${DEFAULT_USER}" test -S /run/user/1000/bus; then
     echo "[install][warn] /run/user/1000/bus aún no disponible; creando XDG_RUNTIME_DIR"
-    install -d -m0700 -o pi -g pi /run/user/1000 || true
+    install -d -m0700 -o "${DEFAULT_USER}" -g "${DEFAULT_USER}" /run/user/1000 || true
   fi
 
   systemctl enable bascula-ui.service
