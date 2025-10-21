@@ -10,8 +10,16 @@ Esta guía describe cómo desplegar Báscula Digital Pro en una Raspberry Pi 5 c
 
 ## 2. Preparar el repositorio
 1. Conectar por SSH o consola a la Raspberry Pi.
-2. Copiar el repositorio al directorio deseado (ejemplo: `/home/pi/cam-weight-wiz`).
-3. (Opcional) Actualizar la Pi antes del despliegue:
+2. Instalar Git (si no viene preinstalado en la imagen base):
+   ```bash
+   sudo apt update
+   sudo apt install -y git
+   ```
+3. Clonar el repositorio en el directorio deseado (ejemplo: `/home/pi/cam-weight-wiz`). Sustituye la URL por la de tu fork si corresponde:
+   ```bash
+   git clone https://github.com/tu-organizacion/cam-weight-wiz.git /home/pi/cam-weight-wiz
+   ```
+4. (Opcional) Actualizar la Pi antes del despliegue:
    ```bash
    sudo apt update && sudo apt full-upgrade -y
    sudo reboot
