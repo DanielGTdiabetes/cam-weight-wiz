@@ -7,6 +7,13 @@ import type { AppSettingsUpdate } from "@/services/storage";
 import { logger } from "@/services/logger";
 import { buildAppSettingsUpdateFromBackend } from "@/lib/backendSettings";
 
+const normalizeHostnameForWs = (hostname: string) => {
+  if (hostname.includes(":") && !hostname.startsWith("[") && !hostname.endsWith("]")) {
+    return `[${hostname}]`;
+  }
+  return hostname;
+};
+
 const WS_BASE_URL = (() => {
   if (typeof window !== 'undefined' && window.location?.origin) {
     const loc = window.location;
@@ -14,18 +21,19 @@ const WS_BASE_URL = (() => {
     // For settings sync, always use backend port (8081) not miniweb (8080)
     // This ensures external browsers can sync settings with the main backend
     const hostname = loc.hostname;
+    const normalizedHostname = normalizeHostnameForWs(hostname);
     const port = loc.port;
-    
+
     // If accessing via localhost/127.0.0.1, force backend port
     if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') {
-      return `${scheme}://${hostname}:8081`;
+      return `${scheme}://${normalizedHostname}:8081`;
     }
-    
+
     // For external access, try to determine if we're on port 8080 (miniweb) and switch to 8081
     if (port === '8080') {
-      return `${scheme}://${hostname}:8081`;
+      return `${scheme}://${normalizedHostname}:8081`;
     }
-    
+
     return `${scheme}://${loc.host}`;
   }
   return import.meta.env.VITE_WS_URL || "ws://127.0.0.1:8081";
