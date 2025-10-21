@@ -2,9 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { storage } from "@/services/storage";
 import { resolveApiBaseUrl } from "@/services/apiWrapper";
 
-type Debounced<T extends (...args: any[]) => void> = (...args: Parameters<T>) => void;
+type Debounced<T extends (...args: unknown[]) => void> = (...args: Parameters<T>) => void;
 
-function debounce<T extends (...args: any[]) => void>(fn: T, ms: number): Debounced<T> {
+function debounce<T extends (...args: unknown[]) => void>(fn: T, ms: number): Debounced<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   return (...args: Parameters<T>) => {
     if (timeout) {

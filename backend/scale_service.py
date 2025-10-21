@@ -763,6 +763,18 @@ class HX711Service:
         with self._lock:
             if self._last_filtered_raw is None:
                 return {"ok": False, "reason": "no_data"}
+            
+            # Check if data is recent (within last 3 seconds)
+            if self._last_timestamp is not None:
+                age = time.time() - self._last_timestamp
+                if age > 3.0:
+                    return {"ok": False, "reason": "stale_data"}
+            
+            # Warn if not stable but allow tare anyway
+            if not self._is_stable:
+                LOGGER.warning("Tare performed with unstable reading (variance=%.6f)", 
+                              self._current_variance if self._current_variance is not None else 0.0)
+            
             self._tare_offset = self._last_filtered_raw - self._calibration_offset
             self._median_samples.clear()
             self._var_win = deque(maxlen=self._variance_window)

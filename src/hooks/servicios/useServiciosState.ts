@@ -166,6 +166,16 @@ export const useServiciosState = (): ServiciosStateResult => {
           error: error instanceof Error ? error.message : error,
         });
       }
+    } else if (!shouldRecover && recoveryTriggeredRef.current) {
+      // Reset recovery mode when endpoints recover
+      recoveryTriggeredRef.current = false;
+      try {
+        localStorage.removeItem('recovery_mode');
+      } catch (error) {
+        logger.debug('[ServiciosState] No se pudo limpiar recovery_mode de localStorage', {
+          error: error instanceof Error ? error.message : error,
+        });
+      }
     }
 
     if (countsChanged) {

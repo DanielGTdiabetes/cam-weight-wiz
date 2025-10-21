@@ -165,18 +165,29 @@ class Picamera2Service:
                     if not cameras:
                         raise CameraUnavailableError("No camera detected")
                     LOG_CAMERA.debug("Cámaras detectadas: %s", len(cameras))
-                    temp_camera = None
-                    for _ in range(10):
+                    
+                    # Try to initialize camera with configurable timeout
+                    max_retries = 10
+                    retry_delay = 0.5  # Reduced from 1 second
+                    timeout_deadline = time.time() + 8.0  # Maximum 8 seconds total
+                    
+                    for retry in range(max_retries):
+                        if time.time() >= timeout_deadline:
+                            LOG_CAMERA.warning("Camera initialization timeout after %.1fs", 
+                                             time.time() - (timeout_deadline - 8.0))
+                            break
                         try:
                             info = Picamera2.global_camera_info()
                             if info:
                                 temp_camera = Picamera2()
                                 break
                         except Exception as exc:  # pragma: no cover - hardware specific failure
-                            LOG_CAMERA.debug("Picamera2 todavía no lista: %s", exc)
-                        time.sleep(1)
+                            LOG_CAMERA.debug("Picamera2 not ready (attempt %d/%d): %s", 
+                                           retry + 1, max_retries, exc)
+                        time.sleep(retry_delay)
+                    
                     if temp_camera is None:
-                        raise RuntimeError("No camera detected")
+                        raise RuntimeError("No camera detected after retries")
                     self._properties = dict(getattr(temp_camera, "camera_properties", {}) or {})
                     rotation = self._resolve_rotation(self._properties.get("Rotation"))
                     self._transform = _build_transform(rotation or 0)

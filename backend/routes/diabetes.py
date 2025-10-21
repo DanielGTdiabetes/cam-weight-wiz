@@ -59,8 +59,15 @@ def _parse_entry(raw: Dict[str, object]) -> Optional[Tuple[datetime, float]]:
     dt: Optional[datetime] = None
     if "date" in raw:
         try:
-            timestamp_ms = float(raw["date"]) / 1000.0
-            dt = datetime.fromtimestamp(timestamp_ms, tz=timezone.utc)
+            timestamp_value = float(raw["date"])
+            # Validate timestamp is in reasonable range (milliseconds since epoch)
+            # Valid range: year 2000 to year 2100
+            if 946684800000 <= timestamp_value <= 4102444800000:
+                timestamp_ms = timestamp_value / 1000.0
+                dt = datetime.fromtimestamp(timestamp_ms, tz=timezone.utc)
+            else:
+                logger.warning("Timestamp out of valid range: %f", timestamp_value)
+                dt = None
         except (TypeError, ValueError, OSError):
             dt = None
     if dt is None:
