@@ -69,8 +69,10 @@ def _play_pcm_bytes(pcm_audio: bytes) -> None:
         "-",
     ]
     LOG_AUDIO.info(
-        "[audio] Audio out: %s @44.1kHz stereo (bytes=%d)",
+        "[audio] Audio out: %s @%dHz %s-channel (bytes=%d)",
         device,
+        PLAYBACK_SAMPLE_RATE,
+        PLAYBACK_CHANNELS,
         len(pcm_audio),
     )
     proc = subprocess.run(

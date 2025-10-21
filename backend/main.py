@@ -1433,9 +1433,11 @@ async def websocket_scale(websocket: WebSocket):
             await asyncio.sleep(interval)
 
     except WebSocketDisconnect:
-        active_websockets.remove(websocket)
+        pass  # WebSocket closed normally
     except Exception as exc:
         LOG_SCALE.error("WebSocket error: %s", exc)
+    finally:
+        # Ensure cleanup in all cases
         if websocket in active_websockets:
             active_websockets.remove(websocket)
 
@@ -2889,22 +2891,24 @@ async def check_updates():
             except Exception:
                 current_version = "desconocido"
 
-        # Check GitHub for latest release
-        async with httpx.AsyncClient() as client:
-
-            response = await client.get("https://api.github.com/repos/DanielGTdiabetes/bascula-ui/releases/latest")
+        # Check GitHub for latest release (use correct repository)
+        repo = os.getenv("BASCULA_GITHUB_REPO", "DanielGTdiabetes/cam-weight-wiz")
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(f"https://api.github.com/repos/{repo}/releases/latest")
             if response.status_code == 200:
                 latest = response.json()
                 latest_version = latest.get("tag_name", "")
                 
                 return {
                     "available": latest_version != current_version,
-                    "version": latest_version
+                    "current_version": current_version,
+                    "latest_version": latest_version,
                 }
         
-        return {"available": False}
+        return {"available": False, "current_version": current_version}
     except Exception as e:
-        return {"available": False, "error": str(e)}
+        LOG.error("Error checking for updates: %s", e)
+        return {"available": False, "error": str(e), "current_version": current_version}
 
 def _safe_extract_tar(archive: tarfile.TarFile, destination: Path) -> None:
     """Safely extract a tar archive preventing path traversal and symlinks."""

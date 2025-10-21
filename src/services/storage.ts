@@ -203,17 +203,20 @@ const toScannerHistoryEntry = (value: unknown): ScannerHistoryEntry | null => {
       ? entry.portionWeight
       : 100;
 
+  // Safety check to prevent division by zero
+  const safeReferenceWeight = referenceWeight > 0 ? referenceWeight : 100;
+
   const carbsPer100g = typeof entry.carbsPer100g === 'number'
     ? entry.carbsPer100g
-    : (carbs / referenceWeight) * 100;
+    : (carbs / safeReferenceWeight) * 100;
 
   const proteinsPer100g = typeof entry.proteinsPer100g === 'number'
     ? entry.proteinsPer100g
-    : (proteins / referenceWeight) * 100;
+    : (proteins / safeReferenceWeight) * 100;
 
   const fatsPer100g = typeof entry.fatsPer100g === 'number'
     ? entry.fatsPer100g
-    : (fats / referenceWeight) * 100;
+    : (fats / safeReferenceWeight) * 100;
 
   const kcalPer100g = typeof entry.kcalPer100g === 'number'
     ? entry.kcalPer100g
@@ -551,14 +554,14 @@ class StorageService {
   getSettings(): AppSettings {
     try {
       const stored = localStorage.getItem(SETTINGS_KEY);
-    if (stored) {
-      const parsed = JSON.parse(stored) as AppSettingsUpdate;
-      // Merge with defaults to handle new settings
-      return mergeSettings(DEFAULT_SETTINGS, parsed);
+      if (stored) {
+        const parsed = JSON.parse(stored) as AppSettingsUpdate;
+        // Merge with defaults to handle new settings
+        return mergeSettings(DEFAULT_SETTINGS, parsed);
+      }
+    } catch (error) {
+      console.error('Error loading settings:', error);
     }
-  } catch (error) {
-    console.error('Error loading settings:', error);
-  }
     return cloneSettings(DEFAULT_SETTINGS);
   }
 

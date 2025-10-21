@@ -35,7 +35,9 @@ export const ScannerView = () => {
       const settings = storage.getSettings();
       const apiUrl = typeof settings?.apiUrl === "string" ? settings.apiUrl.trim() : "";
       if (apiUrl) return apiUrl;
-    } catch {}
+    } catch {
+      // Intentionally empty - fall through to next strategy
+    }
 
     // 2) Derivar a partir de la URL actual
     if (typeof window === "undefined") {

@@ -179,12 +179,23 @@ class SerialScaleService:
     def calibrate(self, known_grams: float) -> Dict[str, object]:
         if not self._connected:
             return {"ok": False, "reason": "serial_disconnected"}
+        
+        # Validate and sanitize input to prevent command injection
+        if known_grams <= 0 or not (0.1 <= known_grams <= 100000):
+            return {"ok": False, "reason": "invalid_weight_value"}
+        
         try:
-            ack = self._send_command(f"C:{known_grams}\n", expected_prefix="ACK:C")
+            # Ensure known_grams is a valid float and format safely
+            sanitized_grams = float(known_grams)
+            command = f"C:{sanitized_grams:.2f}\n"
+            ack = self._send_command(command, expected_prefix="ACK:C")
+        except (ValueError, TypeError):
+            return {"ok": False, "reason": "invalid_weight_format"}
         except TimeoutError:
             return {"ok": False, "reason": "ack_timeout"}
         except RuntimeError as exc:
             return {"ok": False, "reason": str(exc)}
+        
         response: Dict[str, object] = {"ok": True}
         if ack and ":" in ack:
             parts = ack.split(":", 2)
